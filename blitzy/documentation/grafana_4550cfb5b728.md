@@ -9,9 +9,9 @@ This document answers four targeted onboarding questions about Grafana's first-r
 3. Health verification — the anatomy of the `/api/health` endpoint
 4. Background service discovery — what starts during the boot sequence
 
-### Methodology
+## Methodology
 
-All answers in this document are derived exclusively from direct inspection of the Grafana source code. No assumptions are made. File paths and line numbers are cited throughout using the format `Source: path/to/file:LineNumber`. Code excerpts are taken verbatim from the repository. JSON response examples are verified against test fixtures in the codebase.
+All answers in this document are derived exclusively from direct inspection of the Grafana source code. No assumptions are made. File paths and line numbers are cited throughout using the format `Source: path/to/file:LineNumber`. Code excerpts are based on the actual repository source, with some inline comments trimmed for clarity and selective omissions marked explicitly. JSON response examples are verified against test fixtures in the codebase.
 
 ---
 
@@ -77,7 +77,7 @@ With these defaults, a fresh Grafana instance will bind to all network interface
 
 With default configuration, the log output looks like:
 
-```
+```text
 INFO[XX-XX|XX:XX:XX] HTTP Server Listen address=0.0.0.0:3000 protocol=http subUrl= socket=
 ```
 
