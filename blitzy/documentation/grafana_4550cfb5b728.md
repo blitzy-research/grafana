@@ -345,6 +345,18 @@ All external OAuth/SSO providers (GitHub, GitLab, Google, Azure AD, Okta, generi
 
 *Source: `conf/defaults.ini:382, 386, 390, 407`*
 
+#### Analytics and Telemetry Defaults
+
+| Setting | Section | Value | Line | Implication |
+|---------|---------|-------|------|-------------|
+| `reporting_enabled` | `[analytics]` | `true` | 258 | Usage statistics reporting **IS** enabled by default |
+| `check_for_updates` | `[analytics]` | `true` | 268 | Grafana checks for new versions on startup |
+| `check_for_plugin_updates` | `[analytics]` | `true` | 275 | Grafana checks for plugin updates on startup |
+
+*Source: `conf/defaults.ini:258, 268, 275`*
+
+**Rationale — Why this matters:** These settings mean a default Grafana instance phones home to `stats.grafana.org` and `grafana.com` for update checks. In air-gapped or security-sensitive environments, these should be disabled via `[analytics] reporting_enabled = false` and `check_for_updates = false`.
+
 #### User Management Defaults
 
 | Setting | Section | Value | Line | Implication |
@@ -405,63 +417,111 @@ graph TD
 
 **Important note:** The `conf/provisioning/` directory is **NOT** under `data/`. It lives at the repository root (configured at `conf/defaults.ini:27` — `provisioning = conf/provisioning`). The provisioning system reads from this directory but does not create state there.
 
+### Logging Defaults
+
+The log directory (`data/log/`) uses dual-mode logging by default: `mode = console file` (`conf/defaults.ini:1071`), meaning log output is sent to both the console (stdout) and rotating log files within `data/log/`. The default log level is `level = info` (`conf/defaults.ini:1074`), which captures informational startup messages, warnings, and errors but suppresses debug-level output.
+
+*Source: `conf/defaults.ini:1071, 1074`*
+
 ### Remote Cache Default
 
 The remote cache defaults to the database backend (`conf/defaults.ini:190` — `type = database`), meaning the caching layer uses the **same SQLite database** rather than requiring Redis or Memcached. This eliminates a dependency for development but means cache operations share I/O with all other database operations.
 
 *Source: `conf/defaults.ini:190`*
 
+### Feature Toggle Defaults
+
+The `[feature_toggles]` section in `conf/defaults.ini` (line 1869) ships with an empty `enable =` line (line 1876), meaning no features are explicitly toggled on via configuration. However, some features are enabled by default through the Go feature registry in `pkg/services/featuremgmt/registry.go`, which defines per-feature default states independently of the INI file. This means a "zero configuration" Grafana instance still has certain features active — their enablement is compiled into the binary rather than driven by configuration.
+
+*Source: `conf/defaults.ini:1869, 1876`*
+
 ### Database Schema — Migration Registry
 
-The SQLite database schema is created by executing all migrations registered in `pkg/services/sqlstore/migrations/migrations.go`. The `AddMigration()` method (lines 31–144) calls over 50 migration functions in sequence. Each function adds one or more table creation and alteration migrations. The first function called is `mg.AddCreateMigration()` (line 32), which creates the `migration_log` table itself — the table that tracks which migrations have been applied.
+The SQLite database schema is created by executing all migrations registered in `pkg/services/sqlstore/migrations/migrations.go`. The `AddMigration()` method (lines 31–144) calls 79 migration functions in sequence (78 unconditional, 1 behind a feature flag). Each function adds one or more table creation and alteration migrations. The first function called is `mg.AddCreateMigration()` (line 32), which creates the `migration_log` table itself — the table that tracks which migrations have been applied.
 
-The complete migration registry (in execution order):
+The complete migration registry (all 79 functions, in execution order):
 
-| Migration Function | Tables Created/Modified | Line |
-|---|---|---|
-| `mg.AddCreateMigration()` | `migration_log` (migration tracking) | 32 |
-| `addUserMigrations(mg)` | `user` | 33 |
-| `addTempUserMigrations(mg)` | `temp_user` | 34 |
-| `addStarMigrations(mg)` | `star` | 35 |
-| `addOrgMigrations(mg)` | `org`, `org_user` | 36 |
-| `addDashboardMigration(mg)` | `dashboard` | 37 |
-| `addDashboardUIDStarMigrations(mg)` | Star UID updates | 38 |
-| `addDataSourceMigration(mg)` | `data_source` | 39 |
-| `addApiKeyMigrations(mg)` | `api_key` | 40 |
-| `addDashboardSnapshotMigrations(mg)` | `dashboard_snapshot` | 41 |
-| `addQuotaMigration(mg)` | `quota` | 42 |
-| `addAppSettingsMigration(mg)` | `app_setting` | 43 |
-| `addSessionMigration(mg)` | `session` | 44 |
-| `addPlaylistMigrations(mg)` | `playlist`, `playlist_item` | 45 |
-| `addPreferencesMigrations(mg)` | `preferences` | 46 |
-| `addAlertMigrations(mg)` | Alert tables | 47 |
-| `addAnnotationMig(mg)` | Annotation tables | 48 |
-| `addTestDataMigrations(mg)` | Test data tables | 49 |
-| `addDashboardVersionMigration(mg)` | `dashboard_version` | 50 |
-| `addTeamMigrations(mg)` | `team`, `team_member` | 51 |
-| `addDashboardACLMigrations(mg)` | `dashboard_acl` | 52 |
-| `addTagMigration(mg)` | `tag` | 53 |
-| `addLoginAttemptMigrations(mg)` | `login_attempt` | 54 |
-| `addUserAuthMigrations(mg)` | `user_auth` | 55 |
-| `addServerlockMigrations(mg)` | `server_lock` | 56 |
-| `addUserAuthTokenMigrations(mg)` | `user_auth_token` | 57 |
-| `addCacheMigration(mg)` | `cache_data` | 58 |
-| `addShortURLMigrations(mg)` | `short_url` | 59 |
-| `ualert.AddTablesMigrations(mg)` | Unified alerting tables | 60 |
-| `addLibraryElementsMigrations(mg)` | `library_element`, `library_element_connection` | 61 |
-| `addSecretsMigration(mg)` | Secrets tables | 64 |
-| `addKVStoreMigrations(mg)` | `kv_store` | 65 |
-| `accesscontrol.AddMigration(mg)` | `permission`, `role` tables | 67 |
-| `addQueryHistoryMigrations(mg)` | Query history tables | 68 |
-| `addCorrelationsMigrations(mg)` | `correlation` | 77 |
-| `addPublicDashboardMigration(mg)` | `dashboard_public` | 81 |
-| `addDbFileStorageMigration(mg)` | File storage tables | 82 |
-| `addFolderMigrations(mg)` | `folder` | 98 |
-| `anonservice.AddMigration(mg)` | Anonymous service tables | 100 |
-| `signingkeys.AddMigration(mg)` | Signing keys tables | 101 |
-| `ssosettings.AddMigration(mg)` | SSO settings tables | 108 |
-| `addCloudMigrationsMigrations(mg)` | Cloud migration tables | 117 |
-| `externalsession.AddMigration(mg)` | External session tables | 141 |
+| # | Migration Function | Tables Created/Modified | Line |
+|---|---|---|---|
+| 1 | `mg.AddCreateMigration()` | `migration_log` (migration tracking) | 32 |
+| 2 | `addUserMigrations(mg)` | `user` | 33 |
+| 3 | `addTempUserMigrations(mg)` | `temp_user` | 34 |
+| 4 | `addStarMigrations(mg)` | `star` | 35 |
+| 5 | `addOrgMigrations(mg)` | `org`, `org_user` | 36 |
+| 6 | `addDashboardMigration(mg)` | `dashboard` | 37 |
+| 7 | `addDashboardUIDStarMigrations(mg)` | Star UID updates | 38 |
+| 8 | `addDataSourceMigration(mg)` | `data_source` | 39 |
+| 9 | `addApiKeyMigrations(mg)` | `api_key` | 40 |
+| 10 | `addDashboardSnapshotMigrations(mg)` | `dashboard_snapshot` | 41 |
+| 11 | `addQuotaMigration(mg)` | `quota` | 42 |
+| 12 | `addAppSettingsMigration(mg)` | `app_setting` | 43 |
+| 13 | `addSessionMigration(mg)` | `session` | 44 |
+| 14 | `addPlaylistMigrations(mg)` | `playlist`, `playlist_item` | 45 |
+| 15 | `addPreferencesMigrations(mg)` | `preferences` | 46 |
+| 16 | `addAlertMigrations(mg)` | Alert tables | 47 |
+| 17 | `addAnnotationMig(mg)` | Annotation tables | 48 |
+| 18 | `addTestDataMigrations(mg)` | Test data tables | 49 |
+| 19 | `addDashboardVersionMigration(mg)` | `dashboard_version` | 50 |
+| 20 | `addTeamMigrations(mg)` | `team`, `team_member` | 51 |
+| 21 | `addDashboardACLMigrations(mg)` | `dashboard_acl` | 52 |
+| 22 | `addTagMigration(mg)` | `tag` | 53 |
+| 23 | `addLoginAttemptMigrations(mg)` | `login_attempt` | 54 |
+| 24 | `addUserAuthMigrations(mg)` | `user_auth` | 55 |
+| 25 | `addServerlockMigrations(mg)` | `server_lock` | 56 |
+| 26 | `addUserAuthTokenMigrations(mg)` | `user_auth_token` | 57 |
+| 27 | `addCacheMigration(mg)` | `cache_data` | 58 |
+| 28 | `addShortURLMigrations(mg)` | `short_url` | 59 |
+| 29 | `ualert.AddTablesMigrations(mg)` | Unified alerting tables | 60 |
+| 30 | `addLibraryElementsMigrations(mg)` | `library_element`, `library_element_connection` | 61 |
+| 31 | `ualert.FixEarlyMigration(mg)` | Unified alerting early migration fix | 63 |
+| 32 | `addSecretsMigration(mg)` | Secrets tables | 64 |
+| 33 | `addKVStoreMigrations(mg)` | `kv_store` | 65 |
+| 34 | `ualert.AddDashboardUIDPanelIDMigration(mg)` | Alerting dashboard UID/panel ID | 66 |
+| 35 | `accesscontrol.AddMigration(mg)` | `permission`, `role` tables | 67 |
+| 36 | `addQueryHistoryMigrations(mg)` | Query history tables | 68 |
+| 37 | `accesscontrol.AddDisabledMigrator(mg)` | Access control disabled state | 70 |
+| 38 | `accesscontrol.AddTeamMembershipMigrations(mg)` | Team membership permissions | 71 |
+| 39 | `accesscontrol.AddDashboardPermissionsMigrator(mg)` | Dashboard permissions | 72 |
+| 40 | `accesscontrol.AddAlertingPermissionsMigrator(mg)` | Alerting permissions | 73 |
+| 41 | `addQueryHistoryStarMigrations(mg)` | Query history star updates | 75 |
+| 42 | `addCorrelationsMigrations(mg)` | `correlation` | 77 |
+| 43 | `addEntityEventsTableMigration(mg)` | Entity events table | 79 |
+| 44 | `addPublicDashboardMigration(mg)` | `dashboard_public` | 81 |
+| 45 | `addDbFileStorageMigration(mg)` | File storage tables | 82 |
+| 46 | `accesscontrol.AddManagedPermissionsMigration(mg, ...)` | Managed permissions | 84 |
+| 47 | `accesscontrol.AddManagedFolderAlertActionsMigration(mg)` | Folder alert action permissions | 85 |
+| 48 | `accesscontrol.AddActionNameMigrator(mg)` | Action name normalization | 86 |
+| 49 | `addPlaylistUIDMigration(mg)` | Playlist UID migration | 87 |
+| 50 | `ualert.UpdateRuleGroupIndexMigration(mg)` | Rule group index update | 89 |
+| 51 | `accesscontrol.AddManagedFolderAlertActionsRepeatMigration(mg)` | Folder alert actions (repeat) | 90 |
+| 52 | `accesscontrol.AddAdminOnlyMigration(mg)` | Admin-only permissions | 91 |
+| 53 | `accesscontrol.AddSeedAssignmentMigrations(mg)` | Seed permission assignments | 92 |
+| 54 | `accesscontrol.AddManagedFolderAlertActionsRepeatFixedMigration(mg)` | Folder alert actions (repeat fix) | 93 |
+| 55 | `accesscontrol.AddManagedFolderLibraryPanelActionsMigration(mg)` | Library panel permissions | 94 |
+| 56 | `AddExternalAlertmanagerToDatasourceMigration(mg)` | External Alertmanager to datasource | 96 |
+| 57 | `addFolderMigrations(mg)` | `folder` | 98 |
+| 58 | `anonservice.AddMigration(mg)` | Anonymous service tables | 100 |
+| 59 | `signingkeys.AddMigration(mg)` | Signing keys tables | 101 |
+| 60 | `ualert.MigrationServiceMigration(mg)` | Alerting migration service state | 103 |
+| 61 | `ualert.CreatedFoldersMigration(mg)` | Alerting created folders tracking | 104 |
+| 62 | `dashboardFolderMigrations.AddDashboardFolderMigrations(mg)` | Dashboard folder migrations | 106 |
+| 63 | `ssosettings.AddMigration(mg)` | SSO settings tables | 108 |
+| 64 | `ualert.CreateOrgMigratedKVStoreEntries(mg)` | Org migration KV store entries | 110 |
+| 65 | `accesscontrol.AddManagedDashboardAnnotationActionsMigration(mg)` | Dashboard annotation permissions *(conditional: behind `FlagAnnotationPermissionUpdate` feature flag)* | 114 |
+| 66 | `addCloudMigrationsMigrations(mg)` | Cloud migration tables | 117 |
+| 67 | `addKVStoreMySQLValueTypeLongTextMigration(mg)` | KV store MySQL value type fix | 119 |
+| 68 | `ualert.AddRuleNotificationSettingsColumns(mg)` | Rule notification settings columns | 121 |
+| 69 | `accesscontrol.AddAlertingScopeRemovalMigration(mg)` | Alerting scope removal | 123 |
+| 70 | `accesscontrol.AddManagedFolderAlertingSilencesActionsMigrator(mg)` | Alerting silences permissions | 125 |
+| 71 | `ualert.AddRecordingRuleColumns(mg)` | Recording rule columns | 127 |
+| 72 | `ualert.AddStateResolvedAtColumns(mg)` | State resolved-at columns | 129 |
+| 73 | `enableTraceQLStreaming(mg, ...)` | TraceQL streaming support | 131 |
+| 74 | `ualert.AddReceiverActionScopesMigration(mg)` | Receiver action scopes | 133 |
+| 75 | `ualert.AddRuleMetadata(mg)` | Rule metadata columns | 135 |
+| 76 | `accesscontrol.AddOrphanedMigrations(mg)` | Orphaned permission cleanup | 137 |
+| 77 | `accesscontrol.AddActionSetPermissionsMigrator(mg)` | Action set permissions | 139 |
+| 78 | `externalsession.AddMigration(mg)` | External session tables | 141 |
+| 79 | `accesscontrol.AddReceiverCreateScopeMigration(mg)` | Receiver create scope permissions | 143 |
 
 *Source: `pkg/services/sqlstore/migrations/migrations.go:31–144`*
 
@@ -599,7 +659,7 @@ The primary development workflow uses the `bra` file watcher:
    - `make gen-jsonnet` — generates jsonnet artifacts
    - `./bin/grafana server -profile -profile-addr=127.0.0.1 -profile-port=6000 -profile-block-rate=1 -profile-mutex-rate=5 -packaging=dev cfg:app_mode=development` — launches the server binary
 
-3. On file changes (`.bra.toml` lines 18–21): bra watches `pkg/`, `public/views/`, `conf/`, and `devenv/dev-dashboards/` for changes to `.go`, `.ini`, `.toml`, and `.template.html` files. On change, it runs `build-go-fast` (faster incremental rebuild) then relaunches the server.
+3. On file changes: bra watches directories `pkg/`, `public/views/`, `conf/`, and `devenv/dev-dashboards/` (`.bra.toml` lines 9–14) for changes to `.go`, `.ini`, `.toml`, and `.template.html` file extensions (line 15). On change, it runs the rebuild commands (lines 18–21): `build-go-fast` (faster incremental rebuild) then relaunches the server.
 
 *Source: `Makefile:232–233`, `.bra.toml:1–22`*
 
@@ -721,7 +781,7 @@ The migrator checks the `migration_log` table to determine which migrations have
 | Condition | First Run | Subsequent Run |
 |-----------|-----------|----------------|
 | `migration_log` table | Does not exist (created by first migration) | Exists with records of all previous migrations |
-| Migrations to execute | **ALL** migrations (~50+ functions creating dozens of tables) | Only **NEW** migrations added since last run (usually zero for same version) |
+| Migrations to execute | **ALL** migrations (79 functions creating dozens of tables) | Only **NEW** migrations added since last run (usually zero for same version) |
 | Duration | Several seconds (creating full schema) | Near-instant (no pending migrations) |
 
 *Source: `pkg/services/sqlstore/sqlstore.go:133–149`, `pkg/services/sqlstore/migrations/migrations.go:31–144`*
@@ -784,7 +844,7 @@ All source files referenced in this document, with their purpose and key section
 
 | File | Purpose | Key Lines Referenced |
 |------|---------|---------------------|
-| `conf/defaults.ini` | All default configuration values | 15, 21, 24, 27, 60, 123, 164, 190, 325, 328, 331, 334, 337, 340, 352, 355, 358, 361, 364, 368, 382, 386, 390, 407, 410, 483, 489, 492, 495, 561, 564, 573, 576, 650, 875, 1071, 1074, 1766, 1876 |
+| `conf/defaults.ini` | All default configuration values | 15, 21, 24, 27, 60, 123, 164, 190, 258, 268, 275, 325, 328, 331, 334, 337, 340, 352, 355, 358, 361, 364, 368, 382, 386, 390, 407, 410, 483, 489, 492, 495, 561, 564, 573, 576, 650, 875, 1071, 1074, 1766, 1869, 1876 |
 | `pkg/server/server.go` | Server lifecycle — Init, Run, Shutdown | 40–56, 58–84, 113–135, 139–179, 176, 205–226, 229–256 |
 | `pkg/services/sqlstore/sqlstore.go` | Database engine creation, migration, admin bootstrap | 56–79, 93–128, 133–149, 153–159, 190–235, 238–340 |
 | `pkg/services/sqlstore/user.go` | Admin user and organization creation logic | 16, 18–32, 42–131, 145–193 |
