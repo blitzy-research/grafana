@@ -163,6 +163,8 @@ const value = matrixValues[columnName][rowName] ?? getSpecialValue(emptyValue);
 
 **Thinking/rationale:** The nullish coalescing operator (`??`) evaluates to the right-hand operand when the left-hand operand is `null` or `undefined`. Since accessing a non-existent key in `matrixValues[columnName]` returns `undefined`, every missing row/column intersection triggers `getSpecialValue(emptyValue)`.
 
+**Note:** The `??` operator also triggers for source data values that are explicitly `null`, not only for missing intersections (which produce `undefined`). If `valueField.values[index]` is `null` for a row/column pair that does exist in the input, `matrixValues[columnName][rowName]` will be `null`, and `null ?? getSpecialValue(emptyValue)` will replace that `null` with the fill value. This means intentional null data points in the source will be overwritten by the fill value. For `SpecialValue.Null`, this is harmless (replacing `null` with `null`), but for `SpecialValue.Empty`, `SpecialValue.False`, or `SpecialValue.True`, intentional nulls in the source data will be silently replaced with `''`, `false`, or `true` respectively, potentially masking real data.
+
 Each output column field inherits the type and config of the value field (lines 129–134):
 
 ```typescript
@@ -708,7 +710,7 @@ For the field C2 with values `[30, <fill>]` from our sparse dataset:
 | `nonNullCount` | `2` | `1` | `2` | `2` |
 | `sum` | `'30'` (string!) | `30` | `30` | `31` |
 | `mean` | `15` (wrong derivation!) | `30` | `15` | `15.5` |
-| `min` | `''` (string!) | `30` | `0` | `1` |
+| `min` | `''` (string!) | `30` | `false` (boolean!) | `true` (boolean!) |
 | `max` | `30` | `30` | `30` | `30` |
 | `allIsNull` | `false` | `false` | `false` | `false` |
 | `allIsZero` | `false` | `false` | `false` | `false` |
@@ -870,15 +872,15 @@ There is no `SpecialValue.Zero` variant. The `getSpecialValue` switch statement 
 
 `SpecialValue.False` is the closest approximation to "missing means zero" because:
 
-1. **`anyToNumber(false)` returns `0`** — The display processor treats it as numeric zero. (Source: `anyToNumber.ts:17-18`)
-2. **`calcs.sum += false` is clean** — JavaScript evaluates `number + false` as `number + 0`, preserving numeric type. (Source: `fieldReducer.ts:508`)
-3. **Threshold evaluation uses value `0`** — The scale calculator processes it through normal numeric thresholds. (Source: `scale.ts:39`)
+1. **`anyToNumber(false)` returns `0`** — The display processor treats it as numeric zero. (Source: `packages/grafana-data/src/utils/anyToNumber.ts:17-18`)
+2. **`calcs.sum += false` is clean** — JavaScript evaluates `number + false` as `number + 0`, preserving numeric type. (Source: `packages/grafana-data/src/transformations/fieldReducer.ts:508`)
+3. **Threshold evaluation uses value `0`** — The scale calculator processes it through normal numeric thresholds. (Source: `packages/grafana-data/src/field/scale.ts:39`)
 
 **However, there are important caveats:**
 
-- **Display text is `'false'`, not `'0'`**: Because `isBoolean(false)` is `true` at displayProcessor.ts line 145, the numeric formatter is skipped and `toString(false)` → `'false'` is used for display text. In a table panel, missing cells show "false" rather than "0".
-- **Missing cells are counted as present**: `false` bypasses the null gate at fieldReducer.ts:489, so `calcs.count` and `calcs.nonNullCount` both include the missing cell. This changes the denominator for mean calculations: `mean = sum / nonNullCount`, where `nonNullCount` includes phantom zeros.
-- **`allIsZero` remains `true` if all real values are also zero**: Unlike `''` (where `'' !== 0` is `true`, forcing `allIsZero = false`), `false !== 0` is also `true` in JavaScript (strict equality), so `allIsZero` will be set to `false` even for `false` fill values. (Source: `fieldReducer.ts:548`)
+- **Display text is `'false'`, not `'0'`**: Because `isBoolean(false)` is `true` (Source: `packages/grafana-data/src/field/displayProcessor.ts:145`), the numeric formatter is skipped and `toString(false)` → `'false'` is used for display text. In a table panel, missing cells show "false" rather than "0".
+- **Missing cells are counted as present**: `false` bypasses the null gate (Source: `packages/grafana-data/src/transformations/fieldReducer.ts:489`), so `calcs.count` and `calcs.nonNullCount` both include the missing cell. This changes the denominator for mean calculations: `mean = sum / nonNullCount`, where `nonNullCount` includes phantom zeros.
+- **`allIsZero` is set to `false` even for boolean fills (despite `false` coercing to 0 in arithmetic)**: Unlike `''` (where `'' !== 0` is `true`, forcing `allIsZero = false`), `false !== 0` is also `true` in JavaScript (strict inequality — different types), so `allIsZero` will be set to `false` even for `false` fill values. (Source: `packages/grafana-data/src/transformations/fieldReducer.ts:548`)
 
 ### 8.3 Practical Recommendations
 
