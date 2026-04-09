@@ -183,14 +183,13 @@ The `fillOrg()` method is where the atomic swap happens:
 1. Creates a **5-second context timeout** to bound the storage query duration.
 2. Calls `ruleBuilder.BuildRules(ctx, orgID)` to fetch all rules from storage — this happens **outside** any lock.
 3. **Acquires the write lock** (`radixMu.Lock()`).
-4. Creates a **fresh tree** with `tree.New()`.
-5. **Populates** the fresh tree with all routes via `AddRoute("/"+ch.Pattern, ch)`.
-6. **Assigns** the new tree to `s.radix[orgID]`, atomically replacing whatever was there before.
-7. **Releases the write lock** via `defer s.radixMu.Unlock()`.
+4. **Assigns** a fresh empty tree to `s.radix[orgID]` via `tree.New()`, replacing whatever was there before.
+5. **Populates** the tree in-place with all routes via `s.radix[orgID].AddRoute("/"+ch.Pattern, ch)`.
+6. **Releases the write lock** via `defer s.radixMu.Unlock()`.
 
 *Source: `pkg/services/live/pipeline/rule_cache_segmented.go:46-60`*
 
-The key coherence insight: The storage query (step 2) runs outside the lock, but tree construction and assignment (steps 4–6) happen under a single write lock hold. Because `AddRoute` is not concurrency-safe, the fresh tree is built **entirely within the write lock** — but since it is a brand-new tree that no reader can see yet, there is no contention with the old tree's readers. The old tree continues serving `RLock`-protected reads until the assignment in step 6 replaces it.
+The key coherence insight: The storage query (step 2) runs outside the lock, but tree assignment and population (steps 4–5) happen under a single write lock hold. Because `AddRoute` is not concurrency-safe, the tree is populated **entirely within the write lock**. The tree is in the map during population, but readers cannot observe it in its partially-populated state because the write lock blocks all concurrent `RLock` acquisitions. Any reader attempting `Get()` during this window will block until the write lock is released, at which point the tree is fully populated. The old tree continues serving any `RLock`-protected reads that were acquired before the write lock was taken.
 
 ### 3.3 Why Readers Never See a Partial Tree
 
@@ -247,8 +246,8 @@ sequenceDiagram
 
         UP->>Cache: Lock() — begin swap
         Note over R1,R2: New RLock attempts block here
-        UP->>Cache: tree.New() + AddRoute for all rules
-        UP->>Cache: radix[orgID] = newTree
+        UP->>Cache: radix[orgID] = tree.New() (empty)
+        UP->>Cache: AddRoute for all rules (in-place)
         UP->>Cache: Unlock() — swap complete
 
         R2->>Cache: Get(orgID, channel) — acquires RLock
@@ -508,10 +507,10 @@ The `stopStream()` method acquires the write lock, removes the stream from both 
 When `runStream()` encounters an error (and the context is not canceled), it marks `isReconnect = true` and re-enters the run loop:
 
 - If the stream ran for less than `streamDurationThreshold` (100ms), it is considered a **fast failure**: `numFastErrors` is incremented and `delay` is calculated via `getDelay()`.
-- `getDelay(numErrors)` computes `coolDownDelay * 2^numErrors`, capped at `maxDelay`:
+- `getDelay(numErrors)` computes `coolDownDelay * 2^numErrors`, capped at `maxDelay`, with a special case: `getDelay(0)` returns `0` (the first reconnection attempt is immediate, since `delay` is computed before `numFastErrors` is incremented):
   - `coolDownDelay = 100ms`
   - `maxDelay = 5s`
-  - So: 100ms → 200ms → 400ms → 800ms → 1.6s → 3.2s → 5s → 5s → ...
+  - So: 0 → 200ms → 400ms → 800ms → 1.6s → 3.2s → 5s → 5s → ...
 - If the stream ran longer than 100ms (a "successful" run), the delay and error counter are reset to zero.
 - On reconnection, a fresh `PluginContext` is resolved to pick up any configuration changes.
 
@@ -708,7 +707,7 @@ On the browser side, `CentrifugeService` manages the WebSocket connection to Gra
 | Frame cache schema detection | `SameSchema()` comparison in `MemoryFrameCache.Update()` | Schema-change-aware publish — full frame on change, data-only otherwise | Per-update check |
 | Stream uniqueness | `registerStream()` duplicate check against `streams` map | No duplicate plugin streams for the same channel | Immediate detection |
 | Stream idle cleanup | `watchStream()` with `presenceTicker` every `checkInterval` | Auto-cleanup of idle streams after `maxChecks` consecutive empty checks | 3 × 5s = 15-second idle threshold |
-| Stream reconnection | Exponential backoff via `getDelay()` in `runStream()` | Resilient reconnection with bounded delay | 100ms base, 5s max delay |
+| Stream reconnection | Exponential backoff via `getDelay()` in `runStream()` | Resilient reconnection with bounded delay | Immediate first retry, 5s max delay |
 | HA channel aggregation | Centrifuge Survey RPC via `CallManagedStreams()` | Cross-node managed channel discovery with deduplication | 1-second timeout |
 | Channel recursion safety | `visitedChannels` map in `processChannelDataList()` / `processChannelFrames()` | No infinite redirect loops in pipeline rule chaining | Immediate detection |
 | Tenant isolation | `orgchannel.PrependOrgID()` / `StripOrgID()` + org validation in `handleOnSubscribe` | No cross-tenant route confusion or channel access | Absolute |
