@@ -703,8 +703,8 @@ Source: `pkg/services/ngalert/state/cache.go:37-55`
 | `"Tick processed"` | Debug | alert_rule.go:332 | Evaluation completed. Fields: `attempt`, `duration` |
 | `"Failed to evaluate rule"` | Error | alert_rule.go:336 | Evaluation attempt failed. Fields: `attempt`, `error` |
 | `"Context has been cancelled while backing off"` | Error | alert_rule.go:339 | Context cancelled during retry delay |
-| `"Skip evaluation and updating the state because the context has been cancelled"` | Error | alert_rule.go:322 | Pre-eval cancellation check |
-| `"Skip updating the state because the context has been cancelled"` | Debug | alert_rule.go:392 | Post-eval cancellation check |
+| `"Skip evaluation and updating the state because the context has been cancelled"` | Error | alert_rule.go:323 | Pre-eval cancellation check |
+| `"Skip updating the state because the context has been cancelled"` | Debug | alert_rule.go:393 | Post-eval cancellation check |
 | `"Clearing the state of the rule because it was updated"` | Info | alert_rule.go:257 | Fingerprint changed → state reset |
 | `"Stopping alert rule routine"` | Debug | alert_rule.go:358 | Goroutine exiting |
 | `"Resetting state of the rule"` | Debug | manager.go:238 | DeleteStateByRuleUID entered |
