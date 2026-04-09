@@ -57,7 +57,7 @@ A state is declared stale when its `LastEvaluationTime` is **at least two full e
 
 ### 1.2 Boundary Behavior from Test Cases
 
-The test suite in `pkg/services/ngalert/state/manager_private_test.go:41-81` validates five boundary conditions:
+The test suite in `pkg/services/ngalert/state/manager_private_test.go:41-82` validates five boundary conditions:
 
 | Test Case | `lastEval` Offset | Expected Result | Reasoning |
 |-----------|-------------------|-----------------|-----------|
@@ -202,7 +202,7 @@ Consider a rule with three series at evaluation tick T:
 
 At T+30s, only Series A reports results. At T+60s, still only Series A reports:
 
-| Series | staleIsStale at T+60s | Action | New State | ResolvedAt Set? | Screenshot? |
+| Series | stateIsStale at T+60s | Action | New State | ResolvedAt Set? | Screenshot? |
 |--------|----------------------|--------|-----------|-----------------|-------------|
 | A | `T + 60 > 60` → false | Normal processing | Still Alerting | N/A | N/A |
 | B | `T + 60 > 60` → false → **STALE** | Force to Normal | Normal (MissingSeries) | **No** (oldState was Normal) | **No** |
@@ -390,7 +390,7 @@ func (st *Manager) updateLastSentAt(states StateTransitions, evaluatedAt time.Ti
 | **36** | **T+1050s** | **1050 - 150 = 900s = 15m = 15m** | **NOT > 15m; still sends** |
 | **37** | **T+1080s** | **1080 - 150 = 930s > 900s = 15m** | **Gate 3 fires: STOP** |
 
-At cycle 37 (T+1080s), `LastEvaluationTime - ResolvedAt = 930s > 900s (15m)`, so Gate 3 returns `false` and sending ceases. This means resolved notifications continue for approximately **15m + one interval** after resolution.
+At cycle 37 (T+1080s), `LastEvaluationTime - ResolvedAt = 930s > 900s (15m)`, so Gate 3 returns `false` and sending ceases. This means the last resolved notification is sent at exactly the **15m boundary** after resolution (cycle 36); the system ceases sending at the next evaluation after 15m (cycle 37).
 
 ### 4.6 Test Verification
 
@@ -648,13 +648,13 @@ The Grafana test suite includes tests that directly validate staleness behavior.
 ```bash
 go test ./pkg/services/ngalert/state/ -run TestStateIsStale -v
 ```
-This runs the 5 boundary test cases from `manager_private_test.go:41-81`, verifying the exact `stateIsStale` threshold.
+This runs the 5 boundary test cases from `manager_private_test.go:41-82`, verifying the exact `stateIsStale` threshold.
 
 **Complete state transition test (including MissingSeries):**
 ```bash
 go test ./pkg/services/ngalert/state/ -run TestProcessEvalResults_StateTransitions -v
 ```
-This exhaustive test at `manager_private_test.go:83+` validates all state transition paths, including transitions where the state reason is `MissingSeries`.
+This exhaustive test at `manager_private_test.go:119+` validates all state transition paths, including transitions where the state reason is `MissingSeries`.
 
 **NeedsSending decision logic:**
 ```bash
@@ -920,8 +920,8 @@ States with `StateReason != ""` are excluded from the active results (line 36-38
 
 | File | Test | Lines | Validates |
 |------|------|-------|-----------|
-| `pkg/services/ngalert/state/manager_private_test.go` | `TestStateIsStale` | 41-81 | Staleness formula boundary conditions |
-| `pkg/services/ngalert/state/manager_private_test.go` | `TestProcessEvalResults_StateTransitions` | 83+ | Exhaustive state transition matrix |
+| `pkg/services/ngalert/state/manager_private_test.go` | `TestStateIsStale` | 41-82 | Staleness formula boundary conditions |
+| `pkg/services/ngalert/state/manager_private_test.go` | `TestProcessEvalResults_StateTransitions` | 119+ | Exhaustive state transition matrix |
 | `pkg/services/ngalert/state/state_test.go` | `TestNeedsSending` | 351-513 | All four NeedsSending gates |
 | `pkg/services/ngalert/state/state_test.go` | `TestShouldTakeImage` | 572-616 | Screenshot decision logic |
 | `pkg/services/ngalert/state/manager_test.go` | `TestStaleResults` | 1846+ | Stale cache removal and ResolvedAt |
