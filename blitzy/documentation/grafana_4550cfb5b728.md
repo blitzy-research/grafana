@@ -101,13 +101,13 @@ sequenceDiagram
     Note over S: Tick 2 (T=30s)
     S->>E: Evaluate rule
     E-->>SM: Results do NOT include Series A
-    SM->>SM: stateIsStale(30s, 0s, 30) → 0+60 > 30 → false
+    SM->>SM: stateIsStale: (0+60).After(30) → true → not stale
     Note right of C: Series A still in cache, not stale
 
     Note over S: Tick 3 (T=60s)
     S->>E: Evaluate rule
     E-->>SM: Results do NOT include Series A
-    SM->>SM: stateIsStale(60s, 0s, 30) → 0+60 > 60 → false → STALE!
+    SM->>SM: stateIsStale: (0+60).After(60) → false → STALE!
     SM->>C: Delete Series A from cache
     SM->>SM: Force state → Normal (MissingSeries)
 ```
@@ -204,9 +204,9 @@ At T+30s, only Series A reports results. At T+60s, still only Series A reports:
 
 | Series | stateIsStale at T+60s | Action | New State | ResolvedAt Set? | Screenshot? |
 |--------|----------------------|--------|-----------|-----------------|-------------|
-| A | `T + 60 > 60` → false | Normal processing | Still Alerting | N/A | N/A |
-| B | `T + 60 > 60` → false → **STALE** | Force to Normal | Normal (MissingSeries) | **No** (oldState was Normal) | **No** |
-| C | `T + 60 > 60` → false → **STALE** | Force to Normal | Normal (MissingSeries) | **No** (oldState was Pending) | **No** |
+| A | lastEval=T+60s: `(T+120).After(T+60)` → true → **not stale** | Normal processing | Still Alerting | N/A | N/A |
+| B | lastEval=T: `(T+60).After(T+60)` → false → **STALE** | Force to Normal | Normal (MissingSeries) | **No** (oldState was Normal) | **No** |
+| C | lastEval=T: `(T+60).After(T+60)` → false → **STALE** | Force to Normal | Normal (MissingSeries) | **No** (oldState was Pending) | **No** |
 
 **Result:** Series B and C are silently removed from the cache. Series A continues normally. Only Alerting→Normal(MissingSeries) transitions generate a `ResolvedAt` timestamp and trigger screenshot capture.
 
