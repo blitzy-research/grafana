@@ -147,8 +147,11 @@ func (ss *SQLStore) ensureMainOrgAndAdminUser(test bool) error {
     err := ss.WithTransactionalDbSession(ctx, func(sess *DBSession) error {
         ss.log.Debug("Ensuring main org and admin user exist")
 
+        // If this is a test database, don't exit early when any user is found.
         if !test {
             var stats stats.SystemUserCountStats
+            // TODO: Should be able to rename "Count" to "count", for more standard SQL style
+            // Just have to make sure it gets deserialized properly into models.SystemUserCountStats
             rawSQL := `SELECT COUNT(id) AS Count FROM ` + ss.dialect.Quote("user")
             if _, err := sess.SQL(rawSQL).Get(&stats); err != nil {
                 return fmt.Errorf("could not determine if admin user exists: %w", err)
@@ -158,6 +161,7 @@ func (ss *SQLStore) ensureMainOrgAndAdminUser(test bool) error {
             }
         }
 
+        // ensure admin user
         if !ss.cfg.DisableInitAdminCreation {
             ss.log.Debug("Creating default admin user")
 
@@ -564,6 +568,9 @@ func (s *Server) Run() error {
             }
             s.log.Debug("Starting background service", "service", serviceName)
             err := service.Run(s.context)
+            // Do not return context.Canceled error since errgroup.Group only
+            // returns the first error to the caller - thus we can miss a more
+            // interesting error.
             if err != nil && !errors.Is(err, context.Canceled) {
                 s.log.Error("Stopped background service", "service", serviceName, "reason", err)
                 return fmt.Errorf("%s run error: %w", serviceName, err)
