@@ -116,7 +116,7 @@ For each rule in the current schedulable set:
 isReadyToRun := item.IntervalSeconds != 0 && (tickNum%itemFrequency)-offset == 0
 ```
 
-Where `offset = jitterOffsetInTicks(item, sch.baseInterval, sch.jitterEvaluations)` (line 315). The jitter strategy (jitter.go:39-57) computes a deterministic offset from the rule's group identity (or rule identity if `JitterByRule` is enabled) using FNV-based fingerprinting.
+Where `offset = jitterOffsetInTicks(item, sch.baseInterval, sch.jitterEvaluations)` (line 315). The jitter strategy (jitter.go:39-57) computes a deterministic offset from the rule's group identity (or rule identity if `JitterByRule` is enabled) using the Grafana Plugin SDK's `data.Labels.Fingerprint()` method (jitter.go:69). Note: this is distinct from the registry's direct FNV-64 (`fnv.New64()`) fingerprinting used for change detection in `registry.go:225`.
 
 6. If ready, add to `readyToRun` slice (lines 328-335), logging `"Rule is ready to run on the current tick"` with `tick`, `frequency`, `offset` (line 329)
 7. If updated but NOT ready for this tick, send an async `Update` notification (lines 336-349), logging `"Rule has been updated. Notifying evaluation routine"` (line 338)
@@ -228,8 +228,8 @@ stateDiagram-v2
     EvalSkipped --> Waiting: Return to select
 
     Waiting --> Stopping: grafanaCtx.Done() fires
-    Stopping --> Cleanup: errors.Is(err, errRuleDeleted) = true
-    Stopping --> Exit: errors.Is(err, errRuleDeleted) = false
+    Stopping --> Cleanup: errors.Is(grafanaCtx.Err(), errRuleDeleted) = true
+    Stopping --> Exit: errors.Is(grafanaCtx.Err(), errRuleDeleted) = false
     Cleanup --> SendExpiry: DeleteStateByRuleUID → expireAndSend
     SendExpiry --> Exit: log "Stopping alert rule routine"
     Exit --> [*]: return nil
@@ -489,7 +489,7 @@ When `processTick()` takes longer than `baseInterval` (e.g., due to slow databas
 7. If this continues, `BehindSeconds` grows monotonically: 12 → 22 → 32 → ...
 
 **Expected log output pattern:**
-```
+```text
 level=debug msg="Alert rules fetched" rulesCount=500 foldersCount=50 updatedRules=10
 level=debug msg="Rule is ready to run on the current tick" tick=T₀ frequency=1 offset=0
 level=debug msg="Rule is ready to run on the current tick" tick=T₀ frequency=1 offset=0
@@ -516,10 +516,10 @@ When a rule's evaluation takes longer than its interval:
 10. Counter: `EvaluationMissed.WithLabelValues(orgID, ruleTitle).Inc()` (schedule.go:380)
 
 **Expected log output:**
-```
+```text
 level=error msg="Failed to evaluate rule" attempt=1 error="server side expressions pipeline returned an error: context deadline exceeded"
 level=debug msg="Tick processed" attempt=2 duration=11.2s
-level=warn  msg="Tick dropped because alert rule evaluation is too slow" org_id=1 uid=ruleA time=T₂ droppedTick=T₁
+level=warn  msg="Tick dropped because alert rule evaluation is too slow" rule_uid=ruleA org_id=1 time=T₂ droppedTick=T₁
 ```
 
 **Observation 3: Retry Sequence Under Data Source Timeout**
@@ -550,13 +550,13 @@ The retry loop structure produces a predictable timing pattern:
 5. `expireAndSend()` sends resolved alerts to Alertmanager (alert_rule.go:476-481)
 
 **Expected log output:**
-```
+```text
 level=debug msg="Resetting state of the rule"
 level=info  msg="Rules state was reset" states=3
 level=debug msg="Stopping alert rule routine"
 ```
 
-### Pattern Analysis
+### Thinking / Rationale — Pattern Analysis
 
 Under stress, the following patterns emerge:
 
@@ -585,7 +585,7 @@ Under normal load (rules complete well within their intervals, no data source ti
 - Ticker metrics show `LastTickTime` advancing at regular `baseInterval` intervals
 
 **Expected normal-load log pattern:**
-```
+```text
 level=debug msg="No changes detected. Skip updating"
 level=debug msg="Rule is ready to run on the current tick" tick=T₀ frequency=1 offset=0
 level=debug msg="Processing tick" version=1 fingerprint=abc123 now=T₀
@@ -610,13 +610,13 @@ level=debug msg="Tick processed" attempt=1 duration=250ms
 | `schedule_query_alert_rules_duration_seconds` | Low (< 100ms) | May spike under database contention |
 | `"Failed to evaluate rule"` logs | **Absent** | **Present**, per retry attempt |
 
-### Timing and Rhythm Analysis
+### Thinking / Rationale — Timing and Rhythm Analysis
 
 **Normal load — "Heartbeat" pattern:**
 
 Ticks arrive and are processed at regular `baseInterval` spacing. The pipeline rhythm is:
 
-```
+```text
 tick T₀ → processTick (50ms) → wait 9.95s → tick T₁ → processTick (50ms) → wait 9.95s → ...
 ```
 
@@ -626,7 +626,7 @@ The dispatch stagger (`step = baseInterval / numRules`) distributes evaluations 
 
 When `processTick()` duration exceeds `baseInterval`, the wait phase collapses:
 
-```
+```text
 tick T₀ → processTick (12s) → tick T₁ immediately waiting → processTick (12s) → tick T₂ immediately waiting → ...
 ```
 
@@ -683,7 +683,7 @@ Source: `pkg/services/ngalert/state/cache.go:37-55`
 
 | Metric Name | Type | Labels | Description |
 |---|---|---|---|
-| `grafana_alerting_alerts` | GaugeFunc | state (normal, alerting, pending, error, nodata) | Count of alert instances in each state. Updated on read from cache. Under stress with timeouts, `error` count may increase. |
+| `grafana_alerting_alerts` | GaugeFunc | state (normal, alerting, pending, error, nodata) | "How many alerts by state are in the scheduler." (cache.go:39). Updated on read from cache. Under stress with timeouts, `error` count may increase. |
 
 ### Key Log Messages Catalog
 
@@ -703,8 +703,8 @@ Source: `pkg/services/ngalert/state/cache.go:37-55`
 | `"Tick processed"` | Debug | alert_rule.go:332 | Evaluation completed. Fields: `attempt`, `duration` |
 | `"Failed to evaluate rule"` | Error | alert_rule.go:336 | Evaluation attempt failed. Fields: `attempt`, `error` |
 | `"Context has been cancelled while backing off"` | Error | alert_rule.go:339 | Context cancelled during retry delay |
-| `"Skip evaluation and updating the state because the context has been cancelled"` | Error | alert_rule.go:323 | Pre-eval cancellation check |
-| `"Skip updating the state because the context has been cancelled"` | Debug | alert_rule.go:393 | Post-eval cancellation check |
+| `"Skip evaluation and updating the state because the context has been cancelled"` | Error | alert_rule.go:322 | Pre-eval cancellation check |
+| `"Skip updating the state because the context has been cancelled"` | Debug | alert_rule.go:392 | Post-eval cancellation check |
 | `"Clearing the state of the rule because it was updated"` | Info | alert_rule.go:257 | Fingerprint changed → state reset |
 | `"Stopping alert rule routine"` | Debug | alert_rule.go:358 | Goroutine exiting |
 | `"Resetting state of the rule"` | Debug | manager.go:238 | DeleteStateByRuleUID entered |
