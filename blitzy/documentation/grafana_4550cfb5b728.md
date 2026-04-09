@@ -373,9 +373,9 @@ The output fields are:
 
 ## 5. Downstream: Display Processing
 
-The display processing pipeline is ultimately driven by `getFieldDisplayValues` (`packages/grafana-data/src/field/fieldDisplay.ts:75`), the primary entry point that panels use to convert raw frame data into renderable `FieldDisplay` objects. At line 125, this function either uses a pre-attached `field.display` processor or constructs one via `getDisplayProcessor`. It then calls this processor for each value in the field's values array (line 138: `display(field.values[j])`), meaning every fill value inserted by the Grouping to Matrix transformation passes through the display processor described below. When panels request aggregated statistics instead of per-row values, `getFieldDisplayValues` delegates to `reduceField` (imported at line 6), which invokes `doStandardCalcs` — the calculation engine analyzed in Section 6.
+The display processing pipeline is ultimately driven by `getFieldDisplayValues` (`packages/grafana-data/src/field/fieldDisplay.ts:75`), the primary entry point that panels use to convert raw frame data into renderable `FieldDisplay` objects. At line 125, this function either uses a pre-attached `field.display` processor or constructs one via `getDisplayProcessor`. It then calls this processor for each value in the field's values array (line 137: `display(field.values[j])`), meaning every fill value inserted by the Grouping to Matrix transformation passes through the display processor described below. When panels request aggregated statistics instead of per-row values, `getFieldDisplayValues` delegates to `reduceField` (imported at line 6), which invokes `doStandardCalcs` — the calculation engine analyzed in Section 6.
 
-> **Source:** `packages/grafana-data/src/field/fieldDisplay.ts:75` (getFieldDisplayValues definition), `packages/grafana-data/src/field/fieldDisplay.ts:125` (getDisplayProcessor invocation), `packages/grafana-data/src/field/fieldDisplay.ts:138` (per-value display call)
+> **Source:** `packages/grafana-data/src/field/fieldDisplay.ts:75` (getFieldDisplayValues definition), `packages/grafana-data/src/field/fieldDisplay.ts:125` (getDisplayProcessor invocation), `packages/grafana-data/src/field/fieldDisplay.ts:137` (per-value display call)
 
 ### 5.1 anyToNumber Coercion
 
@@ -1003,7 +1003,7 @@ packages/grafana-data/src/field/fieldDisplay.ts:75
 packages/grafana-data/src/field/fieldDisplay.ts:125
     — getDisplayProcessor invocation within getFieldDisplayValues
 
-packages/grafana-data/src/field/fieldDisplay.ts:138
+packages/grafana-data/src/field/fieldDisplay.ts:137
     — Per-value display processor call: display(field.values[j])
 
 packages/grafana-data/src/field/scale.ts:19-47
