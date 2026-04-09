@@ -373,6 +373,10 @@ The output fields are:
 
 ## 5. Downstream: Display Processing
 
+The display processing pipeline is ultimately driven by `getFieldDisplayValues` (`packages/grafana-data/src/field/fieldDisplay.ts:75`), the primary entry point that panels use to convert raw frame data into renderable `FieldDisplay` objects. At line 125, this function either uses a pre-attached `field.display` processor or constructs one via `getDisplayProcessor`. It then calls this processor for each value in the field's values array (line 138: `display(field.values[j])`), meaning every fill value inserted by the Grouping to Matrix transformation passes through the display processor described below. When panels request aggregated statistics instead of per-row values, `getFieldDisplayValues` delegates to `reduceField` (imported at line 6), which invokes `doStandardCalcs` — the calculation engine analyzed in Section 6.
+
+> **Source:** `packages/grafana-data/src/field/fieldDisplay.ts:75` (getFieldDisplayValues definition), `packages/grafana-data/src/field/fieldDisplay.ts:125` (getDisplayProcessor invocation), `packages/grafana-data/src/field/fieldDisplay.ts:138` (per-value display call)
+
 ### 5.1 anyToNumber Coercion
 
 The `anyToNumber` function (`packages/grafana-data/src/utils/anyToNumber.ts:8-22`) converts any value to a number, returning `NaN` for values that have no meaningful numeric representation:
@@ -832,7 +836,7 @@ When `value` is `-Infinity`, the comparison `-Infinity >= threshold.value` is al
 | `false` (False) | `0` | `0` | Normal comparison | Normal threshold resolution for value `0` |
 | `true` (True) | `1` | `1` | Normal comparison | Normal threshold resolution for value `1` |
 
-**Practical implication:** With `Empty` or `Null` fills, missing cells always get the base threshold color — the first threshold in the configured threshold steps, or the `FALLBACK_COLOR` of `#808080` (gray) if no thresholds are configured (Source: `packages/grafana-data/src/types/fieldColor.ts:40` and `packages/grafana-data/src/field/thresholds.ts:5`). With `False` fill, missing cells get the threshold color appropriate for value `0`. With `True` fill, missing cells get the threshold color for value `1`. Only `Null` correctly represents "no data" without injecting a phantom numeric value into the threshold evaluation.
+**Practical implication:** With `Empty` or `Null` fills, missing cells always get the base threshold color — the first threshold in the configured threshold steps, or the `FALLBACK_COLOR` of `#808080` (gray) if no thresholds are configured (Source: `packages/grafana-data/src/types/fieldColor.ts:40` for the constant definition; `packages/grafana-data/src/field/fieldColor.ts:9` imports and applies this constant in the field color mode system). The `fallBackThreshold` at `packages/grafana-data/src/field/thresholds.ts:5` uses `FALLBACK_COLOR` as the default threshold color. With `False` fill, missing cells get the threshold color appropriate for value `0`. With `True` fill, missing cells get the threshold color for value `1`. Only `Null` correctly represents "no data" without injecting a phantom numeric value into the threshold evaluation.
 
 > **Source:** `packages/grafana-data/src/field/thresholds.ts:5` (fallBackThreshold definition), `packages/grafana-data/src/field/thresholds.ts:7-23` (getActiveThreshold logic)
 
@@ -990,6 +994,18 @@ packages/grafana-data/src/field/displayProcessor.ts:177-186
 packages/grafana-data/src/field/displayProcessor.ts:188-192
     — Color fallback: scaleFunc(-Infinity) for "no data" color path
 
+packages/grafana-data/src/field/fieldColor.ts:9
+    — Imports FALLBACK_COLOR from types/fieldColor; applies it in the field color mode system
+
+packages/grafana-data/src/field/fieldDisplay.ts:75
+    — getFieldDisplayValues: primary entry point that applies display processors to frame data
+
+packages/grafana-data/src/field/fieldDisplay.ts:125
+    — getDisplayProcessor invocation within getFieldDisplayValues
+
+packages/grafana-data/src/field/fieldDisplay.ts:138
+    — Per-value display processor call: display(field.values[j])
+
 packages/grafana-data/src/field/scale.ts:19-47
     — getScaleCalculator function definition
 
@@ -1115,6 +1131,9 @@ packages/grafana-data/src/transformations/transformers/groupingToMatrix.test.ts:
 
 packages/grafana-data/src/transformations/transformers/groupingToMatrix.test.ts:151-209
     — Test: value type and config preservation (units: 'celsius')
+
+packages/grafana-data/src/types/fieldColor.ts:40
+    — FALLBACK_COLOR constant definition: '#808080' (gray)
 
 packages/grafana-data/src/types/transformations.ts:113-118
     — SpecialValue enum definition: True='true', False='false', Null='null', Empty='empty'
