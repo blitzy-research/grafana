@@ -210,43 +210,41 @@ At T+30s, only Series A reports results. At T+60s, still only Series A reports:
 
 **Result:** Series B and C are silently removed from the cache. Series A continues normally. Only Alerting→Normal(MissingSeries) transitions generate a `ResolvedAt` timestamp and trigger screenshot capture.
 
-### 2.5 Evaluation Timeline: Multi-Series Partial Disappearance
+### 2.5 Alert State Transition Diagram with Stale Branches
+
+The following state machine shows all transitions through the alert states, with stale `MissingSeries` branches converging through the stale detection code path. The intermediate "STALE DETECTION" node represents the `deleteStaleStatesFromCache` processing step (Source: `pkg/services/ngalert/state/manager.go:586-625`), which is distinct from the normal `setNextState` evaluation path. All stale paths unconditionally force the state to Normal with reason `MissingSeries`, but the behavior differs based on the originating state.
 
 ```mermaid
-sequenceDiagram
-    participant Sched as Scheduler
-    participant Eval as Evaluator
-    participant SM as State Manager
-    participant AM as Alertmanager
+stateDiagram-v2
+    [*] --> Normal : Initial state
 
-    Note over Sched: Cycle 1 (T=0s) — All series present
-    Sched->>Eval: Evaluate rule
-    Eval-->>SM: Results: A(Alerting), B(Normal), C(Pending)
-    SM->>SM: Update all LastEval = 0s
+    Normal --> Pending : Condition fires<br/>(For > 0)
+    Normal --> Alerting : Condition fires<br/>(For = 0)
+    Pending --> Alerting : For duration elapsed
+    Alerting --> Normal : Natural resolution
 
-    Note over Sched: Cycle 2 (T=30s) — B and C vanish
-    Sched->>Eval: Evaluate rule
-    Eval-->>SM: Results: A(Alerting) only
-    SM->>SM: Update A LastEval = 30s
-    SM->>SM: staleCheck B: 0+60>30 → NOT stale
-    SM->>SM: staleCheck C: 0+60>30 → NOT stale
+    Normal --> NoData : No data
+    Normal --> Error : Eval error
+    NoData --> Normal : Data returns
+    Error --> Normal : Error clears
 
-    Note over Sched: Cycle 3 (T=60s) — B and C still missing
-    Sched->>Eval: Evaluate rule
-    Eval-->>SM: Results: A(Alerting) only
-    SM->>SM: Update A LastEval = 60s
-    SM->>SM: staleCheck B: 0+60>60 → false → STALE
-    SM->>SM: staleCheck C: 0+60>60 → false → STALE
-    SM->>SM: B: Normal→Normal(MissingSeries) [no ResolvedAt]
-    SM->>SM: C: Pending→Normal(MissingSeries) [no ResolvedAt]
-    Note right of SM: B and C deleted from cache
+    state "STALE DETECTION" as Stale
 
-    Note over Sched: Cycle 4 (T=90s) — Only A remains
-    Sched->>Eval: Evaluate rule
-    Eval-->>SM: Results: A(Alerting) only
-    SM->>SM: A continues normally
-    SM->>AM: Send A (Alerting notification)
-    Note right of AM: B and C: no notification sent<br/>(NeedsSending returns false)
+    Alerting --> Stale : 2×interval missed
+    Pending --> Stale : 2×interval missed
+    Normal --> Stale : 2×interval missed
+    NoData --> Stale : 2×interval missed
+    Error --> Stale : 2×interval missed
+
+    Stale --> Normal : Force Normal(MissingSeries)
+
+    note right of Stale
+        From Alerting: ResolvedAt set,
+        screenshot taken, notification sent.
+        From all others: no ResolvedAt,
+        no screenshot, silent removal.
+        For duration bypassed entirely.
+    end note
 ```
 
 ---
@@ -394,7 +392,7 @@ At cycle 37 (T+1080s), `LastEvaluationTime - ResolvedAt = 930s > 900s (15m)`, so
 
 ### 4.6 Test Verification
 
-The `TestNeedsSending` suite at `pkg/services/ngalert/state/state_test.go:351-513` covers 12 test cases verifying all decision paths:
+The `TestNeedsSending` suite at `pkg/services/ngalert/state/state_test.go:351-513` covers 14 test cases verifying all decision paths:
 
 - **Gate 1 verified**: `"state: pending"` (line 391-397) → returns `false`
 - **Gate 2 verified**: `"state: normal + resolved should send without waiting"` (line 408-418) → returns `true` when `ResolvedAt > LastSentAt`
@@ -660,7 +658,7 @@ This exhaustive test at `manager_private_test.go:119+` validates all state trans
 ```bash
 go test ./pkg/services/ngalert/state/ -run TestNeedsSending -v
 ```
-Runs the 12 test cases from `state_test.go:351-513` covering all four gates.
+Runs the 14 test cases from `state_test.go:351-513` covering all four gates.
 
 **Screenshot decision logic:**
 ```bash
