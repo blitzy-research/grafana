@@ -275,7 +275,8 @@ Two API endpoints were queried on the running Grafana instance:
 
 - `pkg/cmd/grafana/main.go:17` — `var version = "9.2.0"` (the source of truth for the API version string)
 - `pkg/cmd/grafana/main.go:18-21` — `commit`, `enterpriseCommit`, `buildBranch`, `buildstamp` build variables (all overridable via `-X` linker flags)
-- `pkg/cmd/grafana/main.go:34-50` — `MainApp()` function: wires version into CLI app, calls `commands.ServerCommand(version, commit, ...)` and `commands.SetBuildInfo(buildInfo)`
+- `pkg/cmd/grafana/main.go:34-51` — `MainApp()` function: wires version into CLI app via `commands.ServerCommand(version, commit, ...)`
+- `pkg/cmd/grafana/main.go:53-61` — `MainApp()` function continued: constructs `BuildInfo` struct and calls `commands.SetBuildInfo(buildInfo)`
 - `pkg/setting/setting.go` — Build info propagation to settings subsystem, making version available to API handlers
 
 ---
