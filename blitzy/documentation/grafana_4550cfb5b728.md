@@ -351,7 +351,7 @@ The null value is **skipped entirely**. Lines 498 (`count++`), 500–553 (all ca
 | Reducer mean (line 569)                  | Denominator inflated; value diluted toward 0 | Denominator reflects only real data |
 | Display text                             | Empty string (blank cell)                    | Empty string (blank cell)           |
 | Color scale percent                      | Maps to 0% (looks like zero)                 | Maps to 0% but min/max are accurate |
-| Threshold resolution                     | Falls to base threshold via NaN              | Falls to base threshold via NaN     |
+| Threshold resolution                     | Falls to base threshold via `-Infinity` fallback | Falls to base threshold via `-Infinity` fallback |
 
 ### 4.6 Extended Example: Three-Element Array `[1, '', '']`
 
@@ -402,7 +402,7 @@ delta: max! - min!;
 
 When the reducer returns `min = ''` (empty string) and `max = 5`:
 
-- `lodash.isNumber('')` returns `false`, so line 86 check fails and `min` is assigned `''` from `stats[ReducerID.min]`
+- Since `field.config.min` is not configured (undefined), `!isNumber(undefined)` is `true` at line 86, so line 87 assigns `min = stats[ReducerID.min]` which is `''` (the corrupted reducer output)
 - Line 101: `delta = max! - min!` → `5 - ''` → JavaScript's `-` operator invokes `ToNumber('')` = `0` → `delta = 5 - 0 = 5`
 - The scale range becomes `{ min: '', max: 5, delta: 5 }`
 
@@ -431,18 +431,19 @@ return (value: number) => {
 
 For an empty-string cell value that has been converted to `NaN` by `anyToNumber('')`:
 
-- The scale function receives `NaN` (from the display processor)
-- Line 31: `NaN !== -Infinity` → `true` → enters the block
-- Line 32: `percent = (NaN - '') / 5` → `NaN` (any arithmetic with NaN produces NaN)
-- Line 34: `Number.isNaN(NaN)` → `true` → `percent = 0`
-- The cell maps to **0%** on the color scale
+- The display processor's NaN gate at line 144 (`!Number.isNaN(numeric)`) evaluates to `false`, so `scaleFunc(numeric)` at line 167 is **skipped**
+- The fallback at displayProcessor.ts line 189 calls `scaleFunc(-Infinity)` instead
+- In the scale closure: `value !== -Infinity` → `-Infinity !== -Infinity` → `false` → the block is skipped, `percent` stays at `0`
+- `getActiveThresholdForValue(field, -Infinity, 0)` is called at line 39
+- The cell maps to **0%** on the color scale, resolving to the base threshold
 
 ### 5.4 With Null Mode
 
 The reducer excludes nulls, so `min = 5`, `max = 5`, `delta = 0`. The scale range is accurate. For a null cell value converted to `NaN`:
 
-- Line 32: `percent = (NaN - 5) / 0` → `NaN`
-- Line 34: `Number.isNaN(NaN)` → `true` → `percent = 0`
+- The display processor's NaN gate at line 144 (`!Number.isNaN(numeric)`) evaluates to `false`, so `scaleFunc(numeric)` at line 167 is **skipped**
+- The fallback at displayProcessor.ts line 189 calls `scaleFunc(-Infinity)` instead
+- In the scale closure: `value !== -Infinity` → `false` → the block is skipped, `percent` stays at `0`
 
 While the percent output is the same (0), the critical difference is that the **min/max range is accurate**, meaning other cells' percentages are correctly computed. With empty-string corruption, the inflated range (min coerced to 0) distorts percentages for all cells in the field.
 
@@ -580,7 +581,7 @@ For an individual empty-string or null cell displayed in a table:
 3. Falls to `scaleFunc(-Infinity)` at line 189
 4. In the scale closure: `value !== -Infinity` → `false` → `percent = 0`
 5. `getActiveThresholdForValue(field, -Infinity, 0)` is called (line 39 in scale.ts)
-6. In `getActiveThreshold`: `NaN >= threshold.value` is always `false` for any threshold value → active stays as `thresholds[0]` (the base/green threshold)
+6. In `getActiveThreshold`: `-Infinity >= threshold.value` is always `false` for any non-negative threshold value → active stays as `thresholds[0]` (the base/green threshold)
 
 Both fill modes resolve to the **same base threshold** for individual cell display.
 
@@ -614,14 +615,14 @@ export enum SpecialValueMatch {
 
 The `MappingType.SpecialValue` case handles each `SpecialValueMatch` variant:
 
-| Match Type                                  | Condition                                    | Catches `''`? | Catches `null`?    |
-| ------------------------------------------- | -------------------------------------------- | ------------- | ------------------ | --- | ------- |
-| `SpecialValueMatch.Null` (line 72–76)       | `value == null` (loose equality)             | No            | **Yes**            |
-| `SpecialValueMatch.NaN` (line 78–82)        | `typeof value === 'number' && isNaN(value)`  | No            | No                 |
-| `SpecialValueMatch.NullAndNaN` (line 84–88) | `(typeof value === 'number' && isNaN(value)) |               | value == null`     | No  | **Yes** |
-| `SpecialValueMatch.True` (line 90–94)       | `value === true                              |               | value === 'true'`  | No  | No      |
-| `SpecialValueMatch.False` (line 96–100)     | `value === false                             |               | value === 'false'` | No  | No      |
-| `SpecialValueMatch.Empty` (line 102–106)    | `value === ''` (strict equality)             | **Yes**       | No                 |
+| Match Type                                  | Condition                                                        | Catches `''`? | Catches `null`? |
+| ------------------------------------------- | ---------------------------------------------------------------- | ------------- | --------------- |
+| `SpecialValueMatch.Null` (line 72–76)       | `value == null` (loose equality)                                 | No            | **Yes**         |
+| `SpecialValueMatch.NaN` (line 78–82)        | `typeof value === 'number' && isNaN(value)`                      | No            | No              |
+| `SpecialValueMatch.NullAndNaN` (line 84–88) | `(typeof value === 'number' && isNaN(value)) \|\| value == null` | No            | **Yes**         |
+| `SpecialValueMatch.True` (line 90–94)       | `value === true \|\| value === 'true'`                           | No            | No              |
+| `SpecialValueMatch.False` (line 96–100)     | `value === false \|\| value === 'false'`                         | No            | No              |
+| `SpecialValueMatch.Empty` (line 102–106)    | `value === ''` (strict equality)                                 | **Yes**       | No              |
 
 ### 8.3 Practical Advice
 
