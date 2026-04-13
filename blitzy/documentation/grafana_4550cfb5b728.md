@@ -32,7 +32,7 @@ The key background services to consider after startup are:
 
 - **`Server.Run()`** in `pkg/server/server.go` (lines 139–180): This method iterates all registered `BackgroundServiceRegistry` entries and starts each enabled service as a goroutine via `errgroup.Group`. After all services are started, it sends the systemd `READY=1` notification (line 176) and blocks on `childRoutines.Wait()` (line 179).
 
-- **UsageStats** (`pkg/infra/usagestats/service/service.go`): The `Run()` method (lines 56–109) runs a ticker loop. The initial `nextSendInterval` is calculated as the time until the last send plus 24 hours, but is clamped to a minimum of 1 minute (lines 72–74: `if nextSendInterval < time.Minute { nextSendInterval = time.Minute }`). On the first tick, if `readyToReport` is `false`, it resets the ticker to 1 minute and continues (lines 83–87). The `SetReadyToReport()` method (lines 116–118) is invoked externally once startup is complete, logging `"Usage stats are ready to report"` and setting the atomic bool to `true`.
+- **UsageStats** (`pkg/infra/usagestats/service/service.go`): The `Run()` method (lines 56–110) runs a ticker loop. The initial `nextSendInterval` is calculated as the time until the last send plus 24 hours, but is clamped to a minimum of 1 minute (lines 72–74: `if nextSendInterval < time.Minute { nextSendInterval = time.Minute }`). On the first tick, if `readyToReport` is `false`, it resets the ticker to 1 minute and continues (lines 83–87). The `SetReadyToReport()` method (lines 116–118) is invoked externally once startup is complete, logging `"Usage stats are ready to report"` and setting the atomic bool to `true`.
 
 - **Alerting Ticker** (`pkg/util/ticker/ticker.go`): The `T.run()` method (lines 49–76) emits `logger=ticker msg=starting first_tick=...` at startup (line 51), then enters a silent loop emitting time ticks to its channel. It produces no further log output unless the server is shut down (line 75: `logger.Info("stopped", ...)`).
 
@@ -42,7 +42,7 @@ The key background services to consider after startup are:
 
 The server was started (restart against an existing database to isolate idle behavior from migration noise). After startup completed (63 log lines), the line count was recorded and the server was left idle for 90 seconds with no HTTP requests. Only **one new log line** appeared during that window:
 
-```
+```text
 logger=infra.usagestats t=2026-04-13T21:40:45.19144431Z level=info msg="Usage stats are ready to report"
 ```
 
@@ -69,7 +69,7 @@ This is the **only** log entry emitted during the 90-second idle period.
 
 **The only log entry emitted during an idle period of 60+ seconds is:**
 
-```
+```text
 logger=infra.usagestats level=info msg="Usage stats are ready to report"
 ```
 
@@ -101,7 +101,7 @@ The migration system works as follows:
 
 On the first start against a fresh SQLite database, the migrator executed all 626 migrations:
 
-```
+```text
 logger=migrator t=2026-04-13T21:38:06.850607271Z level=info msg="Locking database"
 logger=migrator t=2026-04-13T21:38:06.850623021Z level=info msg="Starting DB migrations"
 logger=migrator t=2026-04-13T21:38:06.850875381Z level=info msg="Executing migration" id="create migration_log table"
@@ -114,7 +114,7 @@ logger=migrator t=2026-04-13T21:38:08.613422151Z level=info msg="migrations comp
 
 On the second start against the same database where all migrations have already been applied:
 
-```
+```text
 logger=migrator t=2026-04-13T21:39:52.997983Z level=info msg="Locking database"
 logger=migrator t=2026-04-13T21:39:52.997997395Z level=info msg="Starting DB migrations"
 logger=migrator t=2026-04-13T21:39:53.004821901Z level=info msg="migrations completed" performed=0 skipped=626 duration=722.783µs
@@ -125,7 +125,7 @@ logger=migrator t=2026-04-13T21:39:53.004987551Z level=info msg="Unlocking datab
 
 **`performed=0 skipped=626`** confirms that all 626 registered migrations already exist in `migration_log`, so the schema is current. No DDL changes were applied. The complete migration check sequence on a restart is:
 
-```
+```text
 logger=migrator msg="Locking database"
 logger=migrator msg="Starting DB migrations"
 logger=migrator msg="migrations completed" performed=0 skipped=626 duration=722.783µs
@@ -134,7 +134,7 @@ logger=migrator msg="Unlocking database"
 
 Additionally, the resource storage migrator shows a similar pattern:
 
-```
+```text
 logger=resource-migrator msg="Locking database"
 logger=resource-migrator msg="Starting DB migrations"
 logger=resource-migrator msg="migrations completed" performed=0 skipped=18 duration=27.121µs
@@ -147,7 +147,7 @@ logger=resource-migrator msg="Unlocking database"
 |---|---|---|---|
 | `pkg/services/sqlstore/migrator/migrator.go` | `RunMigrations()` | 199–239 | Acquires lock, calls `run()`, releases lock |
 | `pkg/services/sqlstore/migrator/migrator.go` | `run()` | 241–291 | Iterates migrations, checks `logMap`, logs completion summary |
-| `pkg/services/sqlstore/migrations/migrations.go` | `AddMigrations()` | — | Registers 626 migrations across 40+ groups |
+| `pkg/services/sqlstore/migrations/migrations.go` | `AddMigration()` | — | Registers 626 migrations across 40+ groups |
 | `pkg/services/sqlstore/sqlstore.go` | — | — | SQLStore initialization, emits `"Connecting to DB"` |
 | `conf/defaults.ini` | `migration_locking` | — | Default: `true` — enables advisory locking |
 
@@ -290,7 +290,7 @@ This is the critical method. Here is the step-by-step flow:
 
 **Resolution chain summary:**
 
-```
+```text
 queryRunner.state.datasource → getDataSourceSrv().get() → setState({ datasource, dsSettings }) → UI picker displays it
 ```
 
@@ -300,7 +300,7 @@ queryRunner.state.datasource → getDataSourceSrv().get() → setState({ datasou
 
 **Output (all 25 tests pass):**
 
-```
+```text
 PASS public/app/features/dashboard-scene/panel-edit/PanelDataPane/PanelDataQueriesTab.test.tsx
   PanelDataQueriesTab
     Adding queries
@@ -491,7 +491,7 @@ This makes the `queries` available via `react-hook-form`'s context to all child 
 
 **Output (all 21 tests pass, 7 snapshots match):**
 
-```
+```text
 PASS public/app/features/alerting/unified/utils/rule-form.test.ts
   formValuesToRulerGrafanaRuleDTO
     ✓ should correctly convert rule form values for grafana alerting rule (4 ms)
