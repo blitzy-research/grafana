@@ -340,17 +340,17 @@ The null value is **skipped entirely**. Lines 498 (`count++`), 500–553 (all ca
 
 ### 4.5 Divergence Summary
 
-| Processing Stage                         | Default `''` (Empty)                         | `null` (Null)                       |
-| ---------------------------------------- | -------------------------------------------- | ----------------------------------- |
-| Transformation output                    | `''` in `FieldType.number` field             | `null` in `FieldType.number` field  |
-| Reducer null check (`== null`, line 489) | **Fails** — treated as valid value           | **Passes** — skipped by `continue`  |
-| Reducer sum (line 508)                   | **Corrupted** via string concatenation       | Unaffected — only real values       |
-| Reducer min/max (lines 535–541)          | `''` coerces to 0, distorts range            | Excluded — real range preserved     |
-| Reducer count (line 498)                 | Incremented (empty string counted)           | Not incremented (skipped)           |
-| Reducer nonNullCount (line 510)          | Incremented                                  | Not incremented                     |
-| Reducer mean (line 569)                  | Denominator inflated; value diluted toward 0 | Denominator reflects only real data |
-| Display text                             | Empty string (blank cell)                    | Empty string (blank cell)           |
-| Color scale percent                      | Maps to 0% (looks like zero)                 | Maps to 0% but min/max are accurate |
+| Processing Stage                         | Default `''` (Empty)                             | `null` (Null)                                    |
+| ---------------------------------------- | ------------------------------------------------ | ------------------------------------------------ |
+| Transformation output                    | `''` in `FieldType.number` field                 | `null` in `FieldType.number` field               |
+| Reducer null check (`== null`, line 489) | **Fails** — treated as valid value               | **Passes** — skipped by `continue`               |
+| Reducer sum (line 508)                   | **Corrupted** via string concatenation           | Unaffected — only real values                    |
+| Reducer min/max (lines 535–541)          | `''` coerces to 0, distorts range                | Excluded — real range preserved                  |
+| Reducer count (line 498)                 | Incremented (empty string counted)               | Not incremented (skipped)                        |
+| Reducer nonNullCount (line 510)          | Incremented                                      | Not incremented                                  |
+| Reducer mean (line 569)                  | Denominator inflated; value diluted toward 0     | Denominator reflects only real data              |
+| Display text                             | Empty string (blank cell)                        | Empty string (blank cell)                        |
+| Color scale percent                      | Maps to 0% (looks like zero)                     | Maps to 0% but min/max are accurate              |
 | Threshold resolution                     | Falls to base threshold via `-Infinity` fallback | Falls to base threshold via `-Infinity` fallback |
 
 ### 4.6 Extended Example: Three-Element Array `[1, '', '']`
