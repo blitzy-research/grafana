@@ -52,7 +52,7 @@ The `ServerCommand()` function (lines 28–44) creates the `cli.Command` for the
 | 3 | 71–76 | Profiling/tracing | Calls `setupProfiling()` and `setupTracing()` from CLI flags |
 | 4 | 78–90 | Panic recovery | Installs a `defer recover()` that logs panics before re-panicking |
 | 5 | 92 | Build info | `SetBuildInfo(opts)` records version/commit/branch metadata |
-| 6 | 93 | Privilege check | `checkPrivileges()` — warns to stderr if running as root (line 166–174) |
+| 6 | 93 | Privilege check | `checkPrivileges()` — prints a warning to stdout if running as root (line 166–174) |
 | 7 | 95 | Config overrides | Splits `ConfigOverrides` string into separate args |
 | 8 | 96–104 | **Config loading** | `setting.NewCfgFromArgs(CommandLineArgs{Config, HomePath, Args})` — **this is where the entire layered configuration pipeline runs** |
 | 9 | 106 | Metrics | `metrics.SetBuildInformation(...)` registers Prometheus build info gauge |
@@ -154,7 +154,7 @@ The `BackgroundService` interface (lines 25–30) requires only a `Run(ctx conte
 1. Sets `HomePath` via `setHomePath(args)` (line 1047)
 2. Sets `ZONEINFO` env var for timezone database (lines 1050–1055)
 3. Calls `loadConfiguration(args)` — **the core pipeline** (line 1057)
-4. Calls `parseINIFile(iniFile)` to extract all settings into struct fields (line 1060+)
+4. Calls `parseINIFile(iniFile)` to extract all settings into struct fields (line 1062)
 
 #### The Core Config Pipeline: `loadConfiguration()` — Lines 881–943
 
@@ -186,9 +186,9 @@ All values below are verified directly from `conf/defaults.ini`:
 | Section | Key | Default Value | Impact |
 |---------|-----|---------------|--------|
 | `[paths]` (line 15) | `data` | `data` | Data directory relative to HomePath |
-| `[paths]` (line 22) | `logs` | `data/log` | Log directory |
-| `[paths]` (line 25) | `plugins` | `data/plugins` | External plugins directory |
-| `[paths]` (line 28) | `provisioning` | `conf/provisioning` | Provisioning config directory |
+| `[paths]` (line 21) | `logs` | `data/log` | Log directory |
+| `[paths]` (line 24) | `plugins` | `data/plugins` | External plugins directory |
+| `[paths]` (line 27) | `provisioning` | `conf/provisioning` | Provisioning config directory |
 | `[server]` (line 32) | `protocol` | `http` | HTTP protocol (not HTTPS) |
 | `[server]` (line 38) | `http_addr` | _(empty)_ | Binds to all interfaces (0.0.0.0) |
 | `[server]` (line 41) | `http_port` | `3000` | Default listening port |
@@ -205,10 +205,10 @@ All values below are verified directly from `conf/defaults.ini`:
 | `[auth]` (line 564) | `disable_login` | `false` | Built-in login enabled |
 | `[auth]` (line 576) | `disable_login_form` | `false` | Login form shown |
 | `[auth]` (line 561) | `login_cookie_name` | `grafana_session` | Session cookie name |
-| `[auth.anonymous]` (line 648) | `enabled` | `false` | Anonymous access disabled |
+| `[auth.anonymous]` (line 650) | `enabled` | `false` | Anonymous access disabled |
 | `[auth.anonymous]` | `org_name` | `Main Org.` | Default org for anonymous users |
 | `[auth.anonymous]` | `org_role` | `Viewer` | Default role for anonymous users |
-| `[remote_cache]` (line 188) | `type` | `database` | Cache type defaults to database |
+| `[remote_cache]` (line 190) | `type` | `database` | Cache type defaults to database |
 
 ---
 
@@ -464,7 +464,7 @@ All values verified directly from `conf/defaults.ini` with line numbers:
 | Admin password | `[security] admin_password` | `admin` | 331 | **Well-known** default credential — must be changed |
 | Admin email | `[security] admin_email` | `admin@localhost` | 334 | Default placeholder email |
 | Initial admin creation | `[security] disable_initial_admin_creation` | `false` | 325 | Admin user **IS** created automatically |
-| Anonymous access | `[auth.anonymous] enabled` | `false` | 648 | Anonymous access is **DISABLED** |
+| Anonymous access | `[auth.anonymous] enabled` | `false` | 650 | Anonymous access is **DISABLED** |
 | Built-in login | `[auth] disable_login` | `false` | 564 | Built-in login is **ENABLED** |
 | Login form | `[auth] disable_login_form` | `false` | 576 | Login form is **SHOWN** |
 | Brute-force protection | `[security] disable_brute_force_login_protection` | `false` | 352 | Brute-force protection is **ENABLED** |
@@ -490,7 +490,7 @@ On a clean install, the **ONLY active authentication method** is built-in userna
 - **JWT** — requires `[auth.jwt] enabled = true`
 - **Auth Proxy** — requires `[auth.proxy] enabled = true`
 - **SAML** — enterprise-only, requires explicit configuration
-- **Anonymous access** — `[auth.anonymous] enabled = false` (line 648)
+- **Anonymous access** — `[auth.anonymous] enabled = false` (line 650)
 
 **Rationale:** The security defaults favor a "secure by default" posture for authentication. A clean install exposes only the login form with username/password authentication. However, the default admin credentials (`admin`/`admin`) represent a known weakness that must be changed immediately in production.
 
@@ -658,6 +658,8 @@ Errors at any stage cause the individual plugin to be skipped (recorded in the e
 
 The `pluginstore.ProvideService()` (from `pkg/services/pluginsintegration/pluginstore/store.go`, lines 32–53) orchestrates this by iterating all sources from `pluginSources.List(ctx)` and calling `pluginLoader.Load(ctx, ps)` for each source.
 
+**Rationale:** The plugin architecture uses a multi-source, multi-stage design so that core plugins (compiled into the frontend static assets), bundled plugins (shipped alongside but separately from the core), and external plugins (installed by users) all flow through the same discovery-bootstrap-validation-initialization pipeline. This uniform pipeline ensures that all plugins — regardless of origin — undergo the same signature verification and compatibility checks. The `List()` method in `sources.go` establishes a fixed evaluation order (core → bundled → external → plugin-settings) so that core plugins are always discovered first and cannot be overridden by external plugins with conflicting IDs. On a clean first run, only the 54 core plugins are discovered since the bundled manifest is empty and no external plugins have been installed.
+
 ---
 
 ## 7. Background Service Lifecycle
@@ -729,7 +731,7 @@ for _, svc := range services {
 | Aspect | First Run | Subsequent Run |
 |--------|-----------|----------------|
 | **migration_log table** | Created by `mg.AddCreateMigration()` (first migration) | Already exists |
-| **Migration check** | All 79 migration groups execute; each records its ID in `migration_log` | Migrator reads `migration_log`, finds all previously applied migrations, **skips them** |
+| **Migration check** | Up to 79 migration groups execute (78 unconditional + 1 conditional on `FlagAnnotationPermissionUpdate`); each records its ID in `migration_log` | Migrator reads `migration_log`, finds all previously applied migrations, **skips them** |
 | **New migrations** | N/A | Only newly added migrations (from version upgrades) execute |
 | **Table creation** | All tables created from scratch | Tables already exist, skipped |
 
@@ -750,12 +752,14 @@ for _, svc := range services {
 | Behavior | First Run | Subsequent Run |
 |----------|-----------|----------------|
 | SQLite file `data/grafana.db` | **Created** with permission 0640 | Verified; permissions checked |
-| Database migrations | **All 79 groups execute**; tables created | Only new migrations run; `migration_log` consulted |
+| Database migrations | **Up to 79 groups execute** (78 unconditional + 1 conditional on `FlagAnnotationPermissionUpdate`); tables created | Only new migrations run; `migration_log` consulted |
 | Admin user (`admin`/`admin`) | **Created** with hashed password | **Skipped** (user count > 0) |
 | Main Org. (`"Main Org."`, ID=1) | **Created** | **Skipped** |
 | `migration_log` entries | **Populated** with all migration IDs | Consulted; updated only for new migrations |
 | Provisioning | Scans `conf/provisioning/` YAML files (all commented-out samples) | Same behavior — re-scans provisioning files |
 | Plugin discovery | Discovers 54 core plugins + empty bundled/external | Same behavior — re-discovers all plugins |
+
+**Rationale:** The behavioral differences between first-run and subsequent-run are deliberately minimal — Grafana is designed so that restart is safe and idempotent. The three key idempotency mechanisms are: (1) the user-count check in `ensureMainOrgAndAdminUser()` (line 200–204 of `sqlstore.go`), which gates admin/org creation on whether any user already exists; (2) the `migration_log` table, which records every applied migration by its unique string ID so that already-applied migrations are skipped on subsequent runs; and (3) the SQLite file-existence check in `initEngine()` (line 258), which switches from creation mode to verification mode. These three gates ensure that a restart never duplicates users, re-applies migrations, or overwrites the database file — making the startup sequence safe to repeat without data corruption or side effects.
 
 ---
 
