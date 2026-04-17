@@ -75,6 +75,15 @@ Key verified findings:
   `Expression: "true"`; these are enabled by default without any configuration. The startup log
   lists exactly 56 toggles as enabled.
 
+- **Unified alerting.** `conf/defaults.ini` leaves `[unified_alerting] enabled =` empty.
+  `pkg/setting/setting_unified_alerting.go:readUnifiedAlertingEnabledSetting` treats an empty
+  value as `util.Pointer(true)`, and `IsEnabled()` returns `true`, so the scheduler, state
+  manager, and multi-org Alertmanager all start automatically.
+
+- **First vs. subsequent run.** On the second run, the startup log collapses from 1356 to 58
+  lines; `migrations completed performed=0 skipped=626` replaces per-migration logging; no
+  `Created default admin` line is emitted (user count > 0); and the SQLite file is reused.
+
 ## 2. Methodology and Verification Approach
 
 Every claim in this document is backed either by direct source code inspection with explicit
@@ -159,19 +168,6 @@ Representative HTTP endpoints were exercised while the server was running:
 
 All behavior in this document was observed against the binary built from the tree on branch
 `grafana_4550cfb5b728` and has not been extrapolated from other Grafana versions or documentation.
-
----
-
-
-- **Unified alerting.** `conf/defaults.ini` leaves `[unified_alerting] enabled =` empty.
-  `pkg/setting/setting_unified_alerting.go:readUnifiedAlertingEnabledSetting` treats an empty
-  value as `util.Pointer(true)`, and `IsEnabled()` returns `true`, so the scheduler, state
-  manager, and multi-org Alertmanager all start automatically.
-
-- **First vs. subsequent run.** On the second run, the startup log collapses from 1356 lines to
-  58 lines. `migrations completed performed=0 skipped=626` replaces per-migration logging; no
-  `Created default admin` line is emitted because the user count is already greater than zero;
-  and the SQLite file is reused.
 
 ---
 
@@ -284,7 +280,7 @@ fail at runtime with `not compatible with your Grafana version: 9.2.0`.
 
 `pkg/cmd/grafana-server/commands/cli.go:ServerCommand` (line 28) registers a `cli.Command` with
 `Flags: commonFlags` and `Action: func(context) error { return RunServer(opts, context) }`.
-`commonFlags` is defined in `flags.go:28-109` and lists twelve flags: `--config`, `--homepath`,
+`commonFlags` is defined in `flags.go:28-109` and lists fourteen flags: `--config`, `--homepath`,
 `--pidfile`, `--packaging` (default `"unknown"`), `--configOverrides`, `--version`/`-v`, `--vv`,
 `--profile`, `--profile-addr` (default `"localhost"`), `--profile-port` (default `6060`),
 `--profile-block-rate` (default `1`), `--profile-mutex-rate`, `--tracing`, `--tracing-file`
@@ -423,7 +419,7 @@ spawned goroutines exit, which in practice happens when a signal is caught by
 ### 4.6 Background Services Registered
 
 `pkg/registry/backgroundsvcs/background_services.go:ProvideBackgroundServiceRegistry`
-(lines 53–118) accepts 37 concrete services plus 13 interface-typed parameters marked with `_`
+(lines 53–118) accepts 36 concrete services plus 15 interface-typed parameters marked with `_`
 for pure construction ordering. The services appended to the returned
 `BackgroundServiceRegistry.Services` slice in `NewBackgroundServiceRegistry(...)` include:
 
@@ -495,11 +491,11 @@ The inspected defaults that drive every observable first-run behavior:
 | `server` | `http_addr` | (empty) | 38 | Binds `[::]` |
 | `server` | `http_port` | `3000` | 41 | `HTTP Server Listen address=[::]:3000` |
 | `server` | `static_root_path` | `public` | 60 | Checked by `validateStaticRootPath` (soft check) |
-| `server` | `enable_gzip` | `false` | 65 | Responses not gzipped by default |
-| `database` | `type` | `sqlite3` | 98 | `Connecting to DB dbtype=sqlite3` |
-| `database` | `host` | `127.0.0.1:3306` | 101 | Unused (SQLite) |
-| `database` | `name` | `grafana` | 104 | Unused (SQLite) |
-| `database` | `path` | `grafana.db` | 139 | SQLite file under `DataPath` → `data/grafana.db` |
+| `server` | `enable_gzip` | `false` | 63 | Responses not gzipped by default |
+| `database` | `type` | `sqlite3` | 123 | `Connecting to DB dbtype=sqlite3` |
+| `database` | `host` | `127.0.0.1:3306` | 124 | Unused (SQLite) |
+| `database` | `name` | `grafana` | 125 | Unused (SQLite) |
+| `database` | `path` | `grafana.db` | 164 | SQLite file under `DataPath` → `data/grafana.db` |
 | `remote_cache` | `type` | `database` | 190 | Uses primary SQLite DB as cache |
 | `security` | `disable_initial_admin_creation` | `false` | 325 | Admin creation enabled → user=admin created |
 | `security` | `admin_user` | `admin` | 328 | `Created default admin user=admin` |
@@ -527,13 +523,13 @@ With `--homepath=.` and the process CWD being the repository root, the effective
 
 | Logical | Value | Absolute (this run) |
 |---|---|---|
-| Home | `.` | `/tmp/blitzy/grafana/blitzy-…/` |
-| Data | `data` | `/tmp/blitzy/grafana/blitzy-…/data` |
-| Logs | `data/log` | `/tmp/blitzy/grafana/blitzy-…/data/log` |
-| Plugins | `data/plugins` | `/tmp/blitzy/grafana/blitzy-…/data/plugins` (absent → error) |
-| Provisioning | `conf/provisioning` | `/tmp/blitzy/grafana/blitzy-…/conf/provisioning` |
-| Static root | `public` | `/tmp/blitzy/grafana/blitzy-…/public` |
-| Bundled plugins | `plugins-bundled` (configured elsewhere) | `/tmp/blitzy/grafana/blitzy-…/plugins-bundled` |
+| Home | `.` | `<repo_root>/` |
+| Data | `data` | `<repo_root>/data` |
+| Logs | `data/log` | `<repo_root>/data/log` |
+| Plugins | `data/plugins` | `<repo_root>/data/plugins` (absent → error) |
+| Provisioning | `conf/provisioning` | `<repo_root>/conf/provisioning` |
+| Static root | `public` | `<repo_root>/public` |
+| Bundled plugins | `plugins-bundled` (configured elsewhere) | `<repo_root>/plugins-bundled` |
 
 The log emits explicit `Path Home path=.`, `Path Data path=data`, `Path Logs path=data/log`,
 `Path Plugins path=data/plugins`, `Path Provisioning path=conf/provisioning` lines at startup.
@@ -784,7 +780,7 @@ operator overrides these via `GF_SECURITY_ADMIN_USER` / `GF_SECURITY_ADMIN_PASSW
 environment variables, a custom `conf/custom.ini`, or a secret-management provisioning
 mechanism before the first run.
 
-### 7.2 `conf/defaults.ini` `[security]` Section (lines 323-420)
+### 7.2 `conf/defaults.ini` `[security]` Section (lines 323-418)
 
 The full set of security defaults driving first-run behavior:
 
@@ -1192,7 +1188,7 @@ environment and flips a flag). The authoritative compile-time set remains the 56
 
 ### 10.3 Background Services Registered (`pkg/registry/backgroundsvcs/background_services.go`)
 
-`ProvideBackgroundServiceRegistry` (lines 53–118) accepts 37 explicit services and 13
+`ProvideBackgroundServiceRegistry` (lines 53–118) accepts 36 explicit services and 15
 additional interface parameters used for construction-order side effects. The registered
 services appended into `BackgroundServiceRegistry.Services` are listed in Section 4.6.
 
@@ -1464,7 +1460,7 @@ With no `conf/custom.ini`, no `GF_*` environment variables, and no CLI flags bey
 7. Attempts — and fails — to preinstall `grafana-lokiexplore-app` (Section 8.5).
 8. Runs `RunInitProvisioners` over datasources, plugins, and alerting (Section 9.1) — all
    no-ops because every sample YAML is commented.
-9. Starts 37 background services including the HTTP server, unified alerting scheduler,
+9. Starts 36 background services including the HTTP server, unified alerting scheduler,
    multi-org Alertmanager, storage service, update checkers, and angular detectors (Section 4.6,
    10.3).
 10. Binds `[::]:3000` for HTTP traffic.
@@ -1601,7 +1597,7 @@ All line numbers refer to the state of the repository at branch `grafana_4550cfb
 
 | File | Key Symbols / Lines |
 |---|---|
-| `conf/defaults.ini` | Lines 7 (`app_mode`), 15–27 (`[paths]`), 32–65 (`[server]`), 98–139 (`[database]`), 190 (`[remote_cache]`), 323–420 (`[security]`), 559–630 (`[auth]`), 648–656 (`[auth.anonymous]`), 1222 (`[unified_alerting] enabled`), 1876 (`[feature_toggles] enable`) |
+| `conf/defaults.ini` | Lines 7 (`app_mode`), 15–27 (`[paths]`), 32–63 (`[server]`), 118–187 (`[database]`), 190 (`[remote_cache]`), 323–418 (`[security]`), 559–630 (`[auth]`), 648–656 (`[auth.anonymous]`), 1222 (`[unified_alerting] enabled`), 1876 (`[feature_toggles] enable`) |
 | `Makefile` | Line 5 (`WIRE_TAGS = "oss"`), lines 166–169 (`gen-go`), line 187 (`build-go`) |
 | `go.mod` | Line 3 (`go 1.23.1`) |
 | `.nvmrc` | `v22.11.0` |
