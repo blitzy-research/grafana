@@ -54,7 +54,7 @@ This section walks through every line of the transformation source that determin
 
 ### 2.1 The default-fill constant
 
-**File**: `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts` (191 lines total)
+**File**: `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts` (190 lines total)
 
 **Line 26** defines the constant used whenever the UI option is not supplied:
 
@@ -605,7 +605,7 @@ Section 5 established that the reducer is the site of the semantic shift. This s
 
 ### 6.1 `anyToNumber` — the display-layer collapse
 
-**File:** `packages/grafana-data/src/utils/anyToNumber.ts` (23 lines total).
+**File:** `packages/grafana-data/src/utils/anyToNumber.ts` (22 lines total).
 
 The complete function body is:
 
@@ -620,7 +620,7 @@ export function anyToNumber(value: unknown): number {
     return NaN;
   }
   if (typeof value === 'boolean') {
-    return +value; // true -> 1, false -> 0
+    return value ? 1 : 0; // true -> 1, false -> 0
   }
   return toNumber(value); // lodash.toNumber
 }
@@ -766,10 +766,16 @@ Under `emptyValue = Null` with `NullValueMode.Ignore`:
 export const fallBackThreshold: Threshold = { value: 0, color: FALLBACK_COLOR };
 
 // thresholds.ts:7
-export function getActiveThreshold(value: number, thresholds: Threshold[]): Threshold {
-  // ...
-  let active = fallBackThreshold;
-  // thresholds.ts:14
+export function getActiveThreshold(value: number, thresholds: Threshold[] | undefined): Threshold {
+  // thresholds.ts:8–10 — empty/undefined guard
+  if (!thresholds || thresholds.length === 0) {
+    return fallBackThreshold;
+  }
+
+  // thresholds.ts:12 — initialize to the lowest configured step, NOT to fallBackThreshold
+  let active = thresholds[0];
+
+  // thresholds.ts:14–20
   for (const threshold of thresholds) {
     if (value >= threshold.value) {
       active = threshold;
@@ -777,17 +783,38 @@ export function getActiveThreshold(value: number, thresholds: Threshold[]): Thre
       break;
     }
   }
+
   return active;
+}
+
+// thresholds.ts:25–33 — dispatcher used by scale.ts
+export function getActiveThresholdForValue(field: Field, value: number, percent: number): Threshold {
+  const { thresholds } = field.config;
+  if (thresholds?.mode === ThresholdsMode.Percentage) {
+    return getActiveThreshold(percent * 100, thresholds?.steps);
+  }
+  return getActiveThreshold(value, thresholds?.steps);
 }
 ```
 
 **Trace per fill-value arriving at the threshold evaluator:**
 
-The display processor passes `numeric` (the result of `anyToNumber(value)`) through to threshold logic. For `''` and `null`, `numeric = NaN`. Because `NaN >= anything` is always `false`, the first iteration of the `for` loop at line 14 takes the `else break` path immediately, and `active` remains `fallBackThreshold`.
+The flow for an `''`- or `null`-filled cell is subtler than "NaN is compared against thresholds" — in fact, `NaN` never reaches `getActiveThreshold` for these cells. The actual path is:
 
-`fallBackThreshold` (line 5) has `value: 0` and `color: FALLBACK_COLOR`. `FALLBACK_COLOR` is defined as the theme's default gray. Missing-intersection cells therefore always render in the fallback color — they never climb the user-configured threshold ladder (e.g., `red >= 80`, `yellow >= 50`, `green >= 0` is flattened to the gray fallback, not `green` as a naive reading might suggest).
+1. `anyToNumber('')` and `anyToNumber(null)` both return `NaN` (Section 6.1).
+2. In `displayProcessor.ts:144`, the `if (!Number.isNaN(numeric))` gate is **false** for these cells, so the numeric-formatting block (which includes the `scaleFunc(numeric)` call at line 167) is skipped entirely.
+3. Control falls through to `displayProcessor.ts:188–192`, where the "no color yet" branch calls **`scaleFunc(-Infinity)`** — not `scaleFunc(NaN)`. The literal `-Infinity` is passed regardless of the original value's type.
+4. Inside the closure returned by `getScaleCalculator` (`scale.ts:28–46`), the guard `if (value !== -Infinity)` at line 31 is **false**, so `percent` stays at its initial value of `0` (line 29). `scale.ts:39` then calls `getActiveThresholdForValue(field, -Infinity, 0)`.
+5. `getActiveThresholdForValue` (`thresholds.ts:25–33`) dispatches on `ThresholdsMode`. In the default **absolute** mode it calls `getActiveThreshold(-Infinity, steps)`; in **percentage** mode it calls `getActiveThreshold(0 * 100, steps)` — i.e. `getActiveThreshold(0, steps)`.
+6. Inside `getActiveThreshold`:
+   - For **absolute mode** (`value = -Infinity`): the empty-thresholds guard at lines 8–10 is bypassed in any dashboard with user-defined thresholds; `active = thresholds[0]` is set at line 12; the first loop iteration evaluates `-Infinity >= thresholds[0].value` (where `thresholds[0].value` is a finite number for any real step), which is **false**, triggering the `else break` path. The initial `active = thresholds[0]` is returned.
+   - For **percentage mode** (`value = 0`): `active = thresholds[0]` is initialized; the first iteration evaluates `0 >= thresholds[0].value` — for a typical step-0 value of `0` (e.g. `green >= 0`), this is **true**, so `active = thresholds[0]`; the second iteration (e.g. `yellow` at `value = 50`) evaluates `0 >= 50` → **false** → `break`. `thresholds[0]` is still returned.
 
-For `true` and `false` fill values, the display processor *does* produce a valid numeric (`1` and `0` respectively from `anyToNumber`), so thresholds *are* evaluated — but against the coerced `1`/`0` rather than any meaningful cell value. This can cause counter-intuitive threshold hits (e.g., a `green >= 0` threshold would match every `false`-filled cell, causing them to display green rather than the "no data" gray users expect).
+**Net visual result.** In the typical `green >= 0, yellow >= 50, red >= 80` configuration, every missing-intersection cell (filled with `''` or `null`) renders in the color of the **lowest configured threshold step** — usually **green**, *not* gray. The `fallBackThreshold` (value=0, `FALLBACK_COLOR`, which is the theme's default gray) is only returned by the early-return path at lines 8–10 when `field.config.thresholds.steps` is empty or undefined — a configuration most production dashboards never enter.
+
+For `true` and `false` fill values, the display processor *does* produce a valid numeric (`1` and `0` respectively from `anyToNumber`), so the numeric-formatting block at line 144 is **not** skipped and `scaleFunc(1)` or `scaleFunc(0)` is called at line 167 with the real coerced number. Thresholds are then evaluated against the coerced `1`/`0` rather than any meaningful cell value. In practice this produces the same bottom-of-ladder color as the `''`/`null` path in typical configurations (e.g., `false` → `0` → matches `green >= 0`), so `true`/`false`-filled cells also render in the lowest threshold step's color rather than a distinct "no data" color.
+
+**Takeaway for users who want a visible "no data" color for missing intersections.** No `emptyValue` option in the transformer produces the gray `FALLBACK_COLOR` for typical dashboards — every option routes to the lowest-step color via `thresholds[0]`. The correct way to render missing cells in a distinct color is to configure a **Value Mapping** of type `Special` that matches the emitted fill (`Null` or `Empty`) and assigns a specific color, as discussed in Section 6.5 and Recommendation 9.3.
 
 ### 6.5 Value Mappings — `getValueMappingResult`
 
@@ -971,7 +998,7 @@ graph TD
     N -->|"anyToNumber('') → NaN<br/>anyToNumber(null) → NaN"| O["DisplayValue<br/>text: '' or 'null'<br/>numeric: NaN"]
     M --> P["Panel Rendering<br/>(Table, Heatmap, Stat)"]
     O --> P
-    M --> Q["getActiveThreshold()<br/>thresholds.ts line 7<br/>NaN >= value is always false<br/>→ fallBackThreshold"]
+    M --> Q["getActiveThresholdForValue()<br/>scale.ts line 39<br/>called with -Infinity (abs) or 0 (pct)<br/>→ thresholds[0] (lowest step, often green)"]
     Q --> P
 ```
 
@@ -991,7 +1018,7 @@ Each node in the diagram above corresponds to a specific code location and a spe
 - **M — `getScaleCalculator`.** `scale.ts:19` builds a function that maps a numeric value to a percent-of-scale, then to a color from the theme's scale. Under the Empty-path corruption, every cell collapses to `percent = 0` via the `NaN` fallback at `scale.ts:34`.
 - **N — `getDisplayProcessor`.** `displayProcessor.ts:96` invokes `anyToNumber(value)` for each individual cell value. Both `''` and `null` collapse to `NaN`; booleans coerce to `1`/`0`; real numbers pass through.
 - **O — `DisplayValue`.** The struct produced by the display processor: has `text` (the user-visible cell content) and `numeric` (for color scale and threshold evaluation).
-- **Q — `getActiveThreshold`.** `thresholds.ts:7` finds the topmost threshold step whose `value` is `<=` the numeric value. With `numeric = NaN`, no step matches, so `fallBackThreshold` (value=0, color=gray) is used.
+- **Q — `getActiveThreshold`.** `thresholds.ts:7–23` finds the topmost threshold step whose `value` is `<=` the evaluated value. For `NaN`-valued cells, the numeric-formatting block at `displayProcessor.ts:144` is skipped and `displayProcessor.ts:188–192` calls `scaleFunc(-Infinity)`; inside `scale.ts:28–46`, the `value !== -Infinity` guard is false, so `percent` stays at `0` and `getActiveThresholdForValue(field, -Infinity, 0)` is called. For typical configurations with non-empty `thresholds.steps`, the empty-thresholds guard at lines 8–10 is bypassed, `active` is initialized to `thresholds[0]` at line 12, and the `-Infinity >= step.value` comparisons fail immediately — so `thresholds[0]` (the lowest configured step, e.g. **green** in a `green >= 0, yellow >= 50, red >= 80` setup) is returned. `fallBackThreshold` (value=0, color=`FALLBACK_COLOR` gray) is only returned by the early-return path at lines 8–10 when `thresholds.steps` is empty or undefined.
 - **P — Panel Rendering.** The Table, Heatmap, Stat, Bar Gauge, and other panels consume the `DisplayValue` for each cell and the `field.state.calcs` / `field.state.range` aggregates for footers, summaries, and scale calibration.
 
 ### 8.3 ASCII-art alternative
@@ -1043,13 +1070,13 @@ Source DataFrame (sparse)
         v                                            v
 +-----------------------------------+    +-------------------------------------+
 |   getMinMaxAndDelta() at 74       |    |   getActiveThreshold() at 7         |
-|   isNumber(min)? false for ''     |    |   loops thresholds, test value >=   |
-|   refetches from reduceField ->   |    |   NaN >= anything is always false   |
-|   returns same corrupted stats    |    |   -> returns fallBackThreshold (0,  |
-|                                   |    |      FALLBACK_COLOR)                |
-|   getScaleCalculator() at 19      |    |                                     |
-|   percent = (value - min)/delta   |    |                                     |
-|   if NaN -> percent = 0 silently  |    |                                     |
+|   isNumber(min)? false for ''     |    |   called with -Infinity (abs mode)  |
+|   refetches from reduceField ->   |    |   or 0 (pct mode) via scaleFunc     |
+|   returns same corrupted stats    |    |   guard at 8-10: empty steps?       |
+|                                   |    |     -> fallBackThreshold (gray)     |
+|   getScaleCalculator() at 19      |    |   else active = thresholds[0]       |
+|   percent = (value - min)/delta   |    |   -Inf >= step.value is false       |
+|   if NaN -> percent = 0 silently  |    |   -> thresholds[0] (lowest, green)  |
 +-----------------------------------+    +-------------------------------------+
         |                                            |
         '---------+--------------------------------'
@@ -1148,7 +1175,7 @@ Every behavioral claim in this document is grounded in a specific file and line 
 
 ### 10.1 Transformation layer
 
-- `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts` (lines 1–191; notably line 26 `DEFAULT_EMPTY_VALUE = SpecialValue.Empty`, line 71 `options.emptyValue || DEFAULT_EMPTY_VALUE`, line 117 fill site `matrixValues[columnName][rowName] ?? getSpecialValue(emptyValue)`, lines 129–134 field type preservation `type: valueField.type`, lines 178–190 `getSpecialValue` switch).
+- `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts` (lines 1–190; notably line 26 `DEFAULT_EMPTY_VALUE = SpecialValue.Empty`, line 71 `options.emptyValue || DEFAULT_EMPTY_VALUE`, line 117 fill site `matrixValues[columnName][rowName] ?? getSpecialValue(emptyValue)`, lines 129–134 field type preservation `type: valueField.type`, lines 178–190 `getSpecialValue` switch).
 - `packages/grafana-data/src/transformations/transformers/groupingToMatrix.test.ts` (all tests; notably the default test at lines 15–60 confirming `values: [1, '', '']` with `type: FieldType.number`, and the `generates Matrix with empty entries` test at lines 108–149 using `SpecialValue.Null`).
 - `packages/grafana-data/src/types/transformations.ts` (lines 113–118 `SpecialValue` enum — `True='true'`, `False='false'`, `Null='null'`, `Empty='empty'`).
 - `packages/grafana-data/src/transformations/transformers/ids.ts` (`groupingToMatrix` ID registration).
@@ -1177,13 +1204,13 @@ Every behavioral claim in this document is grounded in a specific file and line 
 
 ### 10.3 Display and numeric coercion
 
-- `packages/grafana-data/src/utils/anyToNumber.ts` (lines 1–23; notably line 13 the `NaN` early return for `''`, `null`, `undefined`, and arrays; boolean coercion to `+value` on line 18).
+- `packages/grafana-data/src/utils/anyToNumber.ts` (lines 1–22; notably line 13 the `NaN` early return for `''`, `null`, `undefined`, and arrays; boolean coercion via `value ? 1 : 0` on line 18).
 - `packages/grafana-data/src/field/displayProcessor.ts` (notably line 96 `let numeric = isStringUnit ? NaN : anyToNumber(value);`, line 144 `if (!Number.isNaN(numeric)) { ... }` gate for numeric formatting, lines 177–186 `text`/`noValue` fallback sequence).
 
 ### 10.4 Color scale and thresholds
 
 - `packages/grafana-data/src/field/scale.ts` (lines 1–121; notably line 19 `getScaleCalculator` entry, line 26 `const info = field.state?.range ?? getMinMaxAndDelta(field);`, line 32 `percent = (value - info.min!) / info.delta;`, line 34 silent `if (Number.isNaN(percent)) { percent = 0; }` fallback, line 74 `getMinMaxAndDelta` entry, line 83 `if (!isNumber(min) || !isNumber(max))` lodash check, line 85 delegation to `reduceField({ field, reducers: [ReducerID.min, ReducerID.max] })`).
-- `packages/grafana-data/src/field/thresholds.ts` (lines 1–40; notably line 5 `fallBackThreshold = { value: 0, color: FALLBACK_COLOR }`, lines 7–23 `getActiveThreshold` function body, line 14 the `if (value >= threshold.value)` comparison that fails for `NaN`).
+- `packages/grafana-data/src/field/thresholds.ts` (lines 1–40; notably line 5 `fallBackThreshold = { value: 0, color: FALLBACK_COLOR }`, lines 7–23 `getActiveThreshold` function body, lines 8–10 the empty-thresholds guard `if (!thresholds || thresholds.length === 0) { return fallBackThreshold; }`, line 12 `let active = thresholds[0];` initialization, line 14 the `for (const threshold of thresholds)` loop, line 15 the `if (value >= threshold.value)` comparison, line 18 the `else break` path (which is taken on the first iteration for the `-Infinity` path routed through `scaleFunc(-Infinity)` from `displayProcessor.ts:189`), lines 25–33 `getActiveThresholdForValue(field, value, percent)` dispatcher that delegates to `getActiveThreshold(value, thresholds?.steps)` (absolute mode) or `getActiveThreshold(percent * 100, thresholds?.steps)` (percentage mode)).
 
 ### 10.5 Value mappings
 
