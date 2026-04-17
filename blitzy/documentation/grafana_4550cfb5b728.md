@@ -4,22 +4,22 @@ This document is a code-grounded analysis of how Grafana's "Grouping to Matrix" 
 
 ## Metadata
 
-| Property | Value |
-|---|---|
-| Repository | `grafana/grafana` |
-| Commit | `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` |
-| Branch | `grafana_4550cfb5b728` |
-| Version | `11.5.0-pre` |
-| Node.js | `v22.11.0` (from `.nvmrc`); observation run under `v22.22.2` |
-| Go | `1.23.1` (backend, not involved in this frontend-only analysis) |
-| Test framework | Jest `29.7.0` |
+| Property       | Value                                                           |
+| -------------- | --------------------------------------------------------------- |
+| Repository     | `grafana/grafana`                                               |
+| Commit         | `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`                      |
+| Branch         | `grafana_4550cfb5b728`                                          |
+| Version        | `11.5.0-pre`                                                    |
+| Node.js        | `v22.11.0` (from `.nvmrc`); observation run under `v22.22.2`    |
+| Go             | `1.23.1` (backend, not involved in this frontend-only analysis) |
+| Test framework | Jest `29.7.0`                                                   |
 
 ## TL;DR
 
 - **The default fill value is `''` (an empty JavaScript string)**, not `null`, not `0`. This is set by `DEFAULT_EMPTY_VALUE = SpecialValue.Empty` at `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:26` and applied whenever the user leaves the "Empty Value" dropdown unselected in the transformer editor.
 - **Empty strings pass Grafana's standard null guard** and silently corrupt aggregate statistics: `sum` becomes a string (e.g. `'080'` instead of the number `80`) via JavaScript's `+` string concatenation, `count` is inflated (counting the missing cells as if they were data), and `min` becomes the empty string `''` because JavaScript's comparison operators coerce `''` to `0`.
 - **The semantic shift is at exactly one line of code**: `packages/grafana-data/src/transformations/fieldReducer.ts:489`, the `if (currentValue == null)` guard inside `doStandardCalcs`. This guard uses loose equality (`==`), which matches only `null` and `undefined` — not `''`, `true`, or `false`. The transformer's default of `''` violates the reducer's architectural assumption about what "missing" looks like.
-- **The fix for users who want "missing means zero"** is to select **Null** in the Empty Value dropdown *and* set the field's `nullValueMode` override to **Null value = zero** (`NullValueMode.AsZero`). That combination routes every missing cell through the `currentValue = 0` substitution at line 494 of `fieldReducer.ts`, producing mathematically correct aggregates that include zeros for all originally-missing intersections.
+- **The fix for users who want "missing means zero"** is to select **Null** in the Empty Value dropdown _and_ set the field's `nullValueMode` override to **Null value = zero** (`NullValueMode.AsZero`). That combination routes every missing cell through the `currentValue = 0` substitution at line 494 of `fieldReducer.ts`, producing mathematically correct aggregates that include zeros for all originally-missing intersections.
 - **At the display layer, `''` and `null` are visually equivalent**: both collapse to `NaN` in `packages/grafana-data/src/utils/anyToNumber.ts:13`. The divergence between the `Empty` and `Null` options is therefore purely in the aggregate statistics pipeline (reducers, min/max, color scales, thresholds), not in the per-cell text rendering.
 
 ## Table of Contents
@@ -41,16 +41,15 @@ This document is a code-grounded analysis of how Grafana's "Grouping to Matrix" 
 
 **The concrete question.** What value does Grafana's "Grouping to Matrix" transformation emit for row/column intersections that do not exist in the source data, and how does that value propagate through the rendering pipeline — the field reducers (sum/mean/count/min/max), the color-scale calculator, the threshold evaluator, the display processor, and panels such as Table and Heatmap?
 
-**The user's human intent.** When a user thinks about a sparse dataset being reshaped into a matrix, the natural mental model is that *"an absent row/column pair means zero"*. They expect a missing `(web-1, disk)` cell to behave like a `0`: sum aggregates should include it, counts should include it, min/max should accept `0` as a candidate, and the cell should visually render as `0` (or empty, but numerically equivalent to zero).
+**The user's human intent.** When a user thinks about a sparse dataset being reshaped into a matrix, the natural mental model is that _"an absent row/column pair means zero"_. They expect a missing `(web-1, disk)` cell to behave like a `0`: sum aggregates should include it, counts should include it, min/max should accept `0` as a candidate, and the cell should visually render as `0` (or empty, but numerically equivalent to zero).
 
 **The observed divergence.** Grafana's default behavior does **not** implement "missing = 0". The default fill value is an empty string, not a zero, and this empty string slips through the reducer's null guard because JavaScript evaluates `'' == null` as `false`. Aggregate statistics are corrupted as a result (sums become strings, counts are inflated, min/max are set to `''`). This document identifies the single line of code where the semantic shift occurs and traces every downstream consequence from that point.
 
 ---
 
-
 ## 2. Code-Level Mechanics of the Transformer
 
-This section walks through every line of the transformation source that determines *what* value lands in a missing cell. Every line number below was verified against the actual source at commit `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`.
+This section walks through every line of the transformation source that determines _what_ value lands in a missing cell. Every line number below was verified against the actual source at commit `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`.
 
 ### 2.1 The default-fill constant
 
@@ -68,7 +67,7 @@ And line 71, inside the transformer's `operator` implementation, applies it:
 const emptyValue = options.emptyValue || DEFAULT_EMPTY_VALUE;
 ```
 
-The `||` operator means that any falsy `options.emptyValue` (including `undefined`) falls back to `SpecialValue.Empty`. In the UI this happens for *every new transformer instance* until the user explicitly picks an option — see Section 2.4 for why this is a discoverability issue.
+The `||` operator means that any falsy `options.emptyValue` (including `undefined`) falls back to `SpecialValue.Empty`. In the UI this happens for _every new transformer instance_ until the user explicitly picks an option — see Section 2.4 for why this is a discoverability issue.
 
 ### 2.2 The sparse-cell fill site
 
@@ -78,7 +77,7 @@ The `||` operator means that any falsy `options.emptyValue` (including `undefine
 const value = matrixValues[columnName][rowName] ?? getSpecialValue(emptyValue);
 ```
 
-The JavaScript nullish-coalescing operator `??` substitutes the right-hand side *only* when the left-hand side is `null` or `undefined`. In this codepath, `matrixValues[columnName][rowName]` returns `undefined` when the `(column, row)` pair was never populated by the source data, which triggers the fill. Note that `??` never substitutes for other falsy values (such as `0`, `''`, or `false`) — so real zero-valued source cells are preserved, not replaced with the fill.
+The JavaScript nullish-coalescing operator `??` substitutes the right-hand side _only_ when the left-hand side is `null` or `undefined`. In this codepath, `matrixValues[columnName][rowName]` returns `undefined` when the `(column, row)` pair was never populated by the source data, which triggers the fill. Note that `??` never substitutes for other falsy values (such as `0`, `''`, or `false`) — so real zero-valued source cells are preserved, not replaced with the fill.
 
 ### 2.3 `getSpecialValue` — the four exhaustive fill-value options
 
@@ -113,12 +112,12 @@ export enum SpecialValue {
 
 The enum has exactly four members; the UI dropdown (Section 2.4) exposes all four. The runtime fill value for each option is:
 
-| `SpecialValue` enum member | String tag | Returned JS value | JS type | Coerces in numeric context to |
-|---|---|---|---|---|
-| `SpecialValue.False` | `'false'` | `false` | `boolean` | `0` |
-| `SpecialValue.True` | `'true'` | `true` | `boolean` | `1` |
-| `SpecialValue.Null` | `'null'` | `null` | `object` (null) | `0` (via comparison coercion) but skipped by null guard |
-| `SpecialValue.Empty` (default) | `'empty'` | `''` | `string` | `0` (via comparison coercion); causes string concatenation with `+` |
+| `SpecialValue` enum member     | String tag | Returned JS value | JS type         | Coerces in numeric context to                                       |
+| ------------------------------ | ---------- | ----------------- | --------------- | ------------------------------------------------------------------- |
+| `SpecialValue.False`           | `'false'`  | `false`           | `boolean`       | `0`                                                                 |
+| `SpecialValue.True`            | `'true'`   | `true`            | `boolean`       | `1`                                                                 |
+| `SpecialValue.Null`            | `'null'`   | `null`            | `object` (null) | `0` (via comparison coercion) but skipped by null guard             |
+| `SpecialValue.Empty` (default) | `'empty'`  | `''`              | `string`        | `0` (via comparison coercion); causes string concatenation with `+` |
 
 ### 2.4 The editor UI dropdown — a discoverability trap
 
@@ -143,7 +142,7 @@ const specialValueOptions: Array<SelectableValue<SpecialValue>> = [
 </InlineField>
 ```
 
-This is a critical observation: the dropdown has **no pre-selected option**. A user who opens the "Grouping to Matrix" editor sees an empty "Empty Value" dropdown and may assume "no option selected means no fill happens." In reality, an unselected dropdown means `options.emptyValue` is `undefined`, which triggers the `|| DEFAULT_EMPTY_VALUE` fallback at line 71 of the transformer — so the *silently active* fill is `SpecialValue.Empty → ''`. This is half of the user-experience problem: the other half is what `''` does to the reducer (Section 5).
+This is a critical observation: the dropdown has **no pre-selected option**. A user who opens the "Grouping to Matrix" editor sees an empty "Empty Value" dropdown and may assume "no option selected means no fill happens." In reality, an unselected dropdown means `options.emptyValue` is `undefined`, which triggers the `|| DEFAULT_EMPTY_VALUE` fallback at line 71 of the transformer — so the _silently active_ fill is `SpecialValue.Empty → ''`. This is half of the user-experience problem: the other half is what `''` does to the reducer (Section 5).
 
 ### 2.5 Field type preservation — the architectural seed of downstream corruption
 
@@ -166,14 +165,13 @@ This type/value inconsistency is the architectural seed of every downstream prob
 const isNumberField = field.type === FieldType.number || field.type === FieldType.time;
 ```
 
-Because the field *claims* to be numeric, the reducer enters the numeric accumulation branch at line 507 — `if (isNumberField) { calcs.sum += currentValue; ... }` — regardless of whether `currentValue` is actually numeric.
+Because the field _claims_ to be numeric, the reducer enters the numeric accumulation branch at line 507 — `if (isNumberField) { calcs.sum += currentValue; ... }` — regardless of whether `currentValue` is actually numeric.
 
 ### 2.6 In-app help text — silent on the reducer hazard
 
 **File**: `public/app/features/transformers/docs/content.ts` (entry at lines 617–644) contains the `groupingToMatrix` help text. It describes the four options ("Null, True, False, or Empty") but does not warn that the default empty-string fill will corrupt numeric reducers downstream. This gap in documentation, combined with the unselected-by-default dropdown (Section 2.4), means a user consuming only in-app documentation has no way to anticipate the behavior documented in Section 4.
 
 ---
-
 
 ## 3. Concrete Sparse Dataset — Walked Through Each emptyValue Option
 
@@ -182,12 +180,12 @@ This section walks a minimal, realistic sparse dataset through the transformer u
 ### 3.1 The dataset
 
 | Row (`Server`) | Column (`Metric`) | Cell value (`Value`) |
-|---|---|---|
-| `web-1`   | `cpu`  | `75` |
-| `web-1`   | `mem`  | `60` |
-| `db-1`    | `cpu`  | `45` |
-| `db-1`    | `disk` | `80` |
-| `cache-1` | `cpu`  | `30` |
+| -------------- | ----------------- | -------------------- |
+| `web-1`        | `cpu`             | `75`                 |
+| `web-1`        | `mem`             | `60`                 |
+| `db-1`         | `cpu`             | `45`                 |
+| `db-1`         | `disk`            | `80`                 |
+| `cache-1`      | `cpu`             | `30`                 |
 
 This is a 3-server × 3-metric grid with exactly **five populated cells**. The four missing intersections are:
 
@@ -216,20 +214,20 @@ After transformation, the output DataFrame contains four fields (one key field, 
 
 Resolved fill value: `''` (JavaScript empty string). Post-transformation fields:
 
-| Field name | `values` | `type` |
-|---|---|---|
-| `Server\Metric` | `['web-1', 'db-1', 'cache-1']` | `string` |
-| `cpu`  | `[75, 45, 30]`  | `number` (all populated) |
-| `mem`  | `[60, '', '']`  | `number` (but the array mixes numbers and strings!) |
-| `disk` | `['', 80, '']`  | `number` (but the array mixes strings and numbers) |
+| Field name      | `values`                       | `type`                                              |
+| --------------- | ------------------------------ | --------------------------------------------------- |
+| `Server\Metric` | `['web-1', 'db-1', 'cache-1']` | `string`                                            |
+| `cpu`           | `[75, 45, 30]`                 | `number` (all populated)                            |
+| `mem`           | `[60, '', '']`                 | `number` (but the array mixes numbers and strings!) |
+| `disk`          | `['', 80, '']`                 | `number` (but the array mixes strings and numbers)  |
 
 The `cpu` field has no missing cells and is never exposed to the downstream hazard. The `mem` and `disk` fields each contain two `''` fills plus one actual numeric value — this is where the corruption surfaces. Running `doStandardCalcs` (see Section 5 for the line-by-line trace) produces:
 
-| Field | `sum` | `mean` | `count` | `min` | `max` |
-|---|---|---|---|---|---|
-| `cpu`  | `150` | `50`    | `3` | `30` | `75` |
-| `mem`  | `'60'` (string!) | `20`    | `3` | `''` (string!) | `60` |
-| `disk` | `'080'` (string!) | `26.67` | `3` | `''` (string!) | `80` |
+| Field  | `sum`             | `mean`  | `count` | `min`          | `max` |
+| ------ | ----------------- | ------- | ------- | -------------- | ----- |
+| `cpu`  | `150`             | `50`    | `3`     | `30`           | `75`  |
+| `mem`  | `'60'` (string!)  | `20`    | `3`     | `''` (string!) | `60`  |
+| `disk` | `'080'` (string!) | `26.67` | `3`     | `''` (string!) | `80`  |
 
 Note in particular that `disk.sum` is the **string** `'080'`, not the number `80` — the two `''` fills concatenate around the `80`. And `count` is `3` for every field, including the sparsely-populated ones, because empty strings pass the null guard at `fieldReducer.ts:489` (detailed in Section 5).
 
@@ -237,22 +235,22 @@ Note in particular that `disk.sum` is the **string** `'080'`, not the number `80
 
 Resolved fill value: JavaScript `null`. Post-transformation fields:
 
-| Field name | `values` | `type` |
-|---|---|---|
+| Field name      | `values`                       | `type`   |
+| --------------- | ------------------------------ | -------- |
 | `Server\Metric` | `['web-1', 'db-1', 'cache-1']` | `string` |
-| `cpu`  | `[75, 45, 30]` | `number` |
-| `mem`  | `[60, null, null]` | `number` |
-| `disk` | `[null, 80, null]` | `number` |
+| `cpu`           | `[75, 45, 30]`                 | `number` |
+| `mem`           | `[60, null, null]`             | `number` |
+| `disk`          | `[null, 80, null]`             | `number` |
 
 Under Grafana's default `NullValueMode.Ignore` (set at `packages/grafana-data/src/transformations/fieldReducer.ts:198`), `null` values are skipped by the reducer via the `continue` at line 491. Running `doStandardCalcs` produces:
 
-| Field | `sum` | `mean` | `count` | `min` | `max` |
-|---|---|---|---|---|---|
-| `cpu`  | `150` | `50`  | `3` | `30` | `75` |
-| `mem`  | `60`  | `60`  | `1` | `60` | `60` |
-| `disk` | `80`  | `80`  | `1` | `80` | `80` |
+| Field  | `sum` | `mean` | `count` | `min` | `max` |
+| ------ | ----- | ------ | ------- | ----- | ----- |
+| `cpu`  | `150` | `50`   | `3`     | `30`  | `75`  |
+| `mem`  | `60`  | `60`   | `1`     | `60`  | `60`  |
+| `disk` | `80`  | `80`   | `1`     | `80`  | `80`  |
 
-All aggregates are now mathematically correct for the populated cells. Note that `count = 1` for `mem` and `disk` because those fields have only one populated cell each; this reflects the *true* amount of data, not the grid's size.
+All aggregates are now mathematically correct for the populated cells. Note that `count = 1` for `mem` and `disk` because those fields have only one populated cell each; this reflects the _true_ amount of data, not the grid's size.
 
 Alternative behavior: if the field's `nullValueMode` is explicitly set to `NullValueMode.AsZero` (via a field override in the panel's Standard Options → "Null value" → "zero"), then at `fieldReducer.ts:494` the null value is substituted with `0` and enters the accumulation branch. Result: `mem.count = 3`, `mem.sum = 60`, `mem.mean = 20`, `mem.min = 0`, `mem.max = 60`. This is the only configuration that implements true "missing means zero" semantics — see Section 9.1.
 
@@ -265,11 +263,11 @@ Resolved fill value: JavaScript `true`. Post-transformation fields contain `true
 - `calcs.sum += true` coerces `true` → `1` because the left-hand side is already a number (started at `0`); the running sum stays numeric.
 - `calcs.count++` still runs at line 498, inflating the count.
 
-| Field | `sum` | `mean` | `count` | `min` | `max` |
-|---|---|---|---|---|---|
-| `cpu`  | `150` | `50`    | `3` | `30` | `75` |
-| `mem`  | `62`  | `20.67` | `3` | `true` (boolean!) | `60` |
-| `disk` | `82`  | `27.33` | `3` | `true` (boolean!) | `80` |
+| Field  | `sum` | `mean`  | `count` | `min`             | `max` |
+| ------ | ----- | ------- | ------- | ----------------- | ----- |
+| `cpu`  | `150` | `50`    | `3`     | `30`              | `75`  |
+| `mem`  | `62`  | `20.67` | `3`     | `true` (boolean!) | `60`  |
+| `disk` | `82`  | `27.33` | `3`     | `true` (boolean!) | `80`  |
 
 This is numerically "cleaner" than `Empty` (no string concatenation), but it still pollutes `sum` by `+1` per missing cell and inflates `count`. The `min` becomes the boolean `true` because `true < 60` coerces `true` to `1`, and `1 < 60` is `true`.
 
@@ -283,11 +281,11 @@ Resolved fill value: JavaScript `false`. Under `doStandardCalcs`:
 - `calcs.count++` still inflates the count.
 - `false < 60` coerces `false` to `0`, so `min` becomes the boolean `false`.
 
-| Field | `sum` | `mean` | `count` | `min` | `max` |
-|---|---|---|---|---|---|
-| `cpu`  | `150` | `50`    | `3` | `30` | `75` |
-| `mem`  | `60`  | `20`    | `3` | `false` (boolean!) | `60` |
-| `disk` | `80`  | `26.67` | `3` | `false` (boolean!) | `80` |
+| Field  | `sum` | `mean`  | `count` | `min`              | `max` |
+| ------ | ----- | ------- | ------- | ------------------ | ----- |
+| `cpu`  | `150` | `50`    | `3`     | `30`               | `75`  |
+| `mem`  | `60`  | `20`    | `3`     | `false` (boolean!) | `60`  |
+| `disk` | `80`  | `26.67` | `3`     | `false` (boolean!) | `80`  |
 
 Sum is mathematically equivalent to `Null + NullValueMode.AsZero` (both produce `0` contributions), but `count` is still inflated and `min` is the boolean `false` rather than the number `0`.
 
@@ -301,7 +299,6 @@ Of the four dropdown options:
 
 ---
 
-
 ## 4. Empirical Jest Observation Results
 
 The tables in Section 3 are not synthesized from code reading alone — they are the exact output of a temporary Jest test that was created and executed against the repository's own test infrastructure, then deleted. This section documents the observation methodology and reproduces the captured results verbatim.
@@ -310,7 +307,7 @@ The tables in Section 3 are not synthesized from code reading alone — they are
 
 1. A temporary test file at `packages/grafana-data/src/transformations/transformers/sparse_matrix_observation.test.ts` was created.
 2. The test built the sparse `DataFrame` documented in Section 3.1 using `toDataFrame(...)` from `packages/grafana-data/src/dataframe/processDataFrame.ts`.
-3. For each of the five cases (`Empty`, `Null`, `True`, `False`, and *no emptyValue set*), the test called `transformDataFrame([cfg], [input])` where `cfg` was the "Grouping to Matrix" transformer config shown in Section 3.1.
+3. For each of the five cases (`Empty`, `Null`, `True`, `False`, and _no emptyValue set_), the test called `transformDataFrame([cfg], [input])` where `cfg` was the "Grouping to Matrix" transformer config shown in Section 3.1.
 4. The test inspected the resulting output frame's fields, recording each field's `name`, `type`, and `values` array using `JSON.stringify`.
 5. For each non-key field, the test called `reduceField({ field, reducers: [ReducerID.sum, ReducerID.mean, ReducerID.count, ReducerID.min, ReducerID.max] })` and captured every returned value along with its `typeof`.
 6. The test also evaluated a battery of JavaScript type-coercion expressions (`'' == null`, `0 + ''`, `'0' + 80`, `anyToNumber('')`, etc.) to independently verify the language-level behavior relied upon elsewhere in this document.
@@ -363,7 +360,7 @@ field name=mem type=number values=[60,"",""]
 field name=disk type=number values=["",80,""]
 ```
 
-This last case confirms experimentally that an unset `emptyValue` produces *identical* output to `SpecialValue.Empty`, matching the `|| DEFAULT_EMPTY_VALUE` fallback at `groupingToMatrix.ts:71`.
+This last case confirms experimentally that an unset `emptyValue` produces _identical_ output to `SpecialValue.Empty`, matching the `|| DEFAULT_EMPTY_VALUE` fallback at `groupingToMatrix.ts:71`.
 
 ### 4.3 Captured observations — reducer results with `typeof`
 
@@ -429,7 +426,7 @@ if (currentValue < calcs.min) {
 }
 ```
 
-`calcs.min` starts at `Number.MAX_VALUE` (from `defaultCalcs`). The comparison `'' < 1.7976e+308` coerces `''` to `0` (JavaScript's `<` operator coerces non-numeric operands to numbers via `ToNumber`, and `ToNumber('')` is `0`). Since `0 < Number.MAX_VALUE` is `true`, `calcs.min` is assigned the value `''` itself (the pre-coercion value), and the `typeof` becomes `string`. For `emptyValue = True` / `False`, the same mechanism plants the *boolean* value into `min`.
+`calcs.min` starts at `Number.MAX_VALUE` (from `defaultCalcs`). The comparison `'' < 1.7976e+308` coerces `''` to `0` (JavaScript's `<` operator coerces non-numeric operands to numbers via `ToNumber`, and `ToNumber('')` is `0`). Since `0 < Number.MAX_VALUE` is `true`, `calcs.min` is assigned the value `''` itself (the pre-coercion value), and the `typeof` becomes `string`. For `emptyValue = True` / `False`, the same mechanism plants the _boolean_ value into `min`.
 
 ### 4.5 Summary of Section 4
 
@@ -441,10 +438,9 @@ The temporary test file used to produce these results was deleted after capture.
 
 ---
 
-
 ## 5. Precise Location of the Semantic Shift
 
-**Thesis:** The semantic shift between the user's "missing = 0" intent and Grafana's actual behavior occurs at *exactly one* line in the codebase — the null guard inside `doStandardCalcs`, which uses loose equality rather than a combined null-or-empty check.
+**Thesis:** The semantic shift between the user's "missing = 0" intent and Grafana's actual behavior occurs at _exactly one_ line in the codebase — the null guard inside `doStandardCalcs`, which uses loose equality rather than a combined null-or-empty check.
 
 ### 5.1 The single line
 
@@ -483,11 +479,11 @@ export function doStandardCalcs(field: Field, ignoreNulls: boolean, nullAsZero: 
     if (currentValue == null) {
       // Line 490
       if (ignoreNulls) {
-        continue;              // line 491
+        continue; // line 491
       }
       // Line 493
       if (nullAsZero) {
-        currentValue = 0;      // line 494
+        currentValue = 0; // line 494
       }
     }
 
@@ -496,7 +492,6 @@ export function doStandardCalcs(field: Field, ignoreNulls: boolean, nullAsZero: 
 
     // Line 500 — second gate: "not null and not NaN"
     if (currentValue != null && !Number.isNaN(currentValue)) {
-
       // Line 507 — numeric branch
       if (isNumberField) {
         // Line 508 — THE string-concatenation site
@@ -554,7 +549,7 @@ The guard was written under the implicit assumption that the only two sentinels 
 - Line 500: `true != null` is `true` AND `!Number.isNaN(true)` is `true` → the gate opens.
 - Line 507: `isNumberField` is `true` → enters numeric branch.
 - Line 508: `calcs.sum += true` → `true` is coerced to `1` by the `+` operator because the LHS (`calcs.sum`) is numeric at that point. `sum` remains numeric but increments by `1` per missing cell (e.g., `mem.sum = 60 + 1 + 1 = 62` in the observed results).
-- Lines 535–541: `true` is coerced to `1` for comparisons. `1 > Number.MIN_SAFE_VALUE` is `true`, so `max = true` is stored as the *boolean*. Similarly `1 < Number.MAX_VALUE` is `true`, so `min = true` (boolean) when the smallest real value exceeds `1`.
+- Lines 535–541: `true` is coerced to `1` for comparisons. `1 > Number.MIN_SAFE_VALUE` is `true`, so `max = true` is stored as the _boolean_. Similarly `1 < Number.MAX_VALUE` is `true`, so `min = true` (boolean) when the smallest real value exceeds `1`.
 - **Net result:** `sum` is numeric but off by the missing-cell count; `min` is the boolean `true`; `count` is inflated.
 
 **For `false`:**
@@ -562,7 +557,7 @@ The guard was written under the implicit assumption that the only two sentinels 
 - Line 489: `false == null` → `false` → the `if` block is skipped.
 - Line 498: `calcs.count++` fires — count is inflated.
 - Line 500: `false != null` is `true` AND `!Number.isNaN(false)` is `true` → the gate opens.
-- Line 508: `calcs.sum += false` → `false` coerces to `0`; `sum` is unchanged in value *but* may transition to numeric-boolean addition (observed to remain numeric in the captured results).
+- Line 508: `calcs.sum += false` → `false` coerces to `0`; `sum` is unchanged in value _but_ may transition to numeric-boolean addition (observed to remain numeric in the captured results).
 - Lines 539–541: `false` coerces to `0`; `0 < 60` is `true`, so `min = false` (the boolean, stored as-is). In the observed results `mem.min = false` (boolean) and `disk.min = false` (boolean).
 - **Net result:** `sum` happens to remain numerically correct, but `count` is inflated and `min` is the boolean `false`. `mean = sum / count` is wrong (e.g., `mem.mean = 60 / 3 = 20` instead of the true average `60`).
 
@@ -592,12 +587,11 @@ Note the `NullValueMode.Null` member string value is `'null'` (matching the enum
 
 ### 5.6 Why only line 489 matters
 
-Every other line in the pipeline cited in Sections 6 and 7 operates *correctly given its inputs*. `anyToNumber` returns `NaN` for `''`; `getScaleCalculator` computes `percent` via arithmetic; `getActiveThreshold` compares a number against thresholds. None of those functions "should" specifically treat empty strings as missing data — they are general utilities that receive the corrupted cached statistics produced by `doStandardCalcs`.
+Every other line in the pipeline cited in Sections 6 and 7 operates _correctly given its inputs_. `anyToNumber` returns `NaN` for `''`; `getScaleCalculator` computes `percent` via arithmetic; `getActiveThreshold` compares a number against thresholds. None of those functions "should" specifically treat empty strings as missing data — they are general utilities that receive the corrupted cached statistics produced by `doStandardCalcs`.
 
 The fix, therefore, is either to prevent the empty string from entering the reducer (by selecting `Null` in the UI) or to change the reducer to treat `''` as missing (which would require modifying Grafana — out of scope for this analysis, which must preserve repository immutability).
 
 ---
-
 
 ## 6. Downstream Effects on Display, Color Scales, Thresholds, and Value Mappings
 
@@ -668,15 +662,15 @@ if (text == null) {
 
 The `text` fallback path is what actually determines the user-visible cell content. Trace it per fill-value:
 
-| Fill value      | `toString(value)` (lodash)    | `!text` check       | Final displayed text                                |
-|-----------------|-------------------------------|---------------------|-----------------------------------------------------|
-| `''`            | `''` (empty string)           | `true` (falls through) | `config.noValue` if configured, else `''`          |
-| `null`          | `'null'` (literal four chars) | `false`             | The literal string `'null'` (rendered as-is)        |
-| `true`          | `'true'`                      | `false`             | The literal string `'true'`                         |
-| `false`         | `'false'`                     | `false`             | The literal string `'false'`                        |
-| `75`            | `'75'`                        | `false`             | The formatted numeric text (unit, decimals applied) |
+| Fill value | `toString(value)` (lodash)    | `!text` check          | Final displayed text                                |
+| ---------- | ----------------------------- | ---------------------- | --------------------------------------------------- |
+| `''`       | `''` (empty string)           | `true` (falls through) | `config.noValue` if configured, else `''`           |
+| `null`     | `'null'` (literal four chars) | `false`                | The literal string `'null'` (rendered as-is)        |
+| `true`     | `'true'`                      | `false`                | The literal string `'true'`                         |
+| `false`    | `'false'`                     | `false`                | The literal string `'false'`                        |
+| `75`       | `'75'`                        | `false`                | The formatted numeric text (unit, decimals applied) |
 
-**Important user-facing implication.** By default, selecting `SpecialValue.Null` — which Sections 4 and 5 identified as the *aggregation-correct* choice — causes each missing cell to **literally render the word "null"** unless the user also configures one of:
+**Important user-facing implication.** By default, selecting `SpecialValue.Null` — which Sections 4 and 5 identified as the _aggregation-correct_ choice — causes each missing cell to **literally render the word "null"** unless the user also configures one of:
 
 - Field display option `No value` (populates `config.noValue`), which catches the `!text` branch only for `''` and `undefined` — **not for `null`**, because `toString(null) === 'null'` is a non-empty string.
 - A `MappingType.SpecialValue` value mapping with `SpecialValueMatch.Null`, which catches `null` at an earlier stage of the display processor (before line 177) and returns the mapped text directly.
@@ -746,7 +740,7 @@ export function getMinMaxAndDelta(field: Field): NumericRange {
 
 **Net visual impact.** Under the default `Empty` setting:
 
-- Populated cells may still receive reasonable colors *as long as* `min` happens to be coerced cleanly to `0` in the subtraction; but because `min` was corrupted to `''`, any change in Grafana's internal math (e.g., division before subtraction, caching the `range` object into `field.state.range`) can propagate the corruption further.
+- Populated cells may still receive reasonable colors _as long as_ `min` happens to be coerced cleanly to `0` in the subtraction; but because `min` was corrupted to `''`, any change in Grafana's internal math (e.g., division before subtraction, caching the `range` object into `field.state.range`) can propagate the corruption further.
 - Empty-fill cells all collapse to `percent = 0` → the lowest color in the scale.
 - In heatmap and table panels with color-mapped cells, this causes a uniform "coldest color" band across all missing intersections, regardless of the data's actual distribution.
 
@@ -810,9 +804,9 @@ The flow for an `''`- or `null`-filled cell is subtler than "NaN is compared aga
    - For **absolute mode** (`value = -Infinity`): the empty-thresholds guard at lines 8–10 is bypassed in any dashboard with user-defined thresholds; `active = thresholds[0]` is set at line 12; the first loop iteration evaluates `-Infinity >= thresholds[0].value` (where `thresholds[0].value` is a finite number for any real step), which is **false**, triggering the `else break` path. The initial `active = thresholds[0]` is returned.
    - For **percentage mode** (`value = 0`): `active = thresholds[0]` is initialized; the first iteration evaluates `0 >= thresholds[0].value` — for a typical step-0 value of `0` (e.g. `green >= 0`), this is **true**, so `active = thresholds[0]`; the second iteration (e.g. `yellow` at `value = 50`) evaluates `0 >= 50` → **false** → `break`. `thresholds[0]` is still returned.
 
-**Net visual result.** In the typical `green >= 0, yellow >= 50, red >= 80` configuration, every missing-intersection cell (filled with `''` or `null`) renders in the color of the **lowest configured threshold step** — usually **green**, *not* gray. The `fallBackThreshold` (value=0, `FALLBACK_COLOR`, which is the theme's default gray) is only returned by the early-return path at lines 8–10 when `field.config.thresholds.steps` is empty or undefined — a configuration most production dashboards never enter.
+**Net visual result.** In the typical `green >= 0, yellow >= 50, red >= 80` configuration, every missing-intersection cell (filled with `''` or `null`) renders in the color of the **lowest configured threshold step** — usually **green**, _not_ gray. The `fallBackThreshold` (value=0, `FALLBACK_COLOR`, which is the theme's default gray) is only returned by the early-return path at lines 8–10 when `field.config.thresholds.steps` is empty or undefined — a configuration most production dashboards never enter.
 
-For `true` and `false` fill values, the display processor *does* produce a valid numeric (`1` and `0` respectively from `anyToNumber`), so the numeric-formatting block at line 144 is **not** skipped and `scaleFunc(1)` or `scaleFunc(0)` is called at line 167 with the real coerced number. Thresholds are then evaluated against the coerced `1`/`0` rather than any meaningful cell value. In practice this produces the same bottom-of-ladder color as the `''`/`null` path in typical configurations (e.g., `false` → `0` → matches `green >= 0`), so `true`/`false`-filled cells also render in the lowest threshold step's color rather than a distinct "no data" color.
+For `true` and `false` fill values, the display processor _does_ produce a valid numeric (`1` and `0` respectively from `anyToNumber`), so the numeric-formatting block at line 144 is **not** skipped and `scaleFunc(1)` or `scaleFunc(0)` is called at line 167 with the real coerced number. Thresholds are then evaluated against the coerced `1`/`0` rather than any meaningful cell value. In practice this produces the same bottom-of-ladder color as the `''`/`null` path in typical configurations (e.g., `false` → `0` → matches `green >= 0`), so `true`/`false`-filled cells also render in the lowest threshold step's color rather than a distinct "no data" color.
 
 **Takeaway for users who want a visible "no data" color for missing intersections.** No `emptyValue` option in the transformer produces the gray `FALLBACK_COLOR` for typical dashboards — every option routes to the lowest-step color via `thresholds[0]`. The correct way to render missing cells in a distinct color is to configure a **Value Mapping** of type `Special` that matches the emitted fill (`Null` or `Empty`) and assigns a specific color, as discussed in Section 6.5 and Recommendation 9.3.
 
@@ -866,7 +860,7 @@ switch (vm.options.match) {
 
 **Key equality-operator asymmetry:**
 
-- Line 72 uses **loose** equality `value == null`. This matches both JavaScript `null` *and* `undefined`, but does **not** match `''`, `false`, `0`, or the string `'null'`.
+- Line 72 uses **loose** equality `value == null`. This matches both JavaScript `null` _and_ `undefined`, but does **not** match `''`, `false`, `0`, or the string `'null'`.
 - Line 102 uses **strict** equality `value === ''`. This matches **only** the literal empty string. It does not match `null`, `undefined`, `0`, or `false`.
 - Lines 90 and 96 match both the primitive boolean and its string representation (`'true'` / `'false'`), which is useful when value mappings are serialized through JSON transports that may stringify booleans.
 - Line 84 (`NullAndNaN`) combines `null/undefined` with `NaN` — this is a common choice for users who want a single mapping to cover all "missing" cases, but **it still does not match `''`**.
@@ -901,7 +895,7 @@ export enum SpecialValueMatch {
 - If the transformer is configured with `emptyValue = Null`, add a Value Mapping of type `Special` with match `Null` (or `NullAndNaN`).
 - A `SpecialValueMatch.Null` mapping does **not** catch `''` fills, and `SpecialValueMatch.Empty` does **not** catch `null` fills. This is the most common source of "why isn't my mapping working?" confusion.
 
-**Caveat — value mappings are display-only.** The `getValueMappingResult` function is invoked by the display processor, which runs *after* the reducer. Applying a value mapping changes the rendered cell text but does **not** change the underlying `values` array or the reducer's aggregates. A value mapping cannot fix the `sum = '080'` corruption from Section 4 — only the choice of `emptyValue` can.
+**Caveat — value mappings are display-only.** The `getValueMappingResult` function is invoked by the display processor, which runs _after_ the reducer. Applying a value mapping changes the rendered cell text but does **not** change the underlying `values` array or the reducer's aggregates. A value mapping cannot fix the `sum = '080'` corruption from Section 4 — only the choice of `emptyValue` can.
 
 ### 6.6 Table footer reducer — panel-level impact
 
@@ -923,7 +917,6 @@ The heatmap panel consumes matrix-shaped data via `prepareHeatmapData`, which in
 
 ---
 
-
 ## 7. JavaScript Type-Coercion Reference
 
 The behavior documented in Sections 4, 5, and 6 is not a bug in Grafana — it is the inevitable consequence of JavaScript's `==`, `+`, `<`, `>`, and `-` operator semantics when non-numeric sentinels are mixed into numeric aggregates. This section reproduces the language-level behavior that every claim in the document relies upon, so readers can independently verify the analysis in any JavaScript REPL.
@@ -932,34 +925,34 @@ The behavior documented in Sections 4, 5, and 6 is not a bug in Grafana — it i
 
 Every row in this table was independently evaluated during the empirical observation run (Section 4) to confirm the result. They are also the behavior defined by the ECMAScript specification for the relevant operators.
 
-| Expression                    | Result          | Rationale                                                                        |
-|-------------------------------|-----------------|----------------------------------------------------------------------------------|
-| `'' == null`                  | `false`         | Loose equality: only `null` and `undefined` are loosely equal to `null`          |
-| `null == null`                | `true`          | `null` equals both `null` and `undefined`                                        |
-| `undefined == null`           | `true`          | Same rule — `undefined` is loosely equal to `null`                               |
-| `'' != null`                  | `true`          | The "not null" gate at `fieldReducer.ts:500` lets the empty string through       |
-| `Number.isNaN('')`            | `false`         | `Number.isNaN` does not coerce; `''` is not `NaN`                                |
-| `Number.isNaN(null)`          | `false`         | `null` is not `NaN` either                                                       |
-| `Number.isNaN(true)`          | `false`         | `true` is not `NaN`                                                              |
-| `0 + ''`                      | `'0'` (string)  | The `+` operator prefers string concatenation when either operand is a string    |
-| `'0' + 80`                    | `'080'` (string)| Subsequent numeric additions continue as string concatenation                    |
-| `'' > -Number.MAX_VALUE`      | `true`          | Comparison operator coerces `''` to `0`; `0 > -1.7976e+308` is `true`            |
-| `'' < Number.MAX_VALUE`       | `true`          | Coerces `''` to `0`; `0 < 1.7976e+308` is `true`                                 |
-| `true + 1`                    | `2`             | `+` coerces `true` → `1` when no string operand is present                       |
-| `false + 1`                   | `1`             | `+` coerces `false` → `0`                                                        |
-| `80 - ''`                     | `80` (number)   | The `-` operator *always* coerces to number; `80 - 0` is `80`                    |
-| `'0' - 0`                     | `0` (number)    | `-` always produces a number even with string operands                           |
-| `isNumber('')` (lodash)       | `false`         | lodash `isNumber` requires a JS `number` primitive; strings never qualify        |
-| `typeof ('' + 0)`             | `'string'`      | Demonstrates the concatenation-yields-string rule explicitly                     |
-| `typeof (0 - '')`             | `'number'`      | Demonstrates the subtraction-yields-number rule explicitly                       |
-| `NaN >= 0`                    | `false`         | Any comparison with `NaN` (including `>=`, `<=`, `>`, `<`, `==`) is `false`      |
-| `NaN === NaN`                 | `false`         | `NaN` is the only value not equal to itself — hence the need for `Number.isNaN`  |
+| Expression               | Result           | Rationale                                                                       |
+| ------------------------ | ---------------- | ------------------------------------------------------------------------------- |
+| `'' == null`             | `false`          | Loose equality: only `null` and `undefined` are loosely equal to `null`         |
+| `null == null`           | `true`           | `null` equals both `null` and `undefined`                                       |
+| `undefined == null`      | `true`           | Same rule — `undefined` is loosely equal to `null`                              |
+| `'' != null`             | `true`           | The "not null" gate at `fieldReducer.ts:500` lets the empty string through      |
+| `Number.isNaN('')`       | `false`          | `Number.isNaN` does not coerce; `''` is not `NaN`                               |
+| `Number.isNaN(null)`     | `false`          | `null` is not `NaN` either                                                      |
+| `Number.isNaN(true)`     | `false`          | `true` is not `NaN`                                                             |
+| `0 + ''`                 | `'0'` (string)   | The `+` operator prefers string concatenation when either operand is a string   |
+| `'0' + 80`               | `'080'` (string) | Subsequent numeric additions continue as string concatenation                   |
+| `'' > -Number.MAX_VALUE` | `true`           | Comparison operator coerces `''` to `0`; `0 > -1.7976e+308` is `true`           |
+| `'' < Number.MAX_VALUE`  | `true`           | Coerces `''` to `0`; `0 < 1.7976e+308` is `true`                                |
+| `true + 1`               | `2`              | `+` coerces `true` → `1` when no string operand is present                      |
+| `false + 1`              | `1`              | `+` coerces `false` → `0`                                                       |
+| `80 - ''`                | `80` (number)    | The `-` operator _always_ coerces to number; `80 - 0` is `80`                   |
+| `'0' - 0`                | `0` (number)     | `-` always produces a number even with string operands                          |
+| `isNumber('')` (lodash)  | `false`          | lodash `isNumber` requires a JS `number` primitive; strings never qualify       |
+| `typeof ('' + 0)`        | `'string'`       | Demonstrates the concatenation-yields-string rule explicitly                    |
+| `typeof (0 - '')`        | `'number'`       | Demonstrates the subtraction-yields-number rule explicitly                      |
+| `NaN >= 0`               | `false`          | Any comparison with `NaN` (including `>=`, `<=`, `>`, `<`, `==`) is `false`     |
+| `NaN === NaN`            | `false`          | `NaN` is the only value not equal to itself — hence the need for `Number.isNaN` |
 
 ### 7.2 Why the `+` operator is dangerous for `sum` but the `-` operator is not
 
-The `+` operator has dual semantics: it is **string concatenation** if *either* operand is a string, and **numeric addition** otherwise. Once `calcs.sum` transitions to a string via `0 + ''`, every subsequent `sum += x` stays string because `sum` is now a string operand. This is the precise mechanism by which `disk.sum` becomes `'080'` rather than `80`.
+The `+` operator has dual semantics: it is **string concatenation** if _either_ operand is a string, and **numeric addition** otherwise. Once `calcs.sum` transitions to a string via `0 + ''`, every subsequent `sum += x` stays string because `sum` is now a string operand. This is the precise mechanism by which `disk.sum` becomes `'080'` rather than `80`.
 
-The `-`, `*`, `/`, and `%` operators have no string-concatenation branch — they *always* coerce operands to numbers via `ToNumber`. `'080' - 0` is `80`, `'080' / 2` is `40`. This is why `mean = sum / count` at the end of `doStandardCalcs` happens to produce a numeric value even when `sum` is a string — the division operator converts it back to a number for the final calculation (e.g., `mem.mean = '60' / 3 = 20`, a correct numeric result). However, the `mean` is computed from the *count-inflated* denominator, so it is still semantically wrong (the true mean for `mem` is `60`, not `20`).
+The `-`, `*`, `/`, and `%` operators have no string-concatenation branch — they _always_ coerce operands to numbers via `ToNumber`. `'080' - 0` is `80`, `'080' / 2` is `40`. This is why `mean = sum / count` at the end of `doStandardCalcs` happens to produce a numeric value even when `sum` is a string — the division operator converts it back to a number for the final calculation (e.g., `mem.mean = '60' / 3 = 20`, a correct numeric result). However, the `mean` is computed from the _count-inflated_ denominator, so it is still semantically wrong (the true mean for `mem` is `60`, not `20`).
 
 ### 7.3 Why the codebase uses `==` at line 489
 
@@ -968,7 +961,6 @@ The guard at `fieldReducer.ts:489` (`if (currentValue == null)`) uses loose equa
 The idiom was written under the implicit assumption that these are the **only** two sentinels a field's `values` array might contain for "missing data." The `Grouping to Matrix` transformer's default fill of `''` — neither `null` nor `undefined` — silently violates that assumption. The reducer's author had no reason to anticipate that a downstream consumer would insert the empty string as a missing-data marker into a field declared as `FieldType.number`. Fixing this would require either stopping the transformer from emitting `''` (the recommendation in Section 9), or changing the reducer to treat `''` as missing too — which would be a breaking change for any other code that legitimately passes empty strings through numeric reducers and is therefore out of scope for this read-only analysis.
 
 ---
-
 
 ## 8. Data-Flow Diagram
 
@@ -1094,7 +1086,6 @@ Both diagrams show that the `Empty` path and the `Null` path converge at the pan
 
 ---
 
-
 ## 9. Recommendations — Achieving "Missing Means Zero" Semantics
 
 The following recommendations are in priority order from most effective to least effective for the original user intent ("a missing row/column intersection should behave like `0` in aggregates and color scales"). All recommendations are configuration-only — they require no code changes to Grafana and can be applied through dashboard JSON or the Grafana UI.
@@ -1136,7 +1127,7 @@ Users who only care about the **displayed text** of missing cells (not the aggre
 
 **If the transformer is configured with `emptyValue = Empty`**, add a value mapping of type `Special` with match `Empty` (line 102 uses `value === ''` and will catch only the literal empty string).
 
-**Critical caveat.** Value mappings are applied by the display processor, which runs *after* the reducer. They change only the rendered cell text. They do **not** correct the underlying aggregates — a value mapping cannot turn `sum = '080'` back into `sum = 80`. Use Recommendation 9.1 if correct aggregation matters; use 9.3 only for cosmetic cell-text control.
+**Critical caveat.** Value mappings are applied by the display processor, which runs _after_ the reducer. They change only the rendered cell text. They do **not** correct the underlying aggregates — a value mapping cannot turn `sum = '080'` back into `sum = 80`. Use Recommendation 9.1 if correct aggregation matters; use 9.3 only for cosmetic cell-text control.
 
 ### 9.4 Avoid — Relying on the default `Empty` setting for numeric panels
 
@@ -1157,17 +1148,16 @@ These options exist because the transformer supports boolean-valued source field
 
 ### 9.6 Summary table of recommendations
 
-| Approach                                                     | Aggregates correct?       | Display correct?                               | Effort  |
-|--------------------------------------------------------------|---------------------------|------------------------------------------------|---------|
-| 9.1 `Null` + `NullValueMode.AsZero`                          | Yes (with zeros included) | Yes (zeros rendered normally)                  | Low     |
-| 9.1-lite: `Null` alone (default `NullValueMode.Ignore`)      | Yes (populated only)      | May show literal `null` without a mapping      | Low     |
-| 9.2 Chain a "Calculate new field" transformation              | Yes                       | Yes                                            | Medium  |
-| 9.3 Value Mapping alone (without changing `emptyValue`)       | No (raw fill still used)  | Yes                                            | Low     |
-| 9.4 Default `Empty`                                          | No (string `sum`, etc.)   | `''` cells appear blank (same as `noValue`)    | None    |
-| 9.5 `True` or `False` on numeric fields                      | No (count/min inflated)   | Cells literally display `'true'` / `'false'`   | None    |
+| Approach                                                | Aggregates correct?       | Display correct?                             | Effort |
+| ------------------------------------------------------- | ------------------------- | -------------------------------------------- | ------ |
+| 9.1 `Null` + `NullValueMode.AsZero`                     | Yes (with zeros included) | Yes (zeros rendered normally)                | Low    |
+| 9.1-lite: `Null` alone (default `NullValueMode.Ignore`) | Yes (populated only)      | May show literal `null` without a mapping    | Low    |
+| 9.2 Chain a "Calculate new field" transformation        | Yes                       | Yes                                          | Medium |
+| 9.3 Value Mapping alone (without changing `emptyValue`) | No (raw fill still used)  | Yes                                          | Low    |
+| 9.4 Default `Empty`                                     | No (string `sum`, etc.)   | `''` cells appear blank (same as `noValue`)  | None   |
+| 9.5 `True` or `False` on numeric fields                 | No (count/min inflated)   | Cells literally display `'true'` / `'false'` | None   |
 
 ---
-
 
 ## 10. Code Citations (Source of Truth)
 
@@ -1232,4 +1222,3 @@ Every behavioral claim in this document is grounded in a specific file and line 
 ### 10.8 Empirical test disclosure
 
 The empirical reducer outputs in Section 4 were produced by a temporary Jest test file at `packages/grafana-data/src/transformations/transformers/sparse_matrix_observation.test.ts`. That file was created, executed against Grafana's own Jest infrastructure (`CI=true node_modules/.bin/jest --watchAll=false --ci --no-coverage ...`), the output captured in this document, and the file subsequently **deleted**. `git status` after deletion reports a clean working tree, confirming repository immutability per the `SWE-AtlasQnA-Repo` rule. The only net addition to the repository by this analysis is the present Markdown document at `blitzy/documentation/grafana_4550cfb5b728.md`.
-
