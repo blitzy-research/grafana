@@ -499,7 +499,7 @@ The inspected defaults that drive every observable first-run behavior:
 | `remote_cache` | `type` | `database` | 190 | Uses primary SQLite DB as cache |
 | `security` | `disable_initial_admin_creation` | `false` | 325 | Admin creation enabled → user=admin created |
 | `security` | `admin_user` | `admin` | 328 | `Created default admin user=admin` |
-| `security` | `admin_password` | `admin` | 331 | Bcrypt-hashed → stored in `user.password` |
+| `security` | `admin_password` | `admin` | 331 | PBKDF2-HMAC-SHA256 hashed (10,000 iterations, 50-byte output, hex-encoded to 100 chars) → stored in `user.password`; salt in `user.salt` |
 | `security` | `admin_email` | `admin@localhost` | 334 | `user.email` |
 | `security` | `secret_key` | `SW2YcwTIb9zpOOhoPsMm` | 337 | Used by signing & envelope encryption |
 | `security` | `encryption_provider` | `secretKey.v1` | 340 | `currentprovider=secretKey.v1` in log |
@@ -648,9 +648,20 @@ Observable behaviors:
 Observed `user` row after first run:
 ```
 id=1  login=admin  email=admin@localhost  is_admin=1  is_service_account=0
-password=<100-char bcrypt hash starting with 36cd2485…>
+password=<100-char hex-encoded PBKDF2-HMAC-SHA256 output, e.g. e407b087…>
+salt=<10-char random string, e.g. Bs1EvMaROX>
 uid=dfjblmm07ulmob  createdAt=2026-04-17T02:46:33Z
 ```
+
+Cryptographic primitive verified: `pkg/util/encoding.go:54` calls
+`pbkdf2.Key([]byte(password), []byte(salt), 10000, 50, sha256.New)`, which is
+PBKDF2-HMAC-SHA256 with 10,000 iterations and a 50-byte output; `hex.EncodeToString`
+renders this as 100 hex chars. The salt is stored separately in the `user.salt`
+column rather than embedded in the hash. A mathematical proof of this primitive
+is available by reproducing any observed hash: for salt `Bs1EvMaROX` and password
+`admin`, `python3 -c "import hashlib; print(hashlib.pbkdf2_hmac('sha256', b'admin',
+b'Bs1EvMaROX', 10000, 50).hex())"` yields exactly the value stored in the DB. Zero
+bcrypt imports exist anywhere under `pkg/`; the primitive is strictly PBKDF2.
 
 Observed `org` row after first run: `id=1 name="Main Org." address1="" city="" state="" country=""`.
 
@@ -767,8 +778,13 @@ The chain of causation is:
    sees `SELECT COUNT(id) FROM "user"` equal to 0 and therefore calls
    `ss.createUser(ctx, sess, user.CreateUserCommand{Login: ss.cfg.AdminUser, …, Password:
    user.Password(ss.cfg.AdminPassword), IsAdmin: true})` at line 213.
-6. `user.Password(...)` produces a bcrypt hash, which is stored in the `user.password`
-   column. Runtime inspection confirmed a 100-character hash (bcrypt cost 10 output).
+6. `user.Password(...).Hash(salt)` (at `pkg/services/user/password.go:30-36`) calls
+   `util.EncodePassword(password, salt)` (at `pkg/util/encoding.go:52-56`), which performs
+   `pbkdf2.Key([]byte(password), []byte(salt), 10000, 50, sha256.New)` and returns the
+   hex-encoded result. The 50-byte output hex-encodes to exactly 100 characters and is
+   stored in the `user.password` column; the salt is stored in the separate `user.salt`
+   column. Runtime inspection confirmed a 100-character hex hash (PBKDF2-HMAC-SHA256,
+   10,000 iterations × 50-byte output) plus a distinct 10-character salt.
 7. The created row has `is_admin=1`, attaching the superuser privilege that makes
    `/api/user`'s `isGrafanaAdmin` field report `true`.
 8. The same transaction calls `ss.getOrCreateOrg(sess, mainOrgName)` to create the "Main Org."
@@ -788,7 +804,7 @@ The full set of security defaults driving first-run behavior:
 |---|---|---|---|
 | `disable_initial_admin_creation` | `false` | 325 | Admin creation enabled |
 | `admin_user` | `admin` | 328 | Stored as `user.login` |
-| `admin_password` | `admin` | 331 | Bcrypt-hashed into `user.password` |
+| `admin_password` | `admin` | 331 | PBKDF2-HMAC-SHA256 hashed (10,000 iterations, 50-byte output, hex-encoded to 100 chars) into `user.password`; salt in `user.salt` |
 | `admin_email` | `admin@localhost` | 334 | Stored as `user.email` |
 | `secret_key` | `SW2YcwTIb9zpOOhoPsMm` | 337 | Used for signing & envelope encryption root |
 | `encryption_provider` | `secretKey.v1` | 340 | `currentprovider=secretKey.v1` in startup log |
@@ -1323,21 +1339,47 @@ created=2026-04-17T02:46:…  updated=2026-04-17T02:46:…
 ### 11.3 Secret Migration
 
 A background service under `pkg/services/secrets/kvstore/migrations/` is responsible for
-migrating legacy plaintext or differently-encrypted secrets into the envelope format. It
-uses a server lock via `pkg/infra/serverlock` to ensure single-leader execution across
-replicas.
+migrating legacy plaintext or differently-encrypted secrets into the envelope format.
+`SecretMigrationProviderImpl.Migrate` (`pkg/services/secrets/kvstore/migrations/migrator.go:68-85`)
+wraps the underlying `DataSourceSecretMigrationService.Migrate` in a
+`serverLockService.LockExecuteAndRelease(ctx, "secret migration task ", 10*time.Minute, fn)`
+call. `LockExecuteAndRelease` (`pkg/infra/serverlock/serverlock.go:137-170`) acquires a row
+in `server_lock` via a UNIQUE constraint on `operation_uid`, runs `fn`, and then calls
+`releaseLock` which **removes** the row — so the lock is not persistent across restarts.
+The lock exists to guarantee single-leader execution in HA/replica scenarios.
+
+The per-run short-circuit is not lock-based; it is implemented inside the locked closure
+by `DataSourceSecretMigrationService.Migrate`
+(`pkg/services/secrets/kvstore/migrations/datasource_mig.go:40-106`). That function reads
+the `secretMigrationStatus` entry from `kv_store` (namespace `datasource`) and evaluates
+two flags: `needCompatibility` (true when the stored status is not `compatible` and
+`FlagDisableSecretsCompatibility` is off) and `needMigration` (true when the stored status
+is not `complete` and the flag is on). On a default OSS boot, the flag is off. If neither
+flag is true, the migration body is skipped entirely and the existing KV entries remain
+untouched.
 
 Observable first-run vs subsequent-run behavior:
 
-- **First run:** Creates `server_lock` row for the migration, runs migration, inserts
-  `kv_store` rows:
-  - `datasource | secretMigrationStatus`
-  - `plugin.angularpatterns | angular_patterns`
-  - `plugin.publickeys | key-*`
-  - (and related entries for `ngalert.migration`)
-- **Subsequent runs:** The lock row already exists. The migration short-circuits with a log
-  line such as `Server lock for secret migration already exists` and does not rewrite the
-  KV entries.
+- **First run:** The `secretMigrationStatus` key does not exist, so `needCompatibility` is
+  true. The function iterates all data sources (none on a clean first run), then writes
+  `secretMigrationStatus=compatible` into `kv_store`. Other KV entries also land during
+  startup via adjacent services:
+  - `datasource | secretMigrationStatus | compatible`
+  - `ngalert.migration | currentAlertingType | Legacy`
+  - `plugin.angularpatterns | angular_patterns | [...]`, `etag`, `last_updated`
+  - `plugin.publickeys | key-7e4d0c6a708866e7 | <PGP block>`, `last_updated`
+  The transient server_lock row is acquired, used, and released — it does not persist in
+  the DB after startup.
+- **Subsequent runs:** `LockExecuteAndRelease` acquires the lock cleanly (no other process
+  holds it in a single-server setup), and the inner `Migrate` function reads
+  `secretMigrationStatus=compatible`, so `needCompatibility` and `needMigration` are both
+  false; the migration body short-circuits without touching the KV store or any
+  datasource. The lock is then released. The log line
+  `"Server lock for secret migration already exists"` at `migrator.go:82` is **only**
+  emitted when `LockExecuteAndRelease` returns an error (i.e., another process is holding
+  the lock concurrently — the HA case). It does **not** appear in normal single-server
+  restarts, and was verified absent from all three captured restart logs in this
+  investigation.
 
 ### 11.4 Secret Storage
 
@@ -1395,7 +1437,7 @@ left intact.
 | 1 | SQLite database file | Created at `data/grafana.db` (logged: `Creating SQLite database file path=data/grafana.db`) | File already exists, opened without creation log | `pkg/services/sqlstore/sqlstore.go:initEngine` |
 | 2 | Schema migrations | All 626 executed; logged individually (`Executing migration`), then `migrations completed performed=626 skipped=0 duration=1.69775249s` | All 626 checked against `migration_log`, all skipped: `migrations completed performed=0 skipped=626 duration=767.619µs` (~2200× faster) | `pkg/services/sqlstore/migrations/` + `migrator.RunMigrations` |
 | 3 | Resource migrator | 18 migrations executed: `migrations completed performed=18 skipped=0 duration=49.370875ms` | All 18 skipped: `migrations completed performed=0 skipped=18 duration=33.347µs` | Resource-store migrator |
-| 4 | Admin user | Created with `login=admin`, `password=admin` (bcrypt-hashed 100 chars), `is_admin=1` (logged: `Created default admin user=admin`) | User count > 0; creation skipped entirely; no log line | `pkg/services/sqlstore/sqlstore.go:190-232` |
+| 4 | Admin user | Created with `login=admin`, `password=admin` (PBKDF2-HMAC-SHA256 hashed via `pkg/util/encoding.go:54`; 10,000 iterations, 50-byte output, hex-encoded to 100 chars; salt stored separately in `user.salt`), `is_admin=1` (logged: `Created default admin user=admin`) | User count > 0; creation skipped entirely; no log line | `pkg/services/sqlstore/sqlstore.go:190-232` |
 | 5 | Default organization | "Main Org." created (logged: `Created default organization`) | Already exists; skipped; no log line | `pkg/services/sqlstore/sqlstore.go:225-230` |
 | 6 | Plugin loading | 54 plugins loaded from core sources (`Plugins loaded count=54 duration=27.655448ms`) | Same 54 plugins loaded (`count=54 duration=28.017063ms`) — deterministic | `pkg/services/pluginsintegration/pluginstore/store.go:32-53` |
 | 7 | External plugin directory | `data/plugins/` absent → `Failed to load external plugins error="failed to open plugins path"` | Still absent → same error logged again | `pkg/plugins/manager/sources/sources.go:34-47` |
@@ -1404,7 +1446,7 @@ left intact.
 | 10 | `data/csv/`, `data/pdf/`, `data/png/` | Created as empty directories | Already exist | Renderer subsystem |
 | 11 | KV store entries | Created: `ngalert.migration/currentAlertingType`, `datasource/secretMigrationStatus`, `plugin.angularpatterns/*` (3 entries), `plugin.publickeys/*` (2 entries) | Already present from first run; angular patterns re-fetch may `UPDATE` etag & last_updated in place | `pkg/services/secrets/kvstore/*`, angular detectors |
 | 12 | Server lock entries | `cleanup expired auth tokens` row created | Lock already exists (may be renewed, not recreated) | `pkg/infra/serverlock` |
-| 13 | Secret migration | Runs, writes `secretMigrationStatus` KV entry | Short-circuits on existing lock row: `Server lock for secret migration already exists` | `pkg/services/secrets/kvstore/migrations/` |
+| 13 | Secret migration | Acquires transient server lock via `LockExecuteAndRelease`; inner `DataSourceSecretMigrationService.Migrate` writes `secretMigrationStatus=compatible` KV entry; lock is then released | Lock re-acquired cleanly; inner `Migrate` reads `secretMigrationStatus=compatible` and short-circuits without touching KV or datasources; no lock-failure log line in single-server restart (the `Server lock for secret migration already exists` error at `migrator.go:82` is only emitted in HA/concurrent scenarios where the lock cannot be acquired) | `pkg/services/secrets/kvstore/migrations/migrator.go:68-85`, `datasource_mig.go:40-106` |
 | 14 | RBAC fixed roles | `RegisterFixedRoles` runs (in-memory only in OSS) | Runs again (idempotent, in-memory only) | `pkg/server/server.go:130` |
 | 15 | Envelope encryption | `Envelope encryption state enabled=true currentprovider=secretKey.v1` logged; `data_keys` row inserted | Log line repeats; existing `data_keys` row reused | `pkg/services/secrets/manager/manager.go:58` |
 | 16 | Signing key | Created lazily (~50s after startup); 1 row in `signing_key` (ES256) | Reused from prior run | `pkg/services/signingkeys/` |
@@ -1477,9 +1519,13 @@ Because the default credentials are hardcoded into `conf/defaults.ini`:
 creates the admin user on first run (when the `user` table is empty) using
 `ss.createUser(ctx, sess, user.CreateUserCommand{Login: ss.cfg.AdminUser, Password:
 user.Password(ss.cfg.AdminPassword), IsAdmin: true})`. This is guarded only by
-`disable_initial_admin_creation` (default `false`). The password is bcrypt-hashed before
-storage (runtime inspection confirmed a 100-character hash in `user.password`), but the
-plaintext value is the ubiquitous `admin`. See Section 7.1 for details.
+`disable_initial_admin_creation` (default `false`). The password is PBKDF2-HMAC-SHA256
+hashed before storage — `util.EncodePassword` (`pkg/util/encoding.go:54`) calls
+`pbkdf2.Key(password, salt, 10000, 50, sha256.New)` and hex-encodes the 50-byte output to
+100 characters stored in `user.password`; the salt is stored separately in `user.salt`
+(runtime inspection confirmed a 100-character hex hash plus a distinct 10-character
+salt). There are **no** `bcrypt` imports anywhere under `pkg/`. The plaintext value is,
+regardless, the ubiquitous `admin`. See Section 7.1 for details.
 
 Anonymous access is **not** enabled (`[auth.anonymous] enabled = false`), so the server
 still requires credentials — but it already supplied them to the operator by generating the
@@ -1576,7 +1622,13 @@ On subsequent runs:
   `performed=0 skipped=18`.
 - The admin-creation and organization-creation code paths short-circuit on non-empty tables
   (no log lines).
-- The secret-migration server lock row already exists, so the job short-circuits.
+- The secret-migration job acquires and releases a transient `server_lock` row and then
+  short-circuits inside the locked closure because the `kv_store` entry
+  `datasource | secretMigrationStatus | compatible` is already present (the row in
+  `server_lock` is not persistent — it is released each run). The
+  `Server lock for secret migration already exists` log line at `migrator.go:82` is
+  **not** emitted on single-server restarts (it only fires in HA/concurrent scenarios
+  where `LockExecuteAndRelease` fails to acquire the lock).
 - The startup log is 58 lines — a 23× reduction.
 
 Things that do **not** change between runs:
