@@ -19,7 +19,7 @@ Authoritative Grafana web documentation is cited only to *corroborate* the code,
 
 ### "Completely clean state" — precise definition
 
-A clean start, as used throughout this document, means **all four** of the following artifacts are **absent** before the server is launched, and the server is started with **no `custom.ini` and no environment variables**:
+A clean start, as used throughout this document, means **all five** of the following artifacts are **absent** before the server is launched, and the server is started with **no `custom.ini` and no environment variables**:
 
 | Artifact | Why its absence matters |
 |----------|-------------------------|
@@ -29,7 +29,7 @@ A clean start, as used throughout this document, means **all four** of the follo
 | `pkg/server/wire_gen.go` | The generated dependency-injection initializer — required before the backend can even compile (see Q5). |
 | `bin/`, `public/build` | No compiled binary and no frontend bundle yet (see Q5). |
 
-All four were independently verified absent in a pristine checkout of this commit. The runtime evidence below was then gathered by building and running the source inside the project's pinned toolchain.
+All five were independently verified absent in a pristine checkout of this commit. The runtime evidence below was then gathered by building and running the source inside the project's pinned toolchain.
 
 ---
 
@@ -110,7 +110,7 @@ The *disabled* side is **not** a global "permissive mode" — it is a per-servic
 
 > **A different disable mechanism — `quota` (do not conflate).** It is tempting to cite `quota` as a gate skip because it *does* have an `IsDisabled()` method (`pkg/services/quota/quotaimpl/quota.go:78-79`, returning `!s.Cfg.Quota.Enabled`, with `[quota] enabled = false` by default). But `quota` is **not** skipped by the background-service gate: the `quota.Service` interface has **no** `Run(ctx)` method (`pkg/services/quota/quota.go:9-28`), so it is **not** a `registry.BackgroundService`, and it is **not** registered in `pkg/registry/backgroundsvcs/background_services.go`. Instead it is disabled at the **provider level** — `ProvideService` returns a no-op `&serviceDisabled{}` implementation when `IsDisabled()` is true (`quotaimpl/quota.go:60`, `:72`). So `quota` never enters the `Server.Run()` background-service loop at all; its "disabled" is a *separate* path from the `CanBeDisabled` gate.
 
-When the same first run is repeated at `--log.level=debug`, the generic gate lines become visible and the contrast is unambiguous: **34** background services emit `"Starting background service"` while `searchV2.StandardSearchService` emits **zero** such lines (`quota`, not being a background service, never appears in that loop).
+When the same first run is repeated with `cfg:log.level=debug`, the generic gate lines become visible and the contrast is unambiguous: **34** background services emit `"Starting background service"` while `searchV2.StandardSearchService` emits **zero** such lines (`quota`, not being a background service, never appears in that loop).
 
 > **Log-level nuance (important):** the generic `"Starting background service"` line (`pkg/server/server.go:162`) and the normal-path `"Stopped background service"` line (`:171`) are emitted at **Debug** level, so they do **not** appear at the default Info level. (The *failure-path* `"Stopped background service"` line at `:168` is **Error** level — it lives inside the `if err != nil && !errors.Is(err, context.Canceled)` branch at `:167` — and would therefore surface even at Info, but only if a background service returns a non-cancel error, which does not happen on a clean healthy start.) To see the disabled-vs-success contrast at default verbosity you must read each subsystem's **own** Info-level line, not the generic gate lines.
 
