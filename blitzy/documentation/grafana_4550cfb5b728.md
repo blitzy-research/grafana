@@ -16,7 +16,7 @@ This report answers five runtime-behavior questions about Grafana. Every answer 
 
 The instance was built and run before any evidence was captured. This methodology is recorded explicitly because the version string reported by the API (O3) depends on the linker flags used at build time — so the exact build command is part of the evidence.
 
-Backend build (injects the real version via ldflags — equivalent to `make build-server` / `Makefile` line 201):
+Backend build (injects the real version via ldflags — equivalent to `make build-backend` / `Makefile` line 196):
 
 ```
 # 1) Generate the wire DI code the server entrypoint needs (Makefile gen-go target).
@@ -57,6 +57,7 @@ yarn jest <spec-path> --watchAll=false --verbose
 **Important notes on the build method (relevant to O3):**
 
 - The reported API version is governed by the build's linker flag `-X main.version=%s` (`pkg/build/cmd.go` line 247). When built that way the value is `11.5.0-pre` (`package.json` line 6). A plain `go build`/`go run` WITHOUT those flags would instead leave the compiled-in fallback `var version = "9.2.0"` (`pkg/cmd/grafana/main.go` line 17). This is why the document records the exact build command alongside the actual API value.
+- The correct Make target for the real runnable binary is `make build-backend` (`Makefile` line 196), which runs `go run build.go build-backend` → `doBuild("grafana", "./pkg/cmd/grafana", …)` (`pkg/build/cmd.go` line 81). This is what the manual command above reproduces. It is **not** `make build-server` (`Makefile` line 201), which builds the deprecated server shim `grafana-server` from `./pkg/cmd/grafana-server` (`pkg/build/cmd.go` line 91) — a different binary that is not the one queried for O3.
 - `bin/` and `pkg/server/wire_gen.go` are git-ignored build artifacts; no committed repository file was changed by the investigation.
 
 ---
@@ -104,7 +105,7 @@ logger=ssosettings.service t=2026-06-26T19:59:03.19787511Z level=debug msg="relo
 - Grafana runs long-lived background services as goroutines; idle-time recurrence comes from their periodic tickers, NOT from request handling.
 - At the **default `level = info`**, a strict 60-second idle window is nearly silent: after the startup burst, the only post-startup INFO is a ONE-TIME `logger=infra.usagestats msg="Usage stats are ready to report"` (~+70 s) — it does not recur within minutes. Therefore, within 60 s you may see no NEW recurring INFO line; the first guaranteed RECURRING INFO line appears at the **10-minute** mark.
 - The single prominent guaranteed recurring INFO entry is `logger=cleanup ... msg="Completed cleanup jobs"`, emitted once per 10-minute tick. The two captured ticks at `20:08:04` and `20:18:04` are exactly 10 minutes apart, proving the cadence matches the code's `time.NewTicker(time.Minute * 10)`.
-- Shorter-cadence recurrence (scheduler every 10 s; secrets/alertmanager/SSO every ~60 s; remote-cache GC every 10 min) is logged at DEBUG, which is why the run was also captured at `cfg:log.level=debug` to surface it. The remote-cache DB GC ticker logs only on a deletion failure, so it is silent on an idle instance with nothing to delete.
+- Shorter-cadence recurrence (scheduler every 10 s; secrets/alertmanager/SSO every ~60 s) is logged at DEBUG, which is why the run was also captured at `cfg:log.level=debug` to surface it. The remote-cache DB GC ticker also fires every 10 minutes, but its periodic loop (`internalRunGC`) emits a log line **only if the garbage-collect `DELETE` itself fails**, and that line is at **ERROR** level (line 51), not DEBUG. On a healthy idle instance the `DELETE` succeeds (deleting zero or more expired rows is still success), so the periodic GC loop is silent at every level. (The DEBUG `"Deletion of expired key failed"` line at line 74 lives in the cache `Get` path, not in the periodic GC loop.)
 - Conclusion: **The exact recurring INFO log entry on an idle instance is `level=info msg="Completed cleanup jobs" duration=…` from `logger=cleanup`, recurring every 10 minutes.** Additional recurring entries exist only at DEBUG (scheduler 10 s; secrets/alertmanager/router/SSO ~60 s).
 
 ### (d) Responsible code
@@ -119,7 +120,7 @@ logger=ssosettings.service t=2026-06-26T19:59:03.19787511Z level=debug msg="relo
   - line 157 — `sch.log.Info("Starting scheduler", "tickInterval", sch.baseInterval, "maxAttempts", sch.maxAttempts)`
   - line 158 — ticker advanced at `baseInterval` (per-tick output is DEBUG)
 - `pkg/infra/usagestats/service/service.go` — line 76 `sendReportTicker := time.NewTicker(nextSendInterval)` (~24 h cadence), line 117 one-time INFO "Usage stats are ready to report"; gated by `reporting_enabled = true` (`conf/defaults.ini` line 258)
-- `pkg/infra/remotecache/database_storage.go` — line 30 `time.NewTicker(time.Minute*10)` GC ticker; logs at DEBUG only on deletion failure (line ~74)
+- `pkg/infra/remotecache/database_storage.go` — line 30 `ticker := time.NewTicker(time.Minute * 10)` (GC ticker) → line 36 `dc.internalRunGC()` per tick → `internalRunGC` (line 41). The periodic loop logs **only on GC failure**, and at **ERROR** level — line 51 `dc.log.Error("failed to run garbage collect", "error", err)`; it is silent on success. The DEBUG line 74 `dc.log.Debug("Deletion of expired key failed: %v", err)` is inside `Get` (expired-key deletion), unrelated to the periodic GC loop.
 
 ---
 
@@ -132,34 +133,58 @@ logger=ssosettings.service t=2026-06-26T19:59:03.19787511Z level=debug msg="relo
 
 ### (b) Runtime evidence (verbatim)
 
-On an ALREADY-MIGRATED database (schema up to date) — INFO level: the migrator opens with "Starting DB migrations" and closes with `performed=0`, having executed NOTHING:
+All three captures below were produced by running `./bin/linux-amd64/grafana server` against a dedicated, throw-away data directory (`cfg:paths.data=/tmp/grafana-o2-fresh`) and reading the migrator output from the captured stdout log. These migration runs are deliberately separate from the idle-behavior run used for O1 (and carry their own, later timestamps), because demonstrating both the fresh `performed=N` case and the already-migrated `performed=0` case inherently requires two successive starts against the same database — which cannot come from the single idle run. Every fenced block contains only verbatim, consecutive log lines exactly as captured; where output is long, the omitted portion is described in prose **outside** the fence (no placeholder text appears inside any evidence block).
+
+On an ALREADY-MIGRATED database (schema up to date) — INFO level — the migrator's entire output is the lock / start / complete / unlock envelope with `performed=0`, having executed NOTHING. The following is the complete, unedited INFO migrator output for both migrator instances (no lines omitted):
 
 ```
-logger=migrator t=2026-06-26T19:43:58.593801223Z level=info msg="Starting DB migrations"
-logger=migrator t=2026-06-26T19:43:58.600872833Z level=info msg="migrations completed" performed=0 skipped=626 duration=752.148µs
-logger=resource-migrator t=2026-06-26T19:43:58.755183016Z level=info msg="Starting DB migrations"
-logger=resource-migrator t=2026-06-26T19:43:58.755610168Z level=info msg="migrations completed" performed=0 skipped=18 duration=39.107µs
+logger=migrator t=2026-06-26T22:28:44.013933351Z level=info msg="Locking database"
+logger=migrator t=2026-06-26T22:28:44.013951433Z level=info msg="Starting DB migrations"
+logger=migrator t=2026-06-26T22:28:44.020762918Z level=info msg="migrations completed" performed=0 skipped=626 duration=667.799µs
+logger=migrator t=2026-06-26T22:28:44.020921724Z level=info msg="Unlocking database"
+logger=resource-migrator t=2026-06-26T22:28:44.160555816Z level=info msg="Locking database"
+logger=resource-migrator t=2026-06-26T22:28:44.160569193Z level=info msg="Starting DB migrations"
+logger=resource-migrator t=2026-06-26T22:28:44.161006466Z level=info msg="migrations completed" performed=0 skipped=18 duration=91.386µs
+logger=resource-migrator t=2026-06-26T22:28:44.16114054Z level=info msg="Unlocking database"
 ```
 
-At DEBUG level the same already-migrated run shows one "Skipping migration: Already executed" line per previously-applied migration (644 such lines total), then the terminal `performed=0` line:
+At DEBUG level the same already-migrated run additionally emits one `"Skipping migration: Already executed"` line per previously-applied migration. The following is a verbatim, consecutive slice of the core migrator's DEBUG output — the lock / start envelope followed by the first six skip lines exactly as captured:
 
 ```
-logger=migrator t=2026-06-26T19:58:03.019151148Z level=debug msg="Skipping migration: Already executed" id="create migration_log table"
-logger=migrator t=2026-06-26T19:58:03.035082734Z level=debug msg="Skipping migration: Already executed" id="create user table"
-(total skip lines: 644)
-logger=migrator t=2026-06-26T19:58:03.058380667Z level=info msg="migrations completed" performed=0 skipped=626 duration=39.233702ms
+logger=migrator t=2026-06-26T22:29:02.673122708Z level=info msg="Locking database"
+logger=migrator t=2026-06-26T22:29:02.673140974Z level=info msg="Starting DB migrations"
+logger=migrator t=2026-06-26T22:29:02.678938638Z level=debug msg="Skipping migration: Already executed" id="create migration_log table"
+logger=migrator t=2026-06-26T22:29:02.678960009Z level=debug msg="Skipping migration: Already executed" id="create user table"
+logger=migrator t=2026-06-26T22:29:02.678965515Z level=debug msg="Skipping migration: Already executed" id="add unique index user.login"
+logger=migrator t=2026-06-26T22:29:02.678976534Z level=debug msg="Skipping migration: Already executed" id="add unique index user.email"
+logger=migrator t=2026-06-26T22:29:02.678981237Z level=debug msg="Skipping migration: Already executed" id="drop index UQE_user_login - v1"
+logger=migrator t=2026-06-26T22:29:02.67898648Z level=debug msg="Skipping migration: Already executed" id="drop index UQE_user_email - v1"
 ```
 
-For contrast, the FIRST run against a FRESH database actually applies migrations (`performed=626`, with many "Executing migration"/"Migration successfully executed" lines):
+These `"Skipping migration: Already executed"` DEBUG lines continue for every previously-applied migration: the core `logger=migrator` emits 626 of them (one per registered core migration) and the `logger=resource-migrator` emits 18, for 644 skip lines in total (626 + 18 = 644). Each migrator then closes with its terminal INFO completion line — captured verbatim from the same DEBUG run:
 
 ```
-logger=migrator t=2026-06-26T19:42:30.876977583Z level=info msg="Starting DB migrations"
-logger=migrator t=2026-06-26T19:42:30.877213972Z level=info msg="Executing migration" id="create migration_log table"
-logger=migrator t=2026-06-26T19:42:30.877412387Z level=info msg="Migration successfully executed" id="create migration_log table" duration=198.06µs
-logger=migrator t=2026-06-26T19:42:30.880677565Z level=info msg="Executing migration" id="create user table"
-...
-logger=migrator t=2026-06-26T19:42:32.850851553Z level=info msg="migrations completed" performed=626 skipped=0 duration=1.973658699s
-logger=resource-migrator t=2026-06-26T19:42:33.024532184Z level=info msg="migrations completed" performed=18 skipped=0 duration=57.690205ms
+logger=migrator t=2026-06-26T22:29:02.681816281Z level=info msg="migrations completed" performed=0 skipped=626 duration=2.878893ms
+logger=resource-migrator t=2026-06-26T22:29:02.855240364Z level=info msg="migrations completed" performed=0 skipped=18 duration=106.523µs
+```
+
+For contrast, the FIRST run against a FRESH database actually applies migrations (`performed=626`), emitting an `"Executing migration"`/`"Migration successfully executed"` pair per applied migration. The following is the verbatim, consecutive opening slice of that fresh run (lock / start envelope followed by the first two applied-migration pairs, no lines omitted within this slice):
+
+```
+logger=migrator t=2026-06-26T22:24:57.400109453Z level=info msg="Locking database"
+logger=migrator t=2026-06-26T22:24:57.400130087Z level=info msg="Starting DB migrations"
+logger=migrator t=2026-06-26T22:24:57.400347075Z level=info msg="Executing migration" id="create migration_log table"
+logger=migrator t=2026-06-26T22:24:57.400546287Z level=info msg="Migration successfully executed" id="create migration_log table" duration=198.948µs
+logger=migrator t=2026-06-26T22:24:57.402793207Z level=info msg="Executing migration" id="create user table"
+logger=migrator t=2026-06-26T22:24:57.402954664Z level=info msg="Migration successfully executed" id="create user table" duration=161.701µs
+```
+
+This `"Executing migration"`/`"Migration successfully executed"` sequence repeats for all 626 core migrations; the fresh run then terminates both migrators with their completion lines — captured verbatim:
+
+```
+logger=migrator t=2026-06-26T22:24:59.712862152Z level=info msg="migrations completed" performed=626 skipped=0 duration=2.312533577s
+logger=resource-migrator t=2026-06-26T22:24:59.817560304Z level=info msg="Starting DB migrations"
+logger=resource-migrator t=2026-06-26T22:24:59.873527946Z level=info msg="migrations completed" performed=18 skipped=0 duration=55.871442ms
 ```
 
 ### (c) Rationale
@@ -264,23 +289,87 @@ Command:
 yarn jest public/app/features/dashboard-scene/panel-edit/PanelDataPane/PanelDataQueriesTab.test.tsx --watchAll=false --verbose
 ```
 
-Result (abridged to the relevant `activation` block and the summary — reproduce verbatim):
+Result — the complete, unedited output of the command above (no lines omitted). The leading `jest-haste-map: duplicate manual mock found` blocks and the `punycode` `DeprecationWarning` are pre-existing Grafana-monorepo Jest warnings unrelated to this test; they are emitted on every Jest invocation in this repository and are reproduced here verbatim for fidelity:
 
 ```
-PASS public/app/features/dashboard-scene/panel-edit/PanelDataPane/PanelDataQueriesTab.test.tsx (16.759 s)
+jest-haste-map: duplicate manual mock found: store.navIndex.mock
+  The following files share their name; please delete one of them:
+    * <rootDir>/public/app/features/connections/__mocks__/store.navIndex.mock.ts
+    * <rootDir>/public/app/features/datasources/__mocks__/store.navIndex.mock.ts
+
+jest-haste-map: duplicate manual mock found: datasource
+  The following files share their name; please delete one of them:
+    * <rootDir>/public/app/plugins/datasource/azuremonitor/__mocks__/datasource.ts
+    * <rootDir>/public/app/plugins/datasource/influxdb/__mocks__/datasource.ts
+
+jest-haste-map: duplicate manual mock found: query
+  The following files share their name; please delete one of them:
+    * <rootDir>/public/app/plugins/datasource/azuremonitor/__mocks__/query.ts
+    * <rootDir>/public/app/plugins/datasource/influxdb/__mocks__/query.ts
+
+jest-haste-map: duplicate manual mock found: datasource
+  The following files share their name; please delete one of them:
+    * <rootDir>/public/app/plugins/datasource/influxdb/__mocks__/datasource.ts
+    * <rootDir>/public/app/plugins/datasource/loki/__mocks__/datasource.ts
+
+jest-haste-map: duplicate manual mock found: index
+  The following files share their name; please delete one of them:
+    * <rootDir>/public/app/features/datasources/__mocks__/index.ts
+    * <rootDir>/public/app/features/plugins/admin/__mocks__/index.ts
+
+jest-haste-map: duplicate manual mock found: datasource
+  The following files share their name; please delete one of them:
+    * <rootDir>/public/app/plugins/datasource/loki/__mocks__/datasource.ts
+    * <rootDir>/packages/grafana-prometheus/src/test/__mocks__/datasource.ts
+
+(node:120999) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+PASS public/app/features/dashboard-scene/panel-edit/PanelDataPane/PanelDataQueriesTab.test.tsx
+  PanelDataQueriesTab
+    Adding queries
+      ✓ can add a new query (26 ms)
+      ✓ Can add a new query when datasource is mixed (7 ms)
+    PanelDataQueriesTab
+      ✓ renders query group top section (135 ms)
+      ✓ renders queries rows when queries are set (29 ms)
+      ✓ allow to add a new query when user clicks on add new (119 ms)
+      ✓ allow to remove a query when user clicks on remove (372 ms)
     query options
       activation
         ✓ should load data source (5 ms)
         ✓ should store loaded data source in local storage (5 ms)
-        ✓ should load default datasource if the datasource passed is not found (7 ms)
+        ✓ should load default datasource if the datasource passed is not found (6 ms)
+      data source change
         ✓ should load new data source (5 ms)
-        ...
-        ✓ should load last used data source if no data source specified for a panel (4 ms)
+        ✓ changing from one plugin to another (4 ms)
+        ✓ changing from a plugin to a dashboard data source (4 ms)
+        ✓ changing from dashboard data source to a plugin (4 ms)
+      query options change
+        time overrides
+          ✓ should create PanelTimeRange object (5 ms)
+          ✓ should update hoverHeader (4 ms)
+          ✓ should update PanelTimeRange object on time options update (6 ms)
+          ✓ should remove PanelTimeRange object on time options cleared (7 ms)
+        max data points and interval
+          ✓ should update max data points (7 ms)
+          ✓ should update min interval (3 ms)
+          ✓ should update min interval to undefined if empty input (4 ms)
+        query caching
+          ✓ updates cacheTimeout and queryCachingTTL (5 ms)
+      query inspection
+        ✓ allows query inspection from the tab (4 ms)
+      change queries
+        plugin queries
+          ✓ should update queries (4 ms)
+        dashboard queries
+          ✓ should update queries (6 ms)
+          ✓ should load last used data source if no data source specified for a panel (3 ms)
 
 Test Suites: 1 passed, 1 total
 Tests:       25 passed, 25 total
 Snapshots:   0 total
-Time:        17.116 s
+Time:        4.675 s, estimated 87 s
+Ran all test suites matching /public\/app\/features\/dashboard-scene\/panel-edit\/PanelDataPane\/PanelDataQueriesTab.test.tsx/i.
 ```
 
 The decisive test body (`PanelDataQueriesTab.test.tsx` lines 361–366) — include verbatim:
@@ -335,23 +424,56 @@ Command:
 yarn jest public/app/features/alerting/unified/utils/rule-form.o5tmp.test.ts --watchAll=false --verbose
 ```
 
-Output (verbatim):
+Output — the complete, unedited output of the command above (no lines omitted). As in O4, the leading `jest-haste-map: duplicate manual mock found` blocks and the `punycode` `DeprecationWarning` are pre-existing Grafana-monorepo Jest warnings, reproduced here verbatim for fidelity. The five `O5-EVIDENCE …` lines are written by the spec itself via `process.stdout.write` (the spec source is reproduced immediately below this output):
 
 ```
+jest-haste-map: duplicate manual mock found: store.navIndex.mock
+  The following files share their name; please delete one of them:
+    * <rootDir>/public/app/features/connections/__mocks__/store.navIndex.mock.ts
+    * <rootDir>/public/app/features/datasources/__mocks__/store.navIndex.mock.ts
+
+jest-haste-map: duplicate manual mock found: datasource
+  The following files share their name; please delete one of them:
+    * <rootDir>/public/app/plugins/datasource/azuremonitor/__mocks__/datasource.ts
+    * <rootDir>/public/app/plugins/datasource/influxdb/__mocks__/datasource.ts
+
+jest-haste-map: duplicate manual mock found: query
+  The following files share their name; please delete one of them:
+    * <rootDir>/public/app/plugins/datasource/azuremonitor/__mocks__/query.ts
+    * <rootDir>/public/app/plugins/datasource/influxdb/__mocks__/query.ts
+
+jest-haste-map: duplicate manual mock found: datasource
+  The following files share their name; please delete one of them:
+    * <rootDir>/public/app/plugins/datasource/influxdb/__mocks__/datasource.ts
+    * <rootDir>/public/app/plugins/datasource/loki/__mocks__/datasource.ts
+
+jest-haste-map: duplicate manual mock found: index
+  The following files share their name; please delete one of them:
+    * <rootDir>/public/app/features/datasources/__mocks__/index.ts
+    * <rootDir>/public/app/features/plugins/admin/__mocks__/index.ts
+
+jest-haste-map: duplicate manual mock found: datasource
+  The following files share their name; please delete one of them:
+    * <rootDir>/public/app/plugins/datasource/loki/__mocks__/datasource.ts
+    * <rootDir>/packages/grafana-prometheus/src/test/__mocks__/datasource.ts
+
 O5-EVIDENCE INPUT  rule.grafana_alert.data = [{"datasourceUid":"123","refId":"A","queryType":"huh","model":{}}]
 O5-EVIDENCE OUTPUT formValues.queries      = [{"datasourceUid":"123","refId":"A","queryType":"huh","model":{}}]
 O5-EVIDENCE OUTPUT formValues.condition    = "A"
 O5-EVIDENCE reference-identical(queries===grafana_alert.data) = true
 O5-EVIDENCE formValuesFromExistingRule().queries = [{"datasourceUid":"123","refId":"A","queryType":"huh","model":{}}]
+(node:123404) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
 PASS public/app/features/alerting/unified/utils/rule-form.o5tmp.test.ts
   O5: backend rule definition populates query state on edit-view open
-    ✓ rulerRuleToFormValues sets queries from rule.grafana_alert.data (reference identity) (4 ms)
+    ✓ rulerRuleToFormValues sets queries from rule.grafana_alert.data (reference identity) (3 ms)
     ✓ formValuesFromExistingRule (edit-view entry point) populates queries from rule.grafana_alert.data (2 ms)
 
 Test Suites: 1 passed, 1 total
 Tests:       2 passed, 2 total
 Snapshots:   0 total
-Time:        3.998 s
+Time:        4.489 s
+Ran all test suites matching /public\/app\/features\/alerting\/unified\/utils\/rule-form.o5tmp.test.ts/i.
 ```
 
 For transparency, the temporary spec's source is reproduced below (it was DELETED from the repository after the run; showing it documents exactly how the evidence was produced):
@@ -366,6 +488,16 @@ describe('O5: backend rule definition populates query state on edit-view open', 
     const grafanaRule = mockRulerGrafanaRule();
     const ruleWithLocation = mockRuleWithLocation(grafanaRule);
     const formValues = rulerRuleToFormValues(ruleWithLocation);
+
+    process.stdout.write(
+      `O5-EVIDENCE INPUT  rule.grafana_alert.data = ${JSON.stringify(grafanaRule.grafana_alert.data)}\n`
+    );
+    process.stdout.write(`O5-EVIDENCE OUTPUT formValues.queries      = ${JSON.stringify(formValues.queries)}\n`);
+    process.stdout.write(`O5-EVIDENCE OUTPUT formValues.condition    = ${JSON.stringify(formValues.condition)}\n`);
+    process.stdout.write(
+      `O5-EVIDENCE reference-identical(queries===grafana_alert.data) = ${formValues.queries === grafanaRule.grafana_alert.data}\n`
+    );
+
     expect(formValues.queries).toBe(grafanaRule.grafana_alert.data);
     expect(formValues.queries).toEqual(grafanaRule.grafana_alert.data);
     expect(formValues.condition).toEqual(grafanaRule.grafana_alert.condition);
@@ -375,6 +507,11 @@ describe('O5: backend rule definition populates query state on edit-view open', 
     const grafanaRule = mockRulerGrafanaRule();
     const ruleWithLocation = mockRuleWithLocation(grafanaRule);
     const formValues = formValuesFromExistingRule(ruleWithLocation);
+
+    process.stdout.write(
+      `O5-EVIDENCE formValuesFromExistingRule().queries = ${JSON.stringify(formValues.queries)}\n`
+    );
+
     expect(formValues.queries).toEqual(grafanaRule.grafana_alert.data);
     expect(formValues.condition).toEqual(grafanaRule.grafana_alert.condition);
   });
@@ -403,6 +540,6 @@ describe('O5: backend rule definition populates query state on edit-view open', 
 ## Methodology compliance & cleanup
 
 - All runtime evidence above was captured from a locally built-and-run Grafana instance at HEAD `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`; no repository file was modified.
-- The only temporary script created during the investigation (the O5 spec `rule-form.o5tmp.test.ts`) was deleted immediately after capturing its output; `git status` was verified clean. Build artifacts (`bin/`, `pkg/server/wire_gen.go`) are git-ignored and not committed.
+- The only temporary script created inside the repository during the investigation (the O5 spec `rule-form.o5tmp.test.ts`) was deleted immediately after capturing its output; `git status` was verified clean. The O1–O3 evidence was captured from the built binary, and the O4 evidence was produced by running the existing, committed `PanelDataQueriesTab.test.tsx` (no new file). Build/runtime artifacts (`bin/`, `pkg/server/wire_gen.go`, and the runtime `data/` directory created when the server starts) are git-ignored (`.gitignore` — e.g. `/data/*`) and not committed.
 - This document (`blitzy/documentation/grafana_4550cfb5b728.md`) is the single committed artifact of the task.
 
