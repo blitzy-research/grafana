@@ -278,7 +278,7 @@ Reading it left to right:
 func (hs *HTTPServer) QueryMetricsV2(c *contextmodel.ReqContext) response.Response {
     reqDTO := dtos.MetricRequest{}
     if err := web.Bind(c.Req, &reqDTO); err != nil {       // 400 on bind error (L76)
-        return response.Error(http.StatusBadRequest, "query validation error", err)
+        return response.Error(http.StatusBadRequest, "bad request data", err)
     }
     resp, err := hs.queryDataService.QueryData(c.Req.Context(), c.SignedInUser, c.SkipDSCache, reqDTO) // L79
     if err != nil {
@@ -672,7 +672,7 @@ The following transient artifacts were created and then removed so that `git sta
 - [x] Removed the temporary `conf/custom.ini` (gitignored build-tree artifact).
 - [x] Stopped the Grafana server and removed `/tmp/grafana-data` and `/tmp/grafana-run.log`.
 - [x] Removed temporary capture files under `/tmp` (`blitzy_q1_*`, `blitzy_q2a_*`, `blitzy_q2b_*`, `blitzy_panel_resp.*`).
-- [x] Verified `git status --porcelain` shows **only** the new file `blitzy/documentation/grafana_4550cfb5b728.md` and **no** modified tracked source file.
+- [x] Verified `git status --porcelain` is clean (no tracked-file changes in the working tree), and `git diff 4550cfb5b728 --name-status` shows **only** `blitzy/documentation/grafana_4550cfb5b728.md` added, with **no** modified Grafana source files.
 
 > The data source and dashboard were temporary runtime objects stored in the embedded SQLite under `/tmp/grafana-data`; deleting that directory removes them. No tracked repository file was modified at any point in this investigation.
 
