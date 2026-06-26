@@ -35,17 +35,17 @@ lifecycle is orchestrated by the `Server` struct in `pkg/server/server.go`.
 ### Answer
 
 The true readiness signal is the **INFO** line **`HTTP Server Listen`**, emitted by the
-logger named **`http.server`** *immediately after* the network listener has been opened
+logger named **`http.server`** _immediately after_ the network listener has been opened
 successfully. It is not a generic "starting" message — it is logged only once the socket
 is actually bound and ready to accept connections.
 
-The line carries four fields that describe exactly *where* and *how* Grafana is exposed:
+The line carries four fields that describe exactly _where_ and _how_ Grafana is exposed:
 
-| Field      | Source expression          | Meaning |
-|------------|----------------------------|---------|
-| `address`  | `listener.Addr().String()` | The bound socket address (host:port) the listener is actually on |
-| `protocol` | `hs.Cfg.Protocol`          | The wire protocol: one of `http`, `https`, `h2` (HTTP/2), or `socket` |
-| `subUrl`   | `hs.Cfg.AppSubURL`         | The sub-path Grafana is served under (empty by default) |
+| Field      | Source expression          | Meaning                                                                |
+| ---------- | -------------------------- | ---------------------------------------------------------------------- |
+| `address`  | `listener.Addr().String()` | The bound socket address (host:port) the listener is actually on       |
+| `protocol` | `hs.Cfg.Protocol`          | The wire protocol: one of `http`, `https`, `h2` (HTTP/2), or `socket`  |
+| `subUrl`   | `hs.Cfg.AppSubURL`         | The sub-path Grafana is served under (empty by default)                |
 | `socket`   | `hs.Cfg.SocketPath`        | The Unix-domain-socket path (only meaningful when `protocol = socket`) |
 
 Because the default `http_addr` is **empty**, Grafana binds **all interfaces**, so
@@ -100,7 +100,7 @@ the default `http_port = 3000`. With the shipped defaults, the externally advert
 The ordering in the code is what makes this line meaningful. `getListener()` is called
 at [pkg/api/http_server.go:L429], and the function returns early on any error, so control
 only reaches the `hs.log.Info("HTTP Server Listen", …)` call at
-[pkg/api/http_server.go:L434-L435] *after* the socket is open and accepting connections.
+[pkg/api/http_server.go:L434-L435] _after_ the socket is open and accepting connections.
 That is precisely why this line — and not an earlier "starting" message — is the honest
 "the server is now listening" signal.
 
@@ -111,7 +111,7 @@ the OS actually bound. Since the default `http_addr` is empty — and the inline
 `conf/defaults.ini` at [conf/defaults.ini:L37] states "empty will bind to all interfaces"
 — the kernel binds the wildcard address, which is why the rendered value is commonly
 `[::]:3000` rather than a single concrete host. The `protocol` and `socket` fields tell you
-*how* traffic reaches Grafana: plain HTTP, TLS (`https`), HTTP/2 (`h2`), or a Unix domain
+_how_ traffic reaches Grafana: plain HTTP, TLS (`https`), HTTP/2 (`h2`), or a Unix domain
 socket at `hs.Cfg.SocketPath`. Combined with `subUrl` (empty by default, so Grafana is at
 the root path) and the `root_url` template at [conf/defaults.ini:L51], the single line tells
 you the bind address, the transport, the serving sub-path, and — by reference to the
@@ -125,7 +125,7 @@ defaults — the browser-facing URL `http://localhost:3000/`.
 
 ### Answer
 
-Nothing about *authentication* is being finalized at that point — by the time the prompt
+Nothing about _authentication_ is being finalized at that point — by the time the prompt
 appears, you are **already authenticated**. The successful `POST /login` has already
 established the session/cookie. The thing Grafana then asks for is a **client-side,
 skippable** request to **rotate the default `admin` password**. It is **not** a
@@ -181,6 +181,7 @@ seeded default credential**, layered on top of an already-authenticated session.
 
 - The client gate lives in `public/app/core/components/Login/LoginCtrl.tsx`. The sign-in request it issues is at [public/app/core/components/Login/LoginCtrl.tsx:L113-L114]:
 
+  <!-- prettier-ignore -->
   ```ts
   getBackendSrv()
     .post<LoginDTO>('/login', formModel, { showErrorAlert: false })
@@ -315,14 +316,14 @@ seeded default credential**, layered on top of an already-authenticated session.
 
 ### Reasoning / Why
 
-The key insight is that the prompt is *not* an authentication step. Authentication is
+The key insight is that the prompt is _not_ an authentication step. Authentication is
 already complete the moment the **server-side** `POST /login` handler returns success:
 `hs.LoginPost` ([pkg/api/login.go:L230-L242]) finishes by calling `authn.HandleLoginResponse`,
 whose `handleLogin` writes the session cookie via `WriteSessionCookie`
 ([pkg/services/authn/authn.go:L254-L259], [pkg/services/authn/authn.go:L272-L273],
 [pkg/services/authn/authn.go:L313-L319]). The frontend call that triggers this is issued at
 [public/app/core/components/Login/LoginCtrl.tsx:L113-L114], and its `.then((result) => …)` only
-runs *after* that `200`-with-cookie response — so by the time the controller holds the
+runs _after_ that `200`-with-cookie response — so by the time the controller holds the
 authenticated `result`, the cookie is already set. Everything that follows is a
 **client-side UX decision**, not a server gate.
 
@@ -489,7 +490,7 @@ means the probe succeeded and the handler writes `http.StatusOK` (200)
 `http.StatusServiceUnavailable` (503) ([pkg/api/http_server.go:L728-L730]).
 
 The value is cached for five seconds ([pkg/api/health.go:L23]), so the field reflects DB
-reachability *within the last 5 seconds* rather than firing a brand-new query on every hit —
+reachability _within the last 5 seconds_ rather than firing a brand-new query on every hit —
 a deliberate trade-off so that frequent health polling (for example from a load balancer or
 orchestrator) does not hammer the database. Contrast this with `/healthz`
 ([pkg/api/http_server.go:L680-L691]), which never touches the database and only confirms the
@@ -519,10 +520,10 @@ so it appears only on enterprise builds.
   rest down, and only that first error is returned to the caller.
 - **The logs only "hint."** The generic per-service message `Starting background service` is
   emitted at **DEBUG** level, so at the default **INFO** log level ([conf/defaults.ini:L1073-L1074])
-  it is **hidden** — which is exactly why boot logs only *hint* at these services rather than
+  it is **hidden** — which is exactly why boot logs only _hint_ at these services rather than
   announcing each one.
-- **The HTTP server is itself a background service — the *first* one registered.** So the
-  UI/API server comes up as a *peer* alongside the others, not strictly before them.
+- **The HTTP server is itself a background service — the _first_ one registered.** So the
+  UI/API server comes up as a _peer_ alongside the others, not strictly before them.
 - After the loop has dispatched the services, Grafana signals readiness to systemd via
   `READY=1`.
 
@@ -680,7 +681,7 @@ The inline comment at [pkg/server/server.go:L164-L166] confirms the fail-fast se
 group returns only the first real error to the caller, so a single failing service can tear
 the rest down. That is the mechanism behind the "several services starting" you observed.
 
-The reason the boot logs only *hint* at the services — rather than announcing each by name —
+The reason the boot logs only _hint_ at the services — rather than announcing each by name —
 is the log level. The per-service "Starting background service" message is emitted with
 `s.log.Debug(...)` at [pkg/server/server.go:L162], and the default log level is `info`
 ([conf/defaults.ini:L1073-L1074]), at which DEBUG lines are suppressed. So you infer the
@@ -691,7 +692,7 @@ The most important structural fact is that `httpServer` is the **first entry** i
 registry ([pkg/registry/backgroundsvcs/background_services.go:L81]) — it is one of the 36
 services started in the same concurrent loop, not a privileged step that runs before the
 others. That directly answers "how much of Grafana is already active before the UI appears":
-essentially the entire background-service set is *coming up concurrently with* the UI, not
+essentially the entire background-service set is _coming up concurrently with_ the UI, not
 before it. Finally, `notifySystemd("READY=1")` at [pkg/server/server.go:L176] is sent once the
 loop has dispatched all the services (and then `childRoutines.Wait()` at
 [pkg/server/server.go:L179] blocks for their lifetime), which is how the process advertises
@@ -716,10 +717,10 @@ behavior live, the repository ships canonical build/run targets:
 
 The pinned toolchain for such a build is:
 
-| Tool | Version | Source |
-|------|---------|--------|
-| Go   | 1.23.1   | `go.mod` [go.mod:L3] |
-| Node | v22.11.0 | `.nvmrc` [.nvmrc:L1] |
+| Tool | Version  | Source                                              |
+| ---- | -------- | --------------------------------------------------- |
+| Go   | 1.23.1   | `go.mod` [go.mod:L3]                                |
+| Node | v22.11.0 | `.nvmrc` [.nvmrc:L1]                                |
 | Yarn | 4.5.3    | `package.json` `packageManager` [package.json:L453] |
 
 What to observe once it is running at `http://localhost:3000`:
@@ -739,4 +740,3 @@ Afterward, **all** transient artifacts must be removed — the SQLite `grafana.d
 directory, log files, and compiled binaries — so the repository stays pristine. Performing
 this verification is **optional**, and **no repository file other than this document is
 created, modified, or deleted** as part of answering these questions.
-
