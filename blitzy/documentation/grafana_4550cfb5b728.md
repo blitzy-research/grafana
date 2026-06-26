@@ -48,7 +48,7 @@ So that every finding can be re-verified, the evidence was produced with the fol
 **Procedure (A–D):**
 
 - **A — Baseline.** Confirm `git rev-parse HEAD == 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`; confirm `data/`, `bin/`, `public/build`, `pkg/server/wire_gen.go` are absent; snapshot the filesystem to a temp file **outside** the repo.
-- **B — Build.** `make gen-go` (generates `pkg/server/wire_gen.go`) → `make build-go` (produces `bin/grafana`; needs Cgo/gcc). Optionally `yarn install --immutable && yarn build` for the full UI bundle.
+- **B — Build.** `make gen-go` (generates `pkg/server/wire_gen.go`) → `make build-go` (needs Cgo/gcc). **Output-path nuance:** a plain *non-dev* `make build-go` on Linux/amd64 emits the binary under an OS/arch subdirectory, `bin/linux-amd64/grafana` (`pkg/build/cmd.go:166`, `:169-170`); the *dev*/BRA path — `GO_BUILD_DEV=1 make build-go`, i.e. the `-dev` flag (`.bra.toml:3`, `Makefile:17`) — emits `bin/grafana` directly. (In the evidence container, `bin/grafana` is a symlink to `bin/linux-amd64/grafana`.) Optionally `yarn install --immutable && yarn build` for the full UI bundle.
 - **C — First run.** Start the freshly built binary from the clean tree with **no `custom.ini` and no env vars**; capture the full startup log; re-snapshot the filesystem and **diff** against the baseline; inspect `data/grafana.db` **read-only** (open with `mode=ro` or against a copy).
 - **D — Subsequent run.** Restart the **same** binary **without** deleting `data/`; capture the second startup log; show the behavioral delta.
 
@@ -93,22 +93,24 @@ With no `--config`/`custom.ini` and no env vars, only the first step contributes
 On a fresh start the server makes a fixed sequence of decisions and then launches its long-running ("background") services concurrently. At the **default Info log level**, the *success* side is visible as each subsystem's own initialization line:
 
 ```
-logger=plugin.angulardetectorsprovider.dynamic level=info msg="Started background service"   (debug-only; see nuance)
-logger=provisioning level=info msg="starting to provision alerting"
+logger=plugin.angulardetectorsprovider.dynamic level=info msg="Restored cache from database" duration=199.968µs
+logger=plugin.store level=info msg="Plugins loaded" count=54 duration=36.6ms
+logger=grafanaStorageLogger level=info msg="Storage starting"
+logger=provisioning.alerting level=info msg="starting to provision alerting"
 logger=ngalert.multiorg.alertmanager level=info msg="Starting MultiOrg Alertmanager"
 logger=ngalert.scheduler level=info msg="Starting scheduler" tickInterval=10s
-logger=grafanaStorageLogger level=info msg="Storage starting"
 logger=plugins.registration level=info msg="Plugin registered" pluginId=...
-logger=plugin.loader level=info msg="Plugins loaded" count=54
+logger=plugin.angulardetectorsprovider.dynamic level=info msg="Patterns update finished" duration=93.2ms
 logger=http.server level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http
 ```
 
-The *disabled* side is **not** a global "permissive mode" — it is a per-service opt-out. Two concrete services that ship a `CanBeDisabled` implementation and are off by default were observed **not** to start:
+The *disabled* side is **not** a global "permissive mode" — it is a per-service opt-out. The `Server.Run()` gate applies specifically to **registered background services**: a service is skipped only if it implements the optional `CanBeDisabled` interface *and* its `IsDisabled()` returns `true`. One such registered background service was observed **not** to start under defaults:
 
-- **`quota`** — its `IsDisabled()` returns `!s.Cfg.Quota.Enabled`, and `[quota] enabled = false` by default → skipped.
-- **`searchV2` (`StandardSearchService`)** — its `IsDisabled()` returns `!features.IsEnabledGlobally(FlagPanelTitleSearch)`, and the `panelTitleSearch` feature flag is absent from the default runtime toggles → skipped.
+- **`searchV2` (`StandardSearchService`)** — a genuine registered background service (it implements both `Run()` at `pkg/services/searchV2/service.go:124` and `CanBeDisabled` via `IsDisabled()` at `:120-121`); its `IsDisabled()` returns `!features.IsEnabledGlobally(FlagPanelTitleSearch)`, and the `panelTitleSearch` feature flag is off by default → the `Server.Run()` gate skips it.
 
-When the same first run is repeated at `--log.level=debug`, the generic gate lines become visible and the contrast is unambiguous: **34** background services emit `"Starting background service"` while `searchV2.StandardSearchService` and the `quota` service emit **zero** such lines.
+> **A different disable mechanism — `quota` (do not conflate).** It is tempting to cite `quota` as a gate skip because it *does* have an `IsDisabled()` method (`pkg/services/quota/quotaimpl/quota.go:78-79`, returning `!s.Cfg.Quota.Enabled`, with `[quota] enabled = false` by default). But `quota` is **not** skipped by the background-service gate: the `quota.Service` interface has **no** `Run(ctx)` method (`pkg/services/quota/quota.go:9-28`), so it is **not** a `registry.BackgroundService`, and it is **not** registered in `pkg/registry/backgroundsvcs/background_services.go`. Instead it is disabled at the **provider level** — `ProvideService` returns a no-op `&serviceDisabled{}` implementation when `IsDisabled()` is true (`quotaimpl/quota.go:60`, `:72`). So `quota` never enters the `Server.Run()` background-service loop at all; its "disabled" is a *separate* path from the `CanBeDisabled` gate.
+
+When the same first run is repeated at `--log.level=debug`, the generic gate lines become visible and the contrast is unambiguous: **34** background services emit `"Starting background service"` while `searchV2.StandardSearchService` emits **zero** such lines (`quota`, not being a background service, never appears in that loop).
 
 > **Log-level nuance (important):** the generic `"Starting background service"` / `"Stopped background service"` lines are emitted at **Debug** level (`pkg/server/server.go:162`, `:168`, `:171`). They do **not** appear at the default Info level. To see the disabled-vs-success contrast at default verbosity you must read each subsystem's **own** Info-level line, not the generic gate lines.
 
@@ -121,7 +123,8 @@ When the same first run is repeated at `--log.level=debug`, the generic gate lin
 | `Server.Run()` iterates background services | `pkg/server/server.go:139`; per-service gate `if registry.IsDisabled(svc) { continue }` at `:150`; each survivor launched via `s.childRoutines.Go` at `:156`; `notifySystemd("READY=1")` at `:176`; `childRoutines.Wait()` at `:180` |
 | **The enable/disable mechanism** | `pkg/registry/registry.go`: `CanBeDisabled` is an **optional** interface (`:18`, method `IsDisabled() bool` at `:20`); `BackgroundService` at `:25`; `func IsDisabled(srv BackgroundService) bool` at `:53-56` returns `ok && canBeDisabled.IsDisabled()` (`:55`) |
 | Generic gate log lines are Debug | `pkg/server/server.go:162`, `:168`, `:171` |
-| Example disabled services | `pkg/services/quota/quotaimpl/quota.go:78-80` + `conf/defaults.ini:1165` (`[quota] enabled = false`); `pkg/services/searchV2/service.go:120-122` |
+| Background-service gate skip (example) | `pkg/services/searchV2/service.go:120-121` (`IsDisabled() = !IsEnabledGlobally(FlagPanelTitleSearch)`), `:124` (`Run()`); registered in `pkg/registry/backgroundsvcs/background_services.go` (passed as `searchService`) |
+| Provider-level disabled (a **different** mechanism — *not* a `Server.Run()` skip) | `pkg/services/quota/quotaimpl/quota.go:60` (`ProvideService`), `:72` (returns `&serviceDisabled{}`), `:78-79` (`IsDisabled() = !Cfg.Quota.Enabled`); `quota.Service` has no `Run()` (`pkg/services/quota/quota.go:9-28`), not registered as a background service; `conf/defaults.ini:1165` (`[quota] enabled = false`) |
 
 ### Rationale
 
@@ -173,14 +176,15 @@ logger=sqlstore level=info msg="Creating SQLite database file" path=/app/data/gr
 | Default DB path is `data/grafana.db` | `pkg/services/sqlstore/database_config.go:111` (`MustString("data/grafana.db")`) |
 | Relative DB path joined to the data dir | `pkg/services/sqlstore/database_config.go:193` (`filepath.Join(cfg.DataPath, dbCfg.Path)`) |
 | The data directory is created | `pkg/services/sqlstore/database_config.go:195` (`os.MkdirAll(path.Dir(...), 0o750)`) |
-| SQLite connect string creates the file | `pkg/services/sqlstore/database_config.go:199` (`file:%s?cache=%s&mode=rwc`; `rwc` = read-write-create) |
+| SQLite DB file **explicitly created** (source of the quoted log) | `pkg/services/sqlstore/sqlstore.go:255` (`Connecting to DB`); existence check `:258` (`fs.Exists`); `:264` (`if !exists`); `:265` (Info `"Creating SQLite database file"`); `:266` (`os.OpenFile(path, os.O_CREATE`&#124;`os.O_RDWR, 0640)`) |
+| Connection string also carries the create flag (supporting context) | `pkg/services/sqlstore/database_config.go:199` (`file:%s?cache=%s&mode=rwc`; `rwc` = read-write-create) |
 | Schema migrations run, then state is reset | `pkg/services/sqlstore/sqlstore.go:69` (`Migrate(...)`), `:73` (`Reset()`); both invoked from `ProvideService` at `:56` |
 | `data` dir and DB defaults | `conf/defaults.ini:15` (`data = data`), `:123` (`type = sqlite3`), `:164` (`path = grafana.db`) — relative path ⇒ effective `data/grafana.db` |
 | Data path resolution | `pkg/setting/setting.go:934` (`DataPath`) |
 
 ### Rationale
 
-On a clean start there is no `data/` directory, so xorm opens the SQLite connection with `mode=rwc` (`database_config.go:199`), which **creates** `data/grafana.db` after `os.MkdirAll` (`:195`) has created the parent directory. The schema migrator then applies the full migration set and records each step in the `migration_log` table (`sqlstore.go:69`). Because all of this lives **inside the SQLite file under `data/`**, it is durable: stopping and restarting the process does not erase it. That durability is precisely *why* subsequent runs differ from the first — the next run finds a populated database (one user, one org, a full `migration_log`) and therefore takes different branches (see Q3 and Q6). The `png/`, `pdf/`, and `csv/` subdirectories are caches for server-side rendering/exports; `data/plugins/` holds externally-installed plugins (Q4). None of these are committed to the repository — they are gitignored byproducts (see Appendix B).
+On a clean start there is no `data/` directory. After `os.MkdirAll` (`database_config.go:195`) creates the parent directory, SQLStore checks whether the database file already exists (`sqlstore.go:258`) and, finding it absent, logs `"Creating SQLite database file"` (`:265`) and **explicitly creates** it via `os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0640)` (`:266`) — *before* the xorm connection is opened (whose string also carries `mode=rwc`, read-write-create, as a backstop, `database_config.go:199`). Because that creation is gated by the `if !exists` check (`:264`), the `"Creating SQLite database file"` log appears **only on the first run**: on subsequent runs the file already exists, the guard is false, and no creation log is emitted (confirmed at runtime). The schema migrator then applies the full migration set and records each step in the `migration_log` table (`sqlstore.go:69`). Because all of this lives **inside the SQLite file under `data/`**, it is durable: stopping and restarting the process does not erase it. That durability is precisely *why* subsequent runs differ from the first — the next run finds a populated database (one user, one org, a full `migration_log`) and therefore takes different branches (see Q3 and Q6). The `png/`, `pdf/`, and `csv/` subdirectories are caches for server-side rendering/exports; `data/plugins/` holds externally-installed plugins (Q4). None of these are committed to the repository — they are gitignored byproducts (see Appendix B).
 
 ---
 
@@ -199,9 +203,10 @@ logger=sqlstore level=info msg="Created default organization"
 
 **The credentials work, and Grafana immediately demands a change.** Logging in with `admin`/`admin` succeeds and redirects to a forced password-change screen warning that *"Continuing to use the default password exposes you to security risks."*
 
-| Login page (basic auth) | First-login password-change prompt |
+| Observed UI state | What it shows |
 |---|---|
-| ![Grafana default login page](../screenshots/login_default_basic_auth.png) | ![Forced password-change prompt](../screenshots/first_login_password_change_prompt.png) |
+| **Login page (basic auth)** | A single centered card with **Email or username** and **Password** fields and a **Log in** button — **no** anonymous-access entry and **no** sign-up link. The footer reads `Grafana v11.5.0-pre (4550cfb5b7)`, matching the startup banner. |
+| **First-login password-change prompt** | After logging in with `admin`/`admin`, Grafana redirects to a forced **"Update your password"** screen (New password / Confirm new password fields) carrying the warning *"Continuing to use the default password exposes you to security risks."* |
 
 The login page footer reads `Grafana v11.5.0-pre (4550cfb5b7)`, matching the banner; the page presents a **username/password** form only (no anonymous entry, no sign-up).
 
@@ -238,7 +243,7 @@ You can "log in with credentials you never set up" because Grafana **auto-create
 **Plugins load with no install step** (Info log):
 
 ```
-logger=plugin.loader level=info msg="Plugins loaded" count=54
+logger=plugin.store level=info msg="Plugins loaded" count=54 duration=36.6ms
 ```
 
 That count of **54** equals the **32** core panel directories plus the **22** core data source directories shipped on disk under `public/app/plugins/` in the clean tree.
@@ -262,14 +267,13 @@ GET /api/plugins?type=datasource   →  19 data source TYPES available out of th
 GET /api/datasources               →  []  (0 INSTANCES configured)
 ```
 
-The "Add data source" page confirms it visually — ~19 types each badged **"Core"** (Prometheus, Graphite, InfluxDB, OpenTSDB, Loki, Elasticsearch, Jaeger, Tempo, Zipkin, Grafana Pyroscope, Parca, MySQL, Microsoft SQL Server, PostgreSQL, Azure Monitor, CloudWatch, Google Cloud Monitoring, Alertmanager, TestData), available with **no install step**, while Enterprise plugins show an **"Install now"** link:
-
-![Add data source — Core types available with no install](../screenshots/add_datasource_core_types_no_install.png)
+The "Add data source" page confirms it visually — ~19 types each badged **"Core"** (Prometheus, Graphite, InfluxDB, OpenTSDB, Loki, Elasticsearch, Jaeger, Tempo, Zipkin, Grafana Pyroscope, Parca, MySQL, Microsoft SQL Server, PostgreSQL, Azure Monitor, CloudWatch, Google Cloud Monitoring, Alertmanager, TestData), each selectable immediately with **no install step** (no "Install now" action), whereas Enterprise-only data sources are listed separately behind an **"Install"** call-to-action.
 
 ### Governing code citation
 
 | Mechanism | Code |
 |-----------|------|
+| **Plugins-loaded** count log (the Info line quoted above) | `pkg/services/pluginsintegration/pluginstore/store.go:37` (logger `log.New("plugin.store")`) and `:50` (`logger.Info("Plugins loaded", "count", totalPlugins, "duration", ...)`) — emitted by `plugin.store`, not `plugin.loader` |
 | Plugin **source classes** enumerated | `pkg/plugins/manager/sources/sources.go:24` (`List`); **Core** at `:26` (`NewLocalSource(plugins.ClassCore, corePluginPaths(...))`); **Bundled** at `:27` (`NewLocalSource(plugins.ClassBundled, []string{...BundledPluginsPath})`); **External** appended at `:29` (`externalPluginSources()` at `:34`, reading `PluginsPath`) |
 | Core plugin **on-disk paths** | `pkg/plugins/manager/sources/sources.go:64` (`corePluginPaths`): `<StaticRootPath>/app/plugins/datasource` (`:65`) and `/app/plugins/panel` (`:66`) |
 | **Compiled-in** core backends | `pkg/plugins/backendplugin/coreplugin/registry.go` (18 `pkg/tsdb/*` imports; `ProvideCoreRegistry` at `:95`; `NewPlugin` factory at `:204`) |
@@ -277,13 +281,13 @@ The "Add data source" page confirms it visually — ~19 types each badged **"Cor
 | **Remote preinstall** default list | `pkg/setting/setting_plugins.go:30-33` (`defaultPreinstallPlugins` map; `"grafana-lokiexplore-app"` at `:32`), applied at `:54-56` unless `preinstall_disabled` (read at `:49`); async flag at `:79` |
 | Preinstall config keys | `conf/defaults.ini:1740` (`[plugins]`), `:1766` (`preinstall =`, empty), `:1768` (`preinstall_async = true`), `:1770` (`preinstall_disabled = false`); comment at `:1765` documents the default `grafana-lokiexplore-app` |
 | External plugins land here | `data/plugins/` (the `ClassExternal` directory) |
-| No data source **instances** auto-created | `conf/provisioning/*/sample.yaml` — every sample has only `apiVersion: 1` active (all instance entries commented); provisioning dir `conf/defaults.ini:27` |
+| No data source **instances** auto-created | The `datasources`, `dashboards`, `plugins`, and `alerting` samples under `conf/provisioning/*/sample.yaml` each have only `apiVersion: 1` active (every concrete instance entry is commented), so no data-source/dashboard/plugin *instances* are defined; the `access-control` sample has **no** active lines at all (its `apiVersion: 2` is also commented). Provisioning dir `conf/defaults.ini:27` |
 
 ### Rationale
 
 The plugin manager classifies every plugin into one of three **source classes** (`sources.go:24-29`): **Core** (frontends on disk under `public/app/plugins/`, with their data source backends compiled into the binary via `coreplugin/registry.go`), **Bundled** (`plugins-bundled/`), and **External** (`data/plugins/`). This is why panels and data source types "you never installed" appear: they are part of the build and the static assets — not a remote fetch. The one genuine exception is the **preinstall** path: the default list hardcoded at `setting_plugins.go:32` contains `grafana-lokiexplore-app`, and because `preinstall_disabled` defaults to `false`, that single app *is* downloaded from the catalog into `data/plugins/` on first run.
 
-The most important clarification is **TYPES vs INSTANCES**. Having a data source *type* available (a `Core`-class plugin like Prometheus) is **not** the same as having a configured data source *instance*. The clean install ships ~19 types but **zero** instances, because the provisioning samples under `conf/provisioning/` are fully commented (only `apiVersion: 1` is active). `GET /api/plugins?type=datasource` therefore returns 19, while `GET /api/datasources` returns `[]`.
+The most important clarification is **TYPES vs INSTANCES**. Having a data source *type* available (a `Core`-class plugin like Prometheus) is **not** the same as having a configured data source *instance*. The clean install ships ~19 types but **zero** instances, because the relevant provisioning samples (`datasources`, `dashboards`, `plugins`, and `alerting`) under `conf/provisioning/` define no instances — each has only `apiVersion: 1` active, with every concrete entry commented out (the `access-control` sample has no active lines at all). `GET /api/plugins?type=datasource` therefore returns 19, while `GET /api/datasources` returns `[]`.
 
 ---
 
@@ -339,7 +343,7 @@ The server still binds `:3000` and serves the API; only the generated UI JavaScr
 | `build-go` **depends on** `gen-go` | `Makefile:187` (`build-go: gen-go update-workspace`) |
 | Missing `public/build` is **non-fatal** | `pkg/setting/setting.go:1034-1044` (`validateStaticRootPath`): `os.Stat(.../build)` at `:1039`, Error log at `:1040`, but **`return nil`** at `:1043`; called at `:1870` |
 | `make run` builds **backend only** | `.bra.toml:3` (`["GO_BUILD_DEV=1","make","build-go"]`), `:5` (`["./bin/grafana","server",...]`); `make run` at `Makefile:232`, `run-go` at `:236`; full `build: build-go build-js` at `:229` (`build-js` at `:211`) |
-| Build wrapper | `build.go:1` (`// +build ignore`) produces `bin/grafana` |
+| Build wrapper | `build.go:1` (`// +build ignore`) produces the `grafana` binary (`bin/grafana` in dev mode, else `bin/<goos>-<goarch>/grafana` — see the output-path nuance in the methodology) |
 
 ### Rationale
 
@@ -393,7 +397,7 @@ The new team member's perceived "gap" between `contribute/developer-guide.md` an
 
 - **"I logged in with `admin`/`admin` that I never set."** The developer guide lists these credentials (`contribute/developer-guide.md:129`) and a first-login password prompt (`:131`). The code shows *why*: `ensureMainOrgAndAdminUser` auto-creates the account from the `[security]` defaults — **but only on the first run**, because of the user-count gate (`sqlstore.go:204-206`). The configured `admin_password` is therefore applied **once**; changing it in config after the first run has no effect. This first-run-only behavior is corroborated by the official configuration docs, which describe `admin_password` as "Set once on first-run. Default is admin," and by the official sign-in docs, which note that a successful first login prompts a password change. A long-standing upstream issue (#19322) confirms the same subtlety: the config parameter is ineffective after first start.
 
-- **"Subsystems say `disabled`/`skipped` even though I configured nothing."** This is **not** a permissive mode. It is the opt-in `CanBeDisabled` mechanism (`registry.go:53-56`): a service is skipped only if it implements that interface *and* its `IsDisabled()` returns `true` (e.g. `quota` because `[quota] enabled = false`, `searchV2` because its feature flag is off). Everything else runs. And the generic `"Starting/Stopped background service"` lines are **Debug-level**, so they are simply invisible at the default Info verbosity — another source of apparent "silence."
+- **"Subsystems say `disabled`/`skipped` even though I configured nothing."** This is **not** a permissive mode. For **registered background services** it is the opt-in `CanBeDisabled` mechanism (`registry.go:53-56`): `Server.Run()` skips such a service only if it implements that interface *and* its `IsDisabled()` returns `true` (e.g. `searchV2`, because its `panelTitleSearch` feature flag is off by default). Everything else runs. A separate set of services — `quota` is the classic example — is disabled at the **provider level** instead: their `ProvideService` returns a no-op implementation and they are never registered as background services, so they never enter the `Server.Run()` loop at all. And the generic `"Starting/Stopped background service"` lines are **Debug-level**, so they are simply invisible at the default Info verbosity — another source of apparent "silence."
 
 - **"Plugins I never installed are already there."** They are **compiled-in** (18 core data source backends) and **loaded from disk** (32 panels + 22 data sources under `public/app/plugins/`) — not remote fetches — with **one** real exception: the default preinstall list (`setting_plugins.go:32`) downloads `grafana-lokiexplore-app` from the catalog on first run. And a data source **type** being present is not a configured **instance**: the clean install has 19 types but 0 instances (provisioning samples are commented).
 
@@ -438,7 +442,7 @@ The only committed deliverable of this investigation is this single Markdown doc
 
 ## Appendix C — Evidence and citation index
 
-**Runtime evidence captured (defaults-only, this commit):** full first-run startup log (~1360 lines), subsequent-run log (~60 lines), a Debug-level run (~1177 lines) showing the 34 started services vs the skipped `searchV2`/`quota`, the before/after filesystem snapshots, and read-only queries of `user`, `org`, `org_user`, `migration_log`, and `data_source`. UI corroboration screenshots referenced above live under `blitzy/screenshots/`.
+**Runtime evidence captured (defaults-only, this commit):** full first-run startup log (~1360 lines), subsequent-run log (~60 lines), a Debug-level run showing the **34** started background services versus the skipped `searchV2.StandardSearchService` (and confirming `quota` never appears in the background-service loop), the before/after filesystem snapshots, and read-only queries of `user`, `org`, `org_user`, `migration_log`, and `data_source`. UI behavior (the basic-auth login page, the forced first-login password-change prompt, and the "Core"-badged data-source types on the Add-data-source page) was corroborated directly in the running instance and is described textually in Q3 and Q4; this document is intentionally **self-contained** and embeds no external image files.
 
 **Primary source files cited (all in this checkout, `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`):**
 
