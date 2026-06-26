@@ -49,8 +49,8 @@ observed values. No source file was modified; the repository tree is left unchan
 document, which lives under `blitzy/documentation/` (outside the source tree).
 
 > **Path note (important for verification).** The coercion helper `anyToNumber` lives at
-> **`packages/grafana-data/src/utils/anyToNumber.ts`** — *not* under `field/`. The `field/anyToNumber.ts`
-> path does not exist; `displayProcessor` imports it from `../utils/anyToNumber`
+> **`packages/grafana-data/src/utils/anyToNumber.ts`** — i.e. in the `utils/` directory; no same-named
+> helper exists under the field directory. `displayProcessor` imports the helper from `../utils/anyToNumber`
 > (`packages/grafana-data/src/field/displayProcessor.ts:L13`). All citations below use the `utils/` path.
 
 ---
@@ -362,7 +362,6 @@ actual `NaN`), so **`''` enters the aggregation body**.
 `calcs.sum += currentValue;` (`packages/grafana-data/src/transformations/fieldReducer.ts:L508`). Starting
 from `sum: 0` (`:L446`), once a `''` is added JavaScript performs **string concatenation**
 (`0 + 1 + '' → "1"`), so `sum` becomes the **string** `"1"` — numerically still "1" but **type-corrupted**.
-(Community report #74645 describes exactly this: "addition shud be numeric rather than string concat".)
 
 **B5. `min` is dragged to `''` (which coerces to `0`).** `min` starts at `Number.MAX_VALUE` (`:L448`) and is
 updated by:
