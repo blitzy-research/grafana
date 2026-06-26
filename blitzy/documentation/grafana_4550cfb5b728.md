@@ -41,18 +41,22 @@ or anything else). Every substantive claim carries a `[path:locator]` citation t
 at the commit above, and every answer section ends with an explicit **Rationale** explaining
 *why* the cited mechanism produces the stated guarantee.
 
-**The structure at the center of everything.** The whole discussion turns on one small struct
+**The structure at the center of everything.** The whole discussion turns on one small struct.
+The following is a **verbatim excerpt** of the source
 `[pkg/services/live/pipeline/rule_cache_segmented.go:L13-L17]`:
 
 ```go
 type CacheSegmentedTree struct {
-	radixMu     sync.RWMutex          // the single mutex guarding the routing map
-	radix       map[int64]*tree.Node  // one radix route tree per orgID
-	ruleBuilder RuleBuilder           // produces a fresh rule set on demand
+	radixMu     sync.RWMutex
+	radix       map[int64]*tree.Node
+	ruleBuilder RuleBuilder
 }
 ```
 
-There is exactly one `sync.RWMutex` (`radixMu`
+Reading it field-by-field: `radixMu` is the single `sync.RWMutex` that guards the routing map;
+`radix` is the one per-org map of radix route trees (`map[int64]*tree.Node`); and `ruleBuilder`
+is the collaborator that produces a fresh rule set on demand. There is exactly one
+`sync.RWMutex` (`radixMu`
 `[pkg/services/live/pipeline/rule_cache_segmented.go:L14]`) and one shared map keyed by
 `orgID` `[pkg/services/live/pipeline/rule_cache_segmented.go:L15]`. Holding those two facts in
 mind makes every guarantee below follow directly.
@@ -78,18 +82,35 @@ it calls `fillOrg` **synchronously** to build that org's tree before serving the
 ~20-second background loop keeps the org refreshed
 `[pkg/services/live/pipeline/rule_cache_segmented.go:L28-L44]`.
 
-The flow is *triggered* by real client activity on the hot path. Subscriptions and publishes
-funnel into `Pipeline.Get`:
+The lookup path is reached from client activity. Three call sites invoke `Pipeline.Get`, and
+each is **guarded by an `if g.Pipeline != nil` check** before the call:
 
-- `handleOnSubscribe` calls `g.Pipeline.Get(...)` `[pkg/services/live/live.go:L639]` (defined at `[pkg/services/live/live.go:L613]`).
-- `handleOnPublish` calls `g.Pipeline.Get(...)` `[pkg/services/live/live.go:L736]` (defined at `[pkg/services/live/live.go:L714]`).
-- `HandleHTTPPublish` calls `g.Pipeline.Get(...)` `[pkg/services/live/live.go:L970]` (defined at `[pkg/services/live/live.go:L955]`).
+- `handleOnSubscribe` calls `g.Pipeline.Get(...)` `[pkg/services/live/live.go:L639]` under the guard at `[pkg/services/live/live.go:L638]` (function defined at `[pkg/services/live/live.go:L613]`).
+- `handleOnPublish` calls `g.Pipeline.Get(...)` `[pkg/services/live/live.go:L736]` under the guard at `[pkg/services/live/live.go:L735]` (function defined at `[pkg/services/live/live.go:L714]`).
+- `HandleHTTPPublish` calls `g.Pipeline.Get(...)` `[pkg/services/live/live.go:L970]` under the guard at `[pkg/services/live/live.go:L969]` (function defined at `[pkg/services/live/live.go:L955]`).
 
 `Pipeline.Get` is a thin delegate straight to the cache —
 `return p.ruleGetter.Get(orgID, channel)`
-`[pkg/services/live/pipeline/pipeline.go:L213-L215]` — and the cache itself is wired in at
+`[pkg/services/live/pipeline/pipeline.go:L213-L215]`.
+
+**Where the cache is constructed in this commit — and an important caveat.** In the source at
+commit `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`, the **only** place a `CacheSegmentedTree` is
+constructed is the **dry-run conversion/test** handler `HandlePipelineConvertTestHTTP`
+`[pkg/services/live/live.go:L1123]`. That handler builds a `StorageRuleBuilder`
+`[pkg/services/live/live.go:L1136-L1142]` over an in-request `DryRunRuleStorage`
+`[pkg/services/live/live.go:L1082-L1120]` (constructed at
+`[pkg/services/live/live.go:L1133-L1135]`), then calls
 `channelRuleGetter := pipeline.NewCacheSegmentedTree(builder)`
-`[pkg/services/live/live.go:L1143]`.
+`[pkg/services/live/live.go:L1143]` and `pipeline.New(channelRuleGetter)`
+`[pkg/services/live/live.go:L1144]`. This is the concrete, code-grounded illustration of *how*
+a cache is built and reached through `Pipeline.Get`, but it is **not** production hot-path
+wiring: there is **no `g.Pipeline = ...` assignment anywhere in `pkg/services/live` at this
+commit**, which is precisely why each hot-path caller above is gated by `if g.Pipeline != nil`
+`[pkg/services/live/live.go:L638]`, `[pkg/services/live/live.go:L735]`,
+`[pkg/services/live/live.go:L969]` — when `g.Pipeline` is nil, the pipeline lookup is simply
+skipped. The routing-coherence analysis below describes the behavior of the
+`CacheSegmentedTree` itself (the routing layer), independent of where in the wider service it
+is instantiated.
 
 **Rationale.** "All that activity" settles into consistency because it is **funneled through a
 single shared structure**. Three design facts combine:
@@ -98,13 +119,23 @@ single shared structure**. Three design facts combine:
    `NewCacheSegmentedTree` launches `updatePeriodically` before returning
    `[pkg/services/live/pipeline/rule_cache_segmented.go:L24]`, there is never a window in which
    the cache is live but unmaintained.
-2. **Lazy first-fill means the first reader pays the build cost once.** The first `Get` for an
-   org triggers a synchronous `fillOrg`
-   `[pkg/services/live/pipeline/rule_cache_segmented.go:L66-L71]`; every subsequent reader hits
-   an already-built in-memory tree. (The background loop only ever refreshes orgs that are
-   *already present* in the map — it snapshots the existing keys under the lock
-   `[pkg/services/live/pipeline/rule_cache_segmented.go:L30-L35]` — so an org enters the map
-   exactly once, via that first lazy `Get`.)
+2. **Lazy first-fill materializes an org's tree on demand.** The first `Get` for an org that is
+   not yet present triggers a synchronous `fillOrg`
+   `[pkg/services/live/pipeline/rule_cache_segmented.go:L66-L71]`; once a fill has **succeeded**,
+   the org is present in the map and subsequent readers hit an already-built in-memory tree. The
+   background loop thereafter refreshes only orgs that are *already present* — it snapshots the
+   existing keys under the lock `[pkg/services/live/pipeline/rule_cache_segmented.go:L30-L35]`.
+   This materialization is **not** strictly exactly-once under concurrency: `Get` releases its
+   probing `RLock` `[pkg/services/live/pipeline/rule_cache_segmented.go:L63-L65]` *before*
+   entering the miss branch, and `fillOrg` runs `BuildRules` *before* acquiring the write lock
+   `[pkg/services/live/pipeline/rule_cache_segmented.go:L49]`,
+   `[pkg/services/live/pipeline/rule_cache_segmented.go:L53]`; there is no singleflight and no
+   post-lock double-check. Several concurrent first readers for the same missing org can
+   therefore each observe the miss and run competing `fillOrg` calls. That is harmless: each
+   `fillOrg` finishes by **wholesale-replacing** `radix[orgID]` under the one write lock
+   `[pkg/services/live/pipeline/rule_cache_segmented.go:L55]`, so the competing calls simply
+   **converge on a last-writer-wins result** rather than corrupting state — and from then on
+   every reader hits the in-memory tree.
 3. **One map keyed by `orgID` is the single rendezvous point.** Every reader and the refresher
    operate on the *same* `radix` map under the *same* `radixMu`, so there is exactly one place
    where "the current routes for org N" is defined.
@@ -120,21 +151,21 @@ test, which constructs a cache with **no pre-seeded org** and observes that the 
 > **User Question (verbatim):** "...so how are those transitions handled, and what decides which view is authoritative at any given instant?"
 
 **Answer.** A transition is a **wholesale replacement of an org's entire tree**, performed by
-`fillOrg` `[pkg/services/live/pipeline/rule_cache_segmented.go:L46-L60]`. The sequence is
-deliberate:
+`fillOrg`. The following is a **verbatim excerpt** of the source
+`[pkg/services/live/pipeline/rule_cache_segmented.go:L46-L60]`; the sequence is deliberate:
 
 ```go
 func (s *CacheSegmentedTree) fillOrg(orgID int64) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	channels, err := s.ruleBuilder.BuildRules(ctx, orgID) // slow I/O — OUTSIDE the lock
+	channels, err := s.ruleBuilder.BuildRules(ctx, orgID)
 	if err != nil {
 		return err
 	}
-	s.radixMu.Lock()              // exclusive write lock
+	s.radixMu.Lock()
 	defer s.radixMu.Unlock()
-	s.radix[orgID] = tree.New()   // brand-new empty tree (wholesale replacement)
-	for _, ch := range channels { // repopulate, all under the lock
+	s.radix[orgID] = tree.New()
+	for _, ch := range channels {
 		s.radix[orgID].AddRoute("/"+ch.Pattern, ch)
 	}
 	return nil
@@ -179,10 +210,21 @@ no reader can be inside `Get` observing the map at the same time. A reader there
 **either the entire old tree or the entire new tree** — never a transient empty or half-filled
 one.
 
-**Answer — Stale: bounded and always coherent.** Between refresh cycles (the loop sleeps
-`time.Sleep(20 * time.Second)` `[pkg/services/live/pipeline/rule_cache_segmented.go:L42]`) and
-in the instants around a swap, a reader may receive the **prior** rule set. But that prior set
-is always a **complete, internally consistent snapshot** — never a torn one. Moreover,
+**Answer — Stale: cadence-limited (not strictly bounded) but always coherent.** A reader may
+receive the **prior** rule set in two situations: between refresh passes and in the instants
+around a swap. The background loop processes every currently-known org and *then* sleeps
+`time.Sleep(20 * time.Second)` `[pkg/services/live/pipeline/rule_cache_segmented.go:L42]` before
+starting the next pass `[pkg/services/live/pipeline/rule_cache_segmented.go:L28-L44]`. That makes
+~20 seconds a **refresh cadence, not a hard freshness bound**: the time before a given org is
+next re-filled also includes the time to process the other orgs in the pass — each `BuildRules`
+may run up to its 5-second timeout `[pkg/services/live/pipeline/rule_cache_segmented.go:L47]` —
+and, critically, if `fillOrg` returns an error the prior tree is **left in place**. On a
+`BuildRules` error `fillOrg` returns *before* touching the lock
+`[pkg/services/live/pipeline/rule_cache_segmented.go:L49-L51]`, and the loop merely logs the
+error and moves on `[pkg/services/live/pipeline/rule_cache_segmented.go:L38-L40]`, so that org
+keeps serving its previous snapshot until some later pass succeeds. What *is* guaranteed
+regardless of timing is that whatever a reader receives is always a **complete, internally
+consistent snapshot** — never a torn one. Moreover,
 `StorageRuleBuilder.BuildRules` mints **fresh** rule objects on every cycle
 `[pkg/services/live/pipeline/rule_builder_storage.go:L302-L379]`: it allocates a new slice
 (`rules := make([]*LiveChannelRule, 0, len(channelRules))`
@@ -196,7 +238,8 @@ installs *different* objects in a *different* tree and never mutates the pointer
 is holding.
 
 **Answer — Design stance.** The layer deliberately favors a **stable, complete** view over
-strict freshness: it provides **eventual consistency with bounded staleness, not torn reads.**
+strict freshness: it provides **eventual consistency with coherent (never torn) snapshots,
+refreshed on a best-effort ~20-second cadence** — not a hard staleness bound.
 
 **Rationale.** Two properties combine to make this work:
 
@@ -206,8 +249,10 @@ strict freshness: it provides **eventual consistency with bounded staleness, not
   not observable, so an "incomplete route" cannot be exposed.
 - *Staleness is the deliberate price of cheap reads.* Doing the slow I/O (`BuildRules`)
   **outside** the lock `[pkg/services/live/pipeline/rule_cache_segmented.go:L49]` is what keeps
-  reads fast (O4), and the cost of that choice is a bounded staleness window of roughly the
-  refresh interval `[pkg/services/live/pipeline/rule_cache_segmented.go:L42]`. Because each
+  reads fast (O4), and the cost of that choice is a staleness window governed by the refresh
+  **cadence** — ~20 seconds between passes `[pkg/services/live/pipeline/rule_cache_segmented.go:L42]`
+  plus per-pass processing time, and extended further whenever a refresh errors until the next
+  successful pass `[pkg/services/live/pipeline/rule_cache_segmented.go:L49-L51]`. Because each
   cycle allocates **new** objects rather than mutating shared ones
   `[pkg/services/live/pipeline/rule_builder_storage.go:L313-L320]`, there is no aliasing hazard
   for a consumer still holding a rule from a previous cycle.
@@ -273,32 +318,47 @@ independent reasons:
    the exclusive write lock `[pkg/services/live/pipeline/rule_cache_segmented.go:L53]`, so the
    tree is only ever built single-threaded. The author's "not concurrency-safe" warning is
    respected because there is never concurrent mutation.
-2. **Pre-validation removes the content hazard before persistence.** A rule set is validated by
-   `checkRulesValid` *before* it can be saved. That function builds a **throwaway** tree
+2. **Pre-validation removes the content hazard on the file-backed persistence path.** On the
+   file-backed channel-rule storage, a rule set is validated by `checkRulesValid` *before* it is
+   persisted. That function builds a **throwaway** tree
    (`t := tree.New()` `[pkg/services/live/pipeline/models.go:L133]`), wraps the population loop
    in `defer func(){ if r := recover(); r != nil { reason = ...; ok = false } }()`
    `[pkg/services/live/pipeline/models.go:L134-L139]`, and `AddRoute`s every applicable rule
    `[pkg/services/live/pipeline/models.go:L142]`; if any insertion panics on a conflict,
    `recover()` converts the panic into `ok=false` plus a human-readable reason, and the function
    returns `ok=true` `[pkg/services/live/pipeline/models.go:L145]` only when the whole set builds
-   cleanly. The file-backed storage refuses to persist an invalid set: `saveChannelRules` calls
+   cleanly. `FileStorage.saveChannelRules` refuses to persist an invalid set: it calls
    `ok, reason := checkRulesValid(orgID, rules.Rules)`
    `[pkg/services/live/pipeline/storage_file.go:L255]` and returns an error when `!ok`
-   `[pkg/services/live/pipeline/storage_file.go:L254-L258]`. The rules are listed back out of
-   this same storage through the `Storage` interface (`ListChannelRules`
-   `[pkg/services/live/pipeline/storage.go:L12]`, declared in
-   `[pkg/services/live/pipeline/storage.go:L5-L16]`) that `BuildRules` consumes
-   `[pkg/services/live/pipeline/rule_builder.go:L5-L8]`.
+   `[pkg/services/live/pipeline/storage_file.go:L254-L258]`. When the cache's `RuleBuilder` is a
+   `StorageRuleBuilder` backed by that file storage, the rules `BuildRules` reads back
+   `[pkg/services/live/pipeline/rule_builder.go:L5-L8]` via `ListChannelRules`
+   `[pkg/services/live/pipeline/storage.go:L12]` (declared in
+   `[pkg/services/live/pipeline/storage.go:L5-L16]`) were therefore validated at save time.
+
+   **Scope of this guarantee (precise).** This pre-validation is a property of the *file-backed
+   save path*, **not** of every cache. `NewCacheSegmentedTree` accepts **any** `RuleBuilder`
+   `[pkg/services/live/pipeline/rule_cache_segmented.go:L19]`, and `checkRulesValid` is invoked
+   **only** from `FileStorage.saveChannelRules`
+   `[pkg/services/live/pipeline/storage_file.go:L255]`. A `RuleBuilder` whose rules do not flow
+   through that save path is not covered: the package test uses a `testBuilder` that returns
+   rules directly `[pkg/services/live/pipeline/rule_cache_segmented_test.go:L12-L31]`, and the
+   dry-run handler feeds request-supplied rules through a `DryRunRuleStorage` whose
+   `ListChannelRules` returns them verbatim `[pkg/services/live/live.go:L1118-L1120]` with no
+   `checkRulesValid` step. On those paths it is the caller's responsibility to supply
+   conflict-free patterns.
 
 **Important caveat (stated explicitly).** `fillOrg` itself does **not** `recover`
 `[pkg/services/live/pipeline/rule_cache_segmented.go:L46-L60]`. There is no `recover()` around
-its `AddRoute` loop `[pkg/services/live/pipeline/rule_cache_segmented.go:L56-L58]`. It is
-therefore the **upstream** `checkRulesValid` validation at save time
-`[pkg/services/live/pipeline/models.go:L132-L147]` —
-`[pkg/services/live/pipeline/storage_file.go:L255]` that keeps the background refresh from ever
-encountering a conflicting rule set and panicking. In other words: conflicts are rejected when
-rules are *written*, so by the time they are *read back* and replayed into the live tree, they
-are already known to be conflict-free.
+its `AddRoute` loop `[pkg/services/live/pipeline/rule_cache_segmented.go:L56-L58]`, so a
+conflicting rule set that reached `fillOrg` *would* panic the background goroutine — nothing in
+the cache itself prevents that. The protection lives **upstream, and only on the file-backed
+save path**: `checkRulesValid` at save time `[pkg/services/live/pipeline/models.go:L132-L147]`,
+`[pkg/services/live/pipeline/storage_file.go:L255]`. Thus for a `StorageRuleBuilder` backed by
+file storage, conflicts are rejected when rules are *written*, and by the time they are *read
+back* and replayed into the live tree they are already known to be conflict-free. For any other
+`RuleBuilder` — for example the dry-run or test builders noted above — that property is **not**
+guaranteed by this validation and depends instead on the caller supplying valid patterns.
 
 **Rationale.** The two mechanisms are complementary and, together, sufficient:
 
@@ -306,21 +366,33 @@ are already known to be conflict-free.
   `[pkg/services/live/pipeline/tree/tree.go:L126-L127]` — the unguarded `AddRoute` is only ever
   run by one goroutine at a time.
 - *Pre-validation* eliminates the **content** hazard (pattern conflicts) before it can reach the
-  unguarded `fillOrg` path `[pkg/services/live/pipeline/models.go:L132-L147]`.
+  unguarded `fillOrg` path — **on the file-backed save path**, where `checkRulesValid` runs
+  `[pkg/services/live/pipeline/models.go:L132-L147]`,
+  `[pkg/services/live/pipeline/storage_file.go:L255]`. Builders that bypass that path (e.g. the
+  dry-run/test builders) are not covered by it.
 
-Combined, the panic-prone, non-thread-safe structure is only ever used in a **safe,
-single-writer, pre-validated** regime. The matching discipline it enforces is httprouter's
+Combined, on the file-backed channel-rule path the panic-prone, non-thread-safe structure is
+used in a **safe, single-writer, pre-validated** regime. The matching discipline it enforces is httprouter's
 *"Only explicit matches"* rule `[pkg/services/live/pipeline/tree/readme.md:L15]` (the tree is
 *"a tree code from https://github.com/julienschmidt/httprouter with … fixes/improvements made
 inside [Gin]"* `[pkg/services/live/pipeline/tree/readme.md:L1-L7]`), which is precisely why
 certain pattern combinations are defined as conflicts — e.g. `stream/:scope/cpu` together with
-`stream/metrics/:metric` `[pkg/services/live/pipeline/tree/readme.md:L30-L31]`. The resolution
-precedence (explicit > named-parameter > catch-all) is demonstrated by the in-repo test:
-explicit `stream/telegraf/cpu` `[pkg/services/live/pipeline/rule_cache_segmented_test.go:L38]`
-is preferred over the named `stream/telegraf/:metric`
-`[pkg/services/live/pipeline/rule_cache_segmented_test.go:L43]`, which is preferred over
-`stream/telegraf/:metric/:extra`
-`[pkg/services/live/pipeline/rule_cache_segmented_test.go:L48]`. The matcher returns its result
+`stream/metrics/:metric` `[pkg/services/live/pipeline/tree/readme.md:L30-L31]`. The full
+resolution spectrum is documented in the tree's README — explicit patterns, named-parameter
+patterns, and catch-all (`*rest`) patterns, with "a version without named parameter ...
+preferred when matching" `[pkg/services/live/pipeline/tree/readme.md:L23-L26]`. The **in-repo
+cache test** specifically demonstrates the **explicit-over-named** precedence and
+longer-pattern matching: explicit `stream/telegraf/cpu`
+`[pkg/services/live/pipeline/rule_cache_segmented_test.go:L38]` is preferred over the named
+`stream/telegraf/:metric` `[pkg/services/live/pipeline/rule_cache_segmented_test.go:L43]`; a
+deeper channel matches the longer named pattern `stream/telegraf/:metric/:extra`
+`[pkg/services/live/pipeline/rule_cache_segmented_test.go:L48]`; and a mid-segment named
+parameter `stream/boom:er` matches `stream/booms`
+`[pkg/services/live/pipeline/rule_cache_segmented_test.go:L53]`. That cache test does **not**
+exercise a catch-all route; catch-all matching is a documented capability of the tree
+`[pkg/services/live/pipeline/tree/readme.md:L26]` exercised separately in the tree's own tests
+(e.g. the `/src/*filepath` pattern `[pkg/services/live/pipeline/tree/tree_test.go:L207-L208]`).
+The matcher returns its result
 in a `NodeValue` `[pkg/services/live/pipeline/tree/tree.go:L377]` whose `Handler` (a `Handler`
 alias for `any` `[pkg/services/live/pipeline/tree/tree.go:L68]`) is type-asserted back to
 `*LiveChannelRule` in `Get` `[pkg/services/live/pipeline/rule_cache_segmented.go:L82]`, with
@@ -337,22 +409,28 @@ Putting the pieces together: the channel-rule routing layer is a **read-mostly c
 per-org map of radix trees** `[pkg/services/live/pipeline/rule_cache_segmented.go:L15]`. Fast
 subscribe/publish lookups take a shared `RLock` and read an already-built tree
 `[pkg/services/live/pipeline/rule_cache_segmented.go:L72-L82]`. A background goroutine, launched
-at construction `[pkg/services/live/pipeline/rule_cache_segmented.go:L24]`, refreshes each known
-org roughly every 20 seconds `[pkg/services/live/pipeline/rule_cache_segmented.go:L42]` by doing
-the slow rule fetch **lock-free** `[pkg/services/live/pipeline/rule_cache_segmented.go:L49]` and
-then performing a **wholesale, last-writer-wins pointer swap** of the whole tree under an
-exclusive `Lock` `[pkg/services/live/pipeline/rule_cache_segmented.go:L53-L58]`. Because the
-build-and-swap is atomic with respect to readers, there are **no torn reads** (a reader sees the
-whole old tree or the whole new tree); staleness is **bounded and always coherent**; and because
+at construction `[pkg/services/live/pipeline/rule_cache_segmented.go:L24]`, re-fills each
+already-known org on a best-effort **~20-second cadence** (the loop sleeps 20s between passes
+`[pkg/services/live/pipeline/rule_cache_segmented.go:L42]`) by doing the slow rule fetch
+**lock-free** `[pkg/services/live/pipeline/rule_cache_segmented.go:L49]` and then performing a
+**wholesale, last-writer-wins pointer swap** of the whole tree under an exclusive `Lock`
+`[pkg/services/live/pipeline/rule_cache_segmented.go:L53-L58]`. Because the build-and-swap is
+atomic with respect to readers, there are **no torn reads** (a reader sees the whole old tree or
+the whole new tree); each snapshot a reader receives is **always coherent**, refreshed on that
+~20-second cadence rather than within a hard staleness bound — a failed or slow refresh simply
+leaves the prior snapshot in place
+`[pkg/services/live/pipeline/rule_cache_segmented.go:L49-L51]`; and because
 each cycle allocates **fresh rule objects**
 `[pkg/services/live/pipeline/rule_builder_storage.go:L302-L379]`, any rule pointer a consumer
 already holds is an **immutable snapshot**. Routing integrity over the explicitly
 non-concurrency-safe, panic-on-conflict tree
 `[pkg/services/live/pipeline/tree/tree.go:L126-L127]`,
 `[pkg/services/live/pipeline/tree/tree.go:L222-L340]` is preserved by **serializing all
-mutations** under the write lock and by **validating rule sets at save time** with
-`checkRulesValid` `[pkg/services/live/pipeline/models.go:L132-L147]`,
-`[pkg/services/live/pipeline/storage_file.go:L255]`.
+mutations** under the write lock and, on the **file-backed channel-rule path**, by
+**validating rule sets at save time** with `checkRulesValid`
+`[pkg/services/live/pipeline/models.go:L132-L147]`,
+`[pkg/services/live/pipeline/storage_file.go:L255]` (builders that bypass that save path are not
+covered by that validation, and `fillOrg` itself does not `recover`).
 
 ### Sequence — a reader and the refresher interleaving
 
@@ -403,8 +481,10 @@ executable evidence rather than assertion:
 
 - `TestStorage_Get` `[pkg/services/live/pipeline/rule_cache_segmented_test.go:L33-L54]`
   constructs the cache with **no pre-seeded org** and shows the first `Get` lazily fills it
-  (O1), then asserts the explicit > named-param > catch-all matching precedence (Integrity
-  section).
+  (O1), then asserts **explicit-over-named** precedence plus longer- and mid-segment named-pattern
+  matching (Integrity section) — explicit `stream/telegraf/cpu`, named `stream/telegraf/:metric`,
+  the longer `stream/telegraf/:metric/:extra`, and `stream/boom:er`. (This test does not exercise
+  a catch-all route.)
 - `BenchmarkRuleGet` `[pkg/services/live/pipeline/rule_cache_segmented_test.go:L56-L64]`
   exercises the shared-read lookup path repeatedly (O4).
 
