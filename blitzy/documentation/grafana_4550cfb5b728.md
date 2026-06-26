@@ -8,14 +8,14 @@
 
 ## Section A — Title, Scope & Commit Pinning
 
-**Subject:** Grafana's **"Grouping to matrix"** data transformation, and specifically *what value it
-emits for a `(row, column)` intersection that never appears in a sparse input series*, plus *how that
-value is carried forward* when a panel computes totals (field reducers), thresholds, and color scales.
+**Subject:** Grafana's **"Grouping to matrix"** data transformation, and specifically _what value it
+emits for a `(row, column)` intersection that never appears in a sparse input series_, plus _how that
+value is carried forward_ when a panel computes totals (field reducers), thresholds, and color scales.
 
 **Pinned commit / branch (fidelity statement).** Every conclusion and every `path:line` citation in this
 document is valid **as of HEAD commit `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`** (branch
-`grafana_4550cfb5b728`). The behavior described here — and in particular the *absence of a built-in
-"zero" option* — is a property of this commit. The upstream limitation is tracked in GitHub issue
+`grafana_4550cfb5b728`). The behavior described here — and in particular the _absence of a built-in
+"zero" option_ — is a property of this commit. The upstream limitation is tracked in GitHub issue
 **grafana/grafana#97632** and **may be resolved in later commits**; if you are reading the code at a
 different revision, re-verify the cited lines.
 
@@ -24,11 +24,11 @@ different revision, re-verify the cited lines.
 The transformation **never emits `0`**. For a missing intersection, its **default** emit is an
 **empty string `''`**, and that `''` is placed into a field that is **typed as a number** (it inherits the
 value field's type). The user-selectable options are exactly **`Null`, `True`, `False`, `Empty`** — **there is
-no `Zero` option**. The "missing → effectively zero" behavior an operator observes is therefore *not*
+no `Zero` option**. The "missing → effectively zero" behavior an operator observes is therefore _not_
 produced by the transformation; it is produced **downstream**, and it **differs by code path**:
 
 - **Display / color path:** `''` (and `null`) coerce to `NaN`, so the cell renders **blank** and receives
-  the **base/lowest color**. It *looks* like a zero cell but the text is empty, not `"0"`.
+  the **base/lowest color**. It _looks_ like a zero cell but the text is empty, not `"0"`.
 - **Totals / reducer path:** `''` is **silently counted** (the reducer's null guard does not catch it), so it
   behaves like a counted zero in aggregates — deflating the mean, dragging `min` to `''` (which numerically
   coerces to `0`), and type-corrupting `sum` into a string. By contrast, `null` under the default
@@ -57,19 +57,19 @@ document, which lives under `blitzy/documentation/` (outside the source tree).
 
 ## Section B — The Question (verbatim)
 
-> *"When the 'Grouping to matrix' transformation receives sparse series where some (row, column) pairings
+> _"When the 'Grouping to matrix' transformation receives sparse series where some (row, column) pairings
 > never appear, what does it emit for the empty intersections — an empty cell, a null, or a zero — and how
 > is that value carried forward when the panel computes totals, thresholds, or color scales? The intent is
 > 'missing means zero,' but the dashboard appears to choose differently; identify where the semantics
-> shift."*
+> shift."_
 
 This decomposes into three sub-objectives, answered explicitly below:
 
-| Objective | Question | Answered in |
-|-----------|----------|-------------|
-| **O1 — Emit value** | What goes into a never-seen `(row, column)` cell? | Section C (+ D) |
+| Objective                       | Question                                                            | Answered in     |
+| ------------------------------- | ------------------------------------------------------------------- | --------------- |
+| **O1 — Emit value**             | What goes into a never-seen `(row, column)` cell?                   | Section C (+ D) |
 | **O2 — Downstream propagation** | How is that value carried through totals, thresholds, color scales? | Section F (+ G) |
-| **O3 — Locus of the shift** | Where does "absent/blank" become an effective numeric value? | Section E (+ H) |
+| **O3 — Locus of the shift**     | Where does "absent/blank" become an effective numeric value?        | Section E (+ H) |
 
 ---
 
@@ -80,7 +80,7 @@ This decomposes into three sub-objectives, answered explicitly below:
 
 The reasoning, traced through the code in logical order:
 
-**1. The matrix is built from the rows that *do* exist, then every cell is filled with nullish
+**1. The matrix is built from the rows that _do_ exist, then every cell is filled with nullish
 coalescing.** The transformation first records each input `(column, row) → value` it actually observes
 (`packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L102`). It then iterates over
 the full Cartesian product of unique columns × unique rows and fills each cell as follows:
@@ -91,7 +91,7 @@ const value = matrixValues[columnName][rowName] ?? getSpecialValue(emptyValue);
 
 (`packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L117`). The `??` (nullish
 coalescing) is the crux: **if** the `(column, row)` pairing existed in the input, its real value is used;
-**otherwise** — i.e., for a sparse/missing intersection — the configured *empty value* is substituted via
+**otherwise** — i.e., for a sparse/missing intersection — the configured _empty value_ is substituted via
 `getSpecialValue(emptyValue)`.
 
 **2. The default empty value is `SpecialValue.Empty`.** The constant is
@@ -108,11 +108,15 @@ declared as `emptyValue?: SpecialValue` on the transformer's options interface
 ```ts
 function getSpecialValue(specialValue: SpecialValue) {
   switch (specialValue) {
-    case SpecialValue.False:  return false;   // L180–L181
-    case SpecialValue.True:   return true;    // L182–L183
-    case SpecialValue.Null:   return null;    // L184–L185
+    case SpecialValue.False:
+      return false; // L180–L181
+    case SpecialValue.True:
+      return true; // L182–L183
+    case SpecialValue.Null:
+      return null; // L184–L185
     case SpecialValue.Empty:
-    default:                  return '';      // L186–L188  (empty string)
+    default:
+      return ''; // L186–L188  (empty string)
   }
 }
 ```
@@ -184,29 +188,29 @@ Running this suite (Section G) passes unchanged.
 
 ## Section E — O3: The root mismatch (a number-typed field holding `''`)
 
-**The generated matrix column inherits the *type* of the value field, but its missing cells hold `''`.**
+**The generated matrix column inherits the _type_ of the value field, but its missing cells hold `''`.**
 When the transformation pushes each generated column, it copies the value field's configuration and **type**
 verbatim:
 
 ```ts
 fields.push({
-  name: columnName.toString(),   // L130
-  values: values,                // L131  (contains real values and '' for missing cells)
-  config: valueField.config,     // L132
-  type: valueField.type,         // L133  ← inherits the value field's type
+  name: columnName.toString(), // L130
+  values: values, // L131  (contains real values and '' for missing cells)
+  config: valueField.config, // L132
+  type: valueField.type, // L133  ← inherits the value field's type
 });
 ```
 
 (`packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L129-L134`). When the value
 field is numeric (`FieldType.number`), the **new column is therefore declared `number`-typed**
-(`packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L133`) — *yet* its missing
+(`packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L133`) — _yet_ its missing
 cells contain the empty string `''` produced at
 `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L117`.
 
 **Why this is the locus of the semantic shift (the answer to O3).** A field declared `number` that contains
 a **non-numeric empty-string sentinel** is the structural contradiction at the heart of the user's
-question. The transformation itself does *not* decide that "missing = zero"; it merely writes `''` into a
-number-typed slot. The shift from "absent/blank" to an *effective numeric value* happens **downstream**,
+question. The transformation itself does _not_ decide that "missing = zero"; it merely writes `''` into a
+number-typed slot. The shift from "absent/blank" to an _effective numeric value_ happens **downstream**,
 where consumers that trust the `number` type must reinterpret that `''`:
 
 - the per-cell display/color pipeline coerces it (Section F, Path A), and
@@ -226,7 +230,7 @@ Once the transformation has emitted `''` (default) into a number-typed column, t
 panel-agnostic value-processing layer of `@grafana/data`. **It is treated differently by two distinct
 paths**, which is why a blanket answer to O2 would be wrong:
 
-- **Path A — per-cell display & color** (what each cell *shows* and *what color* it gets).
+- **Path A — per-cell display & color** (what each cell _shows_ and _what color_ it gets).
 - **Path B — aggregate totals & reducers** (sum/mean/min/max/count for footers, scale ranges, etc.).
 
 ### Path A — Display / Color (per cell)
@@ -248,22 +252,22 @@ for empty string, `null`, `undefined`, and arrays:
 ```ts
 export function anyToNumber(value: unknown): number {
   if (typeof value === 'number') {
-    return value;                                   // L9–L11
+    return value; // L9–L11
   }
   if (value === '' || value === null || value === undefined || Array.isArray(value)) {
     return NaN; // lodash calls them 0              // L13–L14
   }
   if (typeof value === 'boolean') {
-    return value ? 1 : 0;                           // L17–L18
+    return value ? 1 : 0; // L17–L18
   }
-  return toNumber(value);                           // L21
+  return toNumber(value); // L21
 }
 ```
 
 (`packages/grafana-data/src/utils/anyToNumber.ts:L8-L22`). The inline comment **`// lodash calls them 0`**
 (`packages/grafana-data/src/utils/anyToNumber.ts:L14`) is the linchpin of Path A: Grafana **deliberately
-diverged from lodash**, whose `toNumber('') === 0`, and chose `NaN` instead. This single decision is *why a
-missing cell is not rendered as `0`.* (The empirical confirmation — `anyToNumber('') === NaN`,
+diverged from lodash**, whose `toNumber('') === 0`, and chose `NaN` instead. This single decision is _why a
+missing cell is not rendered as `0`._ (The empirical confirmation — `anyToNumber('') === NaN`,
 `anyToNumber(null) === NaN`, `anyToNumber(true) === 1` — is in Section G.)
 
 **A3. `NaN` gates out numeric formatting → the cell text is blank.** Numeric formatting is performed only
@@ -276,15 +280,16 @@ string `"0"`).
 (lowest) step and walks upward only while `value >= threshold.value`:
 
 ```ts
-let active = thresholds[0];                  // L12  (base step)
+let active = thresholds[0]; // L12  (base step)
 for (const threshold of thresholds) {
-  if (value >= threshold.value) {            // L15
+  if (value >= threshold.value) {
+    // L15
     active = threshold;
   } else {
-    break;                                   // L18
+    break; // L18
   }
 }
-return active;                               // L22
+return active; // L22
 ```
 
 (`packages/grafana-data/src/field/thresholds.ts:L12-L22`). Since the cell coerces to `NaN`, and **`NaN >= x`
@@ -329,15 +334,16 @@ field.type === FieldType.time;` (`packages/grafana-data/src/transformations/fiel
 `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L133`). Now follow a `''` cell
 through the per-value loop:
 
-**B1. The null guard does *not* catch `''`.** The only null handling is gated on `== null`:
+**B1. The null guard does _not_ catch `''`.** The only null handling is gated on `== null`:
 
 ```ts
-if (currentValue == null) {     // L489
+if (currentValue == null) {
+  // L489
   if (ignoreNulls) {
-    continue;                   // L490–L491  (default Ignore: drop the value)
+    continue; // L490–L491  (default Ignore: drop the value)
   }
   if (nullAsZero) {
-    currentValue = 0;           // L493–L494  (AsZero: null → 0)
+    currentValue = 0; // L493–L494  (AsZero: null → 0)
   }
 }
 ```
@@ -367,8 +373,12 @@ from `sum: 0` (`:L446`), once a `''` is added JavaScript performs **string conca
 updated by:
 
 ```ts
-if (currentValue > calcs.max) { calcs.max = currentValue; }   // L535–L536
-if (currentValue < calcs.min) { calcs.min = currentValue; }   // L539–L541
+if (currentValue > calcs.max) {
+  calcs.max = currentValue;
+} // L535–L536
+if (currentValue < calcs.min) {
+  calcs.min = currentValue;
+} // L539–L541
 ```
 
 (`packages/grafana-data/src/transformations/fieldReducer.ts:L535-L541`). Since **`'' < 1` is `true`** (the
@@ -382,7 +392,7 @@ sum by the inflated count: `calcs.mean = calcs.sum! / calcs.nonNullCount;`
 incremented at `:L510`) counts each `''`. Because the blanks bloat the denominator without adding to the
 numerator, the mean is **deflated** — exactly the result one would get if the blanks were zeros.
 
-**B7. Contrast: `null` under the default `Ignore` mode is *excluded*.** A `null` cell *does* hit the null
+**B7. Contrast: `null` under the default `Ignore` mode is _excluded_.** A `null` cell _does_ hit the null
 guard (`currentValue == null` is `true` at
 `packages/grafana-data/src/transformations/fieldReducer.ts:L489`), so under the default Ignore mode it is
 dropped via `if (ignoreNulls) { continue; }`
@@ -427,18 +437,18 @@ elsewhere in the monorepo; these are not errors and do not affect this suite.)
 
 A standalone script under `/tmp` imported the **real** `@grafana/data` functions (`anyToNumber`,
 `reduceField`/`doStandardCalcs`, `ReducerID`, `FieldType`) directly from the repository source (transpiled
-on the fly) — i.e., these are *actual code outputs*, not a re-implementation — and was deleted after use.
+on the fly) — i.e., these are _actual code outputs_, not a re-implementation — and was deleted after use.
 
 **Raw JavaScript coercion facts (language-level truth underpinning the code):**
 
-| Expression | Observed |
-|------------|----------|
-| `'' == null` | `false` (so the reducer's `== null` guard misses `''`) |
-| `Number.isNaN('')` | `false` (so `''` passes the aggregation gate) |
-| `0 + 1 + '' + ''` | `"1"` — `typeof` is `string` (so `sum` is type-corrupted) |
-| `'' < 1` | `true` (so `min` is dragged to `''`) |
-| `+''` | `0` (so `''` numerically coerces to zero) |
-| `'1' / 3` | `0.3333333333333333` (string sum still divides numerically → deflated mean) |
+| Expression         | Observed                                                                    |
+| ------------------ | --------------------------------------------------------------------------- |
+| `'' == null`       | `false` (so the reducer's `== null` guard misses `''`)                      |
+| `Number.isNaN('')` | `false` (so `''` passes the aggregation gate)                               |
+| `0 + 1 + '' + ''`  | `"1"` — `typeof` is `string` (so `sum` is type-corrupted)                   |
+| `'' < 1`           | `true` (so `min` is dragged to `''`)                                        |
+| `+''`              | `0` (so `''` numerically coerces to zero)                                   |
+| `'1' / 3`          | `0.3333333333333333` (string sum still divides numerically → deflated mean) |
 
 **Real `anyToNumber(...)` outputs** (`packages/grafana-data/src/utils/anyToNumber.ts:L8-L22`):
 `anyToNumber('') === NaN`, `anyToNumber(null) === NaN`, `anyToNumber(undefined) === NaN`,
@@ -447,16 +457,16 @@ on the fly) — i.e., these are *actual code outputs*, not a re-implementation �
 
 **Real `doStandardCalcs` over a number-typed field** (`packages/grafana-data/src/transformations/fieldReducer.ts:L468`):
 
-| Input (number-typed) | `count` | `nonNullCount` | `sum` | `mean` | `min` | `max` |
-|----------------------|:-------:|:--------------:|:-----:|:------:|:-----:|:-----:|
-| `[1, '', '']` (default `Empty`) | `3` | `3` | `"1"` *(string!)* | `0.3333…` *(deflated)* | `''` *(`+min === 0`)* | `1` |
-| `[1, null, null]` (default `Ignore`) | `1` | `1` | `1` *(number)* | `1` *(correct)* | `1` | `1` |
+| Input (number-typed)                 | `count` | `nonNullCount` |       `sum`       |         `mean`         |         `min`         | `max` |
+| ------------------------------------ | :-----: | :------------: | :---------------: | :--------------------: | :-------------------: | :---: |
+| `[1, '', '']` (default `Empty`)      |   `3`   |      `3`       | `"1"` _(string!)_ | `0.3333…` _(deflated)_ | `''` _(`+min === 0`)_ |  `1`  |
+| `[1, null, null]` (default `Ignore`) |   `1`   |      `1`       |  `1` _(number)_   |    `1` _(correct)_     |          `1`          |  `1`  |
 
 The public `reduceField(...)` path (`packages/grafana-data/src/transformations/fieldReducer.ts:L159`) returns
 the same values via `ReducerID` (`[1,'','']` → `mean = 0.333`, `min = ''`, `sum = "1"`, `count = 3`;
 `[1,null,null]` → `mean = 1`, `min = 1`, `sum = 1`, `count = 1`).
 
-> **Phrasing caution (do not overclaim).** `min` is the empty string `''` that *numerically coerces to 0*
+> **Phrasing caution (do not overclaim).** `min` is the empty string `''` that _numerically coerces to 0_
 > (e.g. `+'' === 0`); it is **not** the display text `"0"`. The per-cell display path coerces `'' → NaN`
 > (`packages/grafana-data/src/utils/anyToNumber.ts:L13-L14`) and would render the cell **blank**
 > (`packages/grafana-data/src/field/displayProcessor.ts:L144`). The "0-like" behavior in aggregates is a
@@ -471,11 +481,11 @@ the transformation itself** (which emits `''`/`null`/`true`/`false`, never `0` �
 `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L117,L178-L190`;
 `packages/grafana-data/src/types/transformations.ts:L113-L118`):
 
-| Path / framing | "Missing = zero"? | Why (cited) |
-|----------------|-------------------|-------------|
-| **Aggregate totals / mean** (default `Empty`) | **Effectively TRUE** | `''` slips past the `== null` guard (`packages/grafana-data/src/transformations/fieldReducer.ts:L489`) and is counted (`:L500`), so blanks behave like zeros — deflating the mean (`:L568-L569`) and dragging `min` to `''`/`0` (`:L539-L541`). |
-| **Per-cell display text** | **FALSE** | `anyToNumber('') === NaN` (`packages/grafana-data/src/utils/anyToNumber.ts:L13-L14`) gates out numeric formatting (`packages/grafana-data/src/field/displayProcessor.ts:L144`) → the cell renders **blank**, not `"0"`. |
-| **Explicit zero** | **Only via `Null` + null-as-zero** | Set `emptyValue = Null` so cells are `null` (`packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L184-L185`), then the field's null-value mode `AsZero` converts `null → 0` in the reducer (`packages/grafana-data/src/transformations/fieldReducer.ts:L493-L494`). |
+| Path / framing                                | "Missing = zero"?                  | Why (cited)                                                                                                                                                                                                                                                                                 |
+| --------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Aggregate totals / mean** (default `Empty`) | **Effectively TRUE**               | `''` slips past the `== null` guard (`packages/grafana-data/src/transformations/fieldReducer.ts:L489`) and is counted (`:L500`), so blanks behave like zeros — deflating the mean (`:L568-L569`) and dragging `min` to `''`/`0` (`:L539-L541`).                                             |
+| **Per-cell display text**                     | **FALSE**                          | `anyToNumber('') === NaN` (`packages/grafana-data/src/utils/anyToNumber.ts:L13-L14`) gates out numeric formatting (`packages/grafana-data/src/field/displayProcessor.ts:L144`) → the cell renders **blank**, not `"0"`.                                                                     |
+| **Explicit zero**                             | **Only via `Null` + null-as-zero** | Set `emptyValue = Null` so cells are `null` (`packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L184-L185`), then the field's null-value mode `AsZero` converts `null → 0` in the reducer (`packages/grafana-data/src/transformations/fieldReducer.ts:L493-L494`). |
 
 **Where the semantics shift (O3, restated).** Not in the transformation — which faithfully writes `''` into
 a number-typed field (`packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L117,L133`)
@@ -489,7 +499,7 @@ dashboard appears to make.**
 
 ## Section I — Recommendation & upstream tracking
 
-- **To make "missing" behave as a *true absence*** (excluded from totals/mean): set **`emptyValue = Null`**.
+- **To make "missing" behave as a _true absence_** (excluded from totals/mean): set **`emptyValue = Null`**.
   Under the default Ignore null mode, the reducer drops nulls
   (`packages/grafana-data/src/transformations/fieldReducer.ts:L489-L491`), so the mean is computed over only
   the real values (empirically: `[1, null, null] → mean = 1`, Section G). Avoid the default `Empty` if you do
@@ -504,8 +514,8 @@ dashboard appears to make.**
   combinations"** (opened 2024-12-09, label `area/transformations`, since closed). The reporter observed that
   cells come out empty rather than `0`, which "causes issues when visualizing with Bar Chart grouping," and
   expected the cells to contain `0`. This independently confirms — from the project's own tracker — that **no
-  built-in zero behavior exists at/around this commit.** *(External source; corroboration only, secondary to
-  the code above.)*
+  built-in zero behavior exists at/around this commit.** _(External source; corroboration only, secondary to
+  the code above.)_
 
 ---
 
@@ -515,8 +525,8 @@ dashboard appears to make.**
 
 ```ts
 const specialValueOptions: Array<SelectableValue<SpecialValue>> = [
-  { label: 'Null',  value: SpecialValue.Null,  description: 'Null value' },
-  { label: 'True',  value: SpecialValue.True,  description: 'Boolean true value' },
+  { label: 'Null', value: SpecialValue.Null, description: 'Null value' },
+  { label: 'True', value: SpecialValue.True, description: 'Boolean true value' },
   { label: 'False', value: SpecialValue.False, description: 'Boolean false value' },
   { label: 'Empty', value: SpecialValue.Empty, description: 'Empty string' },
 ];
@@ -544,13 +554,13 @@ in the UI as a registry item (`public/app/features/transformers/standardTransfor
 exported at `public/app/features/transformers/editors/GroupingToMatrixTransformerEditor.tsx:L108`).
 
 **Panel viewers are panel-agnostic for this question.** Panels such as
-`public/app/plugins/panel/{table,barchart,heatmap,stat}/` merely *render* the matrix; the semantic decisions
+`public/app/plugins/panel/{table,barchart,heatmap,stat}/` merely _render_ the matrix; the semantic decisions
 about `''`/`null` live in the shared `@grafana/data` display, reduce, threshold, and scale modules cited
 throughout this document — not in the panels themselves.
 
 **External corroboration (secondary to source).** The official Grafana "Transform data" documentation and
-the AWS Managed Grafana documentation both describe the same four options — *select which value to display
-between Null, True, False, or Empty* — and **neither lists a "Zero" choice**, matching the code's
+the AWS Managed Grafana documentation both describe the same four options — _select which value to display
+between Null, True, False, or Empty_ — and **neither lists a "Zero" choice**, matching the code's
 `SpecialValue` enum (`packages/grafana-data/src/types/transformations.ts:L113-L118`). These external sources
 are used only to corroborate the source-derived conclusion; the code at the pinned commit is authoritative.
 
@@ -597,66 +607,66 @@ at commit `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`.
 
 ### Origin of the empty-cell value (O1) + root mismatch (O3)
 
-| Finding | Citation |
-|---------|----------|
-| Cell fill `... ?? getSpecialValue(emptyValue)` | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L117` |
-| Input rows recorded into `matrixValues` | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L102` |
-| `emptyValue?` option declared | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L20` |
-| `DEFAULT_EMPTY_VALUE = SpecialValue.Empty` | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L26` |
-| Default resolution `options.emptyValue \|\| DEFAULT_EMPTY_VALUE` | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L71` |
-| `getSpecialValue` mapping (False→false, True→true, Null→null, Empty/default→`''`) | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L178-L190` |
-| Output column inherits value field type (`type: valueField.type`) | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L133` (push block `:L129-L134`) |
-| `SpecialValue` enum = {True, False, Null, Empty}; **no Zero** | `packages/grafana-data/src/types/transformations.ts:L113-L118` |
-| Default output `[1,'','']` / `['',2,'']` / `['','',3]`, number-typed | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.test.ts:L41,L47,L53` |
-| Multi-field missing cell `[5,'']` | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.test.ts:L99` |
-| `emptyValue: SpecialValue.Null` → `[1,null]` / `[null,2]` | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.test.ts:L112,L136,L142` |
+| Finding                                                                           | Citation                                                                                                    |
+| --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Cell fill `... ?? getSpecialValue(emptyValue)`                                    | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L117`                           |
+| Input rows recorded into `matrixValues`                                           | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L102`                           |
+| `emptyValue?` option declared                                                     | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L20`                            |
+| `DEFAULT_EMPTY_VALUE = SpecialValue.Empty`                                        | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L26`                            |
+| Default resolution `options.emptyValue \|\| DEFAULT_EMPTY_VALUE`                  | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L71`                            |
+| `getSpecialValue` mapping (False→false, True→true, Null→null, Empty/default→`''`) | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L178-L190`                      |
+| Output column inherits value field type (`type: valueField.type`)                 | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L133` (push block `:L129-L134`) |
+| `SpecialValue` enum = {True, False, Null, Empty}; **no Zero**                     | `packages/grafana-data/src/types/transformations.ts:L113-L118`                                              |
+| Default output `[1,'','']` / `['',2,'']` / `['','',3]`, number-typed              | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.test.ts:L41,L47,L53`               |
+| Multi-field missing cell `[5,'']`                                                 | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.test.ts:L99`                       |
+| `emptyValue: SpecialValue.Null` → `[1,null]` / `[null,2]`                         | `packages/grafana-data/src/transformations/transformers/groupingToMatrix.test.ts:L112,L136,L142`            |
 
 ### Display / color path (O2-A)
 
-| Finding | Citation |
-|---------|----------|
-| `anyToNumber` imported from `../utils/anyToNumber` | `packages/grafana-data/src/field/displayProcessor.ts:L13` |
-| `numeric = isStringUnit ? NaN : anyToNumber(value)` | `packages/grafana-data/src/field/displayProcessor.ts:L96` |
+| Finding                                                                                  | Citation                                                                  |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `anyToNumber` imported from `../utils/anyToNumber`                                       | `packages/grafana-data/src/field/displayProcessor.ts:L13`                 |
+| `numeric = isStringUnit ? NaN : anyToNumber(value)`                                      | `packages/grafana-data/src/field/displayProcessor.ts:L96`                 |
 | `anyToNumber` returns `NaN` for `''`/`null`/`undefined`/array (`// lodash calls them 0`) | `packages/grafana-data/src/utils/anyToNumber.ts:L8-L22` (esp. `:L13-L14`) |
-| boolean → 1/0; else `toNumber(value)` | `packages/grafana-data/src/utils/anyToNumber.ts:L17-L18,L21` |
-| Numeric-format gate `if (!Number.isNaN(numeric))` → blank when NaN | `packages/grafana-data/src/field/displayProcessor.ts:L144` |
-| Threshold: base step, `value >= threshold.value`, `NaN >= x` false | `packages/grafana-data/src/field/thresholds.ts:L12-L22` |
-| No-color call `scaleFunc(-Infinity)` (inside `if (!color)`) | `packages/grafana-data/src/field/displayProcessor.ts:L188-L189` |
-| Scale `let percent = 0` and `if (value !== -Infinity)` → percent stays 0 | `packages/grafana-data/src/field/scale.ts:L29,L31` |
-| Scale min/max range via `reduceField([min,max])` | `packages/grafana-data/src/field/scale.ts:L85` (block `:L79-L96`) |
+| boolean → 1/0; else `toNumber(value)`                                                    | `packages/grafana-data/src/utils/anyToNumber.ts:L17-L18,L21`              |
+| Numeric-format gate `if (!Number.isNaN(numeric))` → blank when NaN                       | `packages/grafana-data/src/field/displayProcessor.ts:L144`                |
+| Threshold: base step, `value >= threshold.value`, `NaN >= x` false                       | `packages/grafana-data/src/field/thresholds.ts:L12-L22`                   |
+| No-color call `scaleFunc(-Infinity)` (inside `if (!color)`)                              | `packages/grafana-data/src/field/displayProcessor.ts:L188-L189`           |
+| Scale `let percent = 0` and `if (value !== -Infinity)` → percent stays 0                 | `packages/grafana-data/src/field/scale.ts:L29,L31`                        |
+| Scale min/max range via `reduceField([min,max])`                                         | `packages/grafana-data/src/field/scale.ts:L85` (block `:L79-L96`)         |
 
 ### Totals / reducer path (O2-B)
 
-| Finding | Citation |
-|---------|----------|
-| `reduceField` entry | `packages/grafana-data/src/transformations/fieldReducer.ts:L159` |
-| Delegates to `doStandardCalcs(field, ignoreNulls, nullAsZero)` | `packages/grafana-data/src/transformations/fieldReducer.ts:L214` |
-| `doStandardCalcs` signature | `packages/grafana-data/src/transformations/fieldReducer.ts:L468` |
+| Finding                                                              | Citation                                                                             |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `reduceField` entry                                                  | `packages/grafana-data/src/transformations/fieldReducer.ts:L159`                     |
+| Delegates to `doStandardCalcs(field, ignoreNulls, nullAsZero)`       | `packages/grafana-data/src/transformations/fieldReducer.ts:L214`                     |
+| `doStandardCalcs` signature                                          | `packages/grafana-data/src/transformations/fieldReducer.ts:L468`                     |
 | `defaultCalcs` (sum:0, max:-MAX, min:MAX, mean:null, nonNullCount:0) | `packages/grafana-data/src/transformations/fieldReducer.ts:L446,L447,L448,L450,L456` |
-| `isNumberField` true for number/time field | `packages/grafana-data/src/transformations/fieldReducer.ts:L478` |
-| Null guard `if (currentValue == null)` misses `''` | `packages/grafana-data/src/transformations/fieldReducer.ts:L489` |
-| Default Ignore → `continue` (null excluded) | `packages/grafana-data/src/transformations/fieldReducer.ts:L490-L491` |
-| `AsZero` → `currentValue = 0` (null only) | `packages/grafana-data/src/transformations/fieldReducer.ts:L493-L494` |
-| `calcs.count++` counts `''` | `packages/grafana-data/src/transformations/fieldReducer.ts:L498` |
-| Aggregation gate `!= null && !Number.isNaN` — `''` passes | `packages/grafana-data/src/transformations/fieldReducer.ts:L500` |
-| `calcs.sum += currentValue` type-corrupts to string | `packages/grafana-data/src/transformations/fieldReducer.ts:L508` |
-| `max` / `min` comparisons; `'' < 1` → min becomes `''` | `packages/grafana-data/src/transformations/fieldReducer.ts:L535-L536,L539-L541` |
-| `mean = sum / nonNullCount` (deflated) | `packages/grafana-data/src/transformations/fieldReducer.ts:L568-L569` |
+| `isNumberField` true for number/time field                           | `packages/grafana-data/src/transformations/fieldReducer.ts:L478`                     |
+| Null guard `if (currentValue == null)` misses `''`                   | `packages/grafana-data/src/transformations/fieldReducer.ts:L489`                     |
+| Default Ignore → `continue` (null excluded)                          | `packages/grafana-data/src/transformations/fieldReducer.ts:L490-L491`                |
+| `AsZero` → `currentValue = 0` (null only)                            | `packages/grafana-data/src/transformations/fieldReducer.ts:L493-L494`                |
+| `calcs.count++` counts `''`                                          | `packages/grafana-data/src/transformations/fieldReducer.ts:L498`                     |
+| Aggregation gate `!= null && !Number.isNaN` — `''` passes            | `packages/grafana-data/src/transformations/fieldReducer.ts:L500`                     |
+| `calcs.sum += currentValue` type-corrupts to string                  | `packages/grafana-data/src/transformations/fieldReducer.ts:L508`                     |
+| `max` / `min` comparisons; `'' < 1` → min becomes `''`               | `packages/grafana-data/src/transformations/fieldReducer.ts:L535-L536,L539-L541`      |
+| `mean = sum / nonNullCount` (deflated)                               | `packages/grafana-data/src/transformations/fieldReducer.ts:L568-L569`                |
 
 ### UI / docs / registration (context) + external
 
-| Finding | Citation |
-|---------|----------|
-| Editor: four `specialValueOptions`, `Empty = 'Empty string'` | `public/app/features/transformers/editors/GroupingToMatrixTransformerEditor.tsx:L61-L66` |
-| Editor "Empty Value" select binds `options.emptyValue` | `public/app/features/transformers/editors/GroupingToMatrixTransformerEditor.tsx:L101` |
-| Editor registry item export | `public/app/features/transformers/editors/GroupingToMatrixTransformerEditor.tsx:L108` |
-| In-app docs options text (Null/True/False/Empty) | `public/app/features/transformers/docs/content.ts:L631` |
-| In-app docs worked-example blank-cell output table | `public/app/features/transformers/docs/content.ts:L635-L639` (block `:L617-L642`) |
-| Transformer id `groupingToMatrix` | `packages/grafana-data/src/transformations/transformers/ids.ts:L36` |
-| Standard-registry import + registration | `packages/grafana-data/src/transformations/transformers.ts:L13,L56` |
-| UI registry import + item | `public/app/features/transformers/standardTransformers.ts:L16,L63` |
-| External (secondary): Grafana & AWS docs list four options, no Zero | Grafana "Transform data" docs; AWS Managed Grafana docs |
-| External (secondary): upstream limitation | GitHub issue grafana/grafana#97632 |
+| Finding                                                             | Citation                                                                                 |
+| ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Editor: four `specialValueOptions`, `Empty = 'Empty string'`        | `public/app/features/transformers/editors/GroupingToMatrixTransformerEditor.tsx:L61-L66` |
+| Editor "Empty Value" select binds `options.emptyValue`              | `public/app/features/transformers/editors/GroupingToMatrixTransformerEditor.tsx:L101`    |
+| Editor registry item export                                         | `public/app/features/transformers/editors/GroupingToMatrixTransformerEditor.tsx:L108`    |
+| In-app docs options text (Null/True/False/Empty)                    | `public/app/features/transformers/docs/content.ts:L631`                                  |
+| In-app docs worked-example blank-cell output table                  | `public/app/features/transformers/docs/content.ts:L635-L639` (block `:L617-L642`)        |
+| Transformer id `groupingToMatrix`                                   | `packages/grafana-data/src/transformations/transformers/ids.ts:L36`                      |
+| Standard-registry import + registration                             | `packages/grafana-data/src/transformations/transformers.ts:L13,L56`                      |
+| UI registry import + item                                           | `public/app/features/transformers/standardTransformers.ts:L16,L63`                       |
+| External (secondary): Grafana & AWS docs list four options, no Zero | Grafana "Transform data" docs; AWS Managed Grafana docs                                  |
+| External (secondary): upstream limitation                           | GitHub issue grafana/grafana#97632                                                       |
 
 ---
 
@@ -666,5 +676,4 @@ at commit `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`.
 - **O2 (propagation):** **Path A** display/color — `'' → NaN` → blank cell + base color (`packages/grafana-data/src/utils/anyToNumber.ts:L13-L14`; `packages/grafana-data/src/field/displayProcessor.ts:L144`; `packages/grafana-data/src/field/thresholds.ts:L12-L22`; `packages/grafana-data/src/field/scale.ts:L29-L31`). **Path B** totals/reducer — `''` counted (`packages/grafana-data/src/transformations/fieldReducer.ts:L489,L500`), deflating mean and dragging min to `0`; `null` excluded under default Ignore (`packages/grafana-data/src/transformations/fieldReducer.ts:L490-L491`).
 - **O3 (locus):** the shift is **downstream**, rooted in a number-typed column holding `''` (`packages/grafana-data/src/transformations/transformers/groupingToMatrix.ts:L133,L117`), reinterpreted by numeric-typed reducers and coercion logic.
 
-*Conclusions valid as of commit `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`; the upstream limitation may be addressed in later commits (see issue #97632).*
-
+_Conclusions valid as of commit `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`; the upstream limitation may be addressed in later commits (see issue #97632)._
