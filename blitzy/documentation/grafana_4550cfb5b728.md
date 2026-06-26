@@ -30,13 +30,14 @@ flowchart TD
     F --> G{oldState == Alerting?}
     G -- Yes --> H[ResolvedAt=evaluatedAt; takeImage]
     G -- No --> I[ResolvedAt stays nil; no resolved notification]
-    B --> J[updateLastSentAt: NeedsSending gate -> stamp LastSentAt]
+    B --> J{updateLastSentAt: NeedsSending?\nResendDelay / ResolvedRetention / LastSentAt}
     H --> J
     I --> J
-    J --> K[persister.Sync deletes stale rows + saves; historian.Record]
-    K --> L{NeedsSending?\nResendDelay / ResolvedRetention / LastSentAt}
-    L -- Yes --> M[send PostableAlerts to Alertmanager]
-    L -- No --> N[Skip send]
+    J -- Yes --> K[Stamp LastSentAt; include in statesToSend]
+    J -- No --> L[Omit from statesToSend]
+    K --> M[persister.Sync deletes stale rows + saves; historian.Record]
+    L --> M
+    M --> N[send precomputed statesToSend to Alertmanager]
 ```
 
 Two structural facts from this loop drive most of the answers below:
@@ -59,6 +60,7 @@ The two fates are decided by two different functions called from the same tick. 
 `pkg/services/ngalert/state/manager.go:326-328`
 ```go
 states := st.setNextStateForRule(ctx, alertRule, results, extraLabels, logger)
+
 staleStates := st.deleteStaleStatesFromCache(ctx, logger, evaluatedAt, alertRule)
 ```
 
