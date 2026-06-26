@@ -15,8 +15,8 @@ in `conf/custom.ini` or via `cfg:` arguments, the effective settings are the one
 `conf/defaults.ini`.
 
 **Method.** The code is authoritative. Each question is answered in three parts —
-**Answer** (the direct conclusion), **Citations** (exact `[path:locator]` references,
-with short quoted snippets), and **Reasoning / Why** (the rationale that connects the
+**Answer** (the direct conclusion), **Citations** (exact source locators in `path:line`
+form, with short quoted snippets), and **Reasoning / Why** (the rationale that connects the
 cited code to the observed behavior). No claim about runtime behavior is made without
 a citation; a runtime build/run is treated as optional confirmation only (see
 [Notes](#notes)).
@@ -77,22 +77,22 @@ the default `http_port = 3000`. With the shipped defaults, the externally advert
       hs.Cfg.Protocol, "subUrl", hs.Cfg.AppSubURL, "socket", hs.Cfg.SocketPath)
   ```
 
-- `conf/defaults.ini` `[server]` block — the defaults that populate those fields:
+- `conf/defaults.ini` `[server]` block — the defaults that populate those fields (header at [conf/defaults.ini:L30]; `protocol` [conf/defaults.ini:L32], `http_addr` [conf/defaults.ini:L38], `http_port` [conf/defaults.ini:L41], `domain` [conf/defaults.ini:L44], `root_url` [conf/defaults.ini:L51], `socket` [conf/defaults.ini:L83]). The excerpt below quotes the relevant lines verbatim:
 
   ```ini
-  [server]                                                  # [conf/defaults.ini:L30]
+  [server]
   # Protocol (http, https, h2, socket)
-  protocol = http                                           # [conf/defaults.ini:L32]
+  protocol = http
   # The ip address to bind to, empty will bind to all interfaces
-                                                            # [conf/defaults.ini:L37]
-  http_addr =                                               # [conf/defaults.ini:L38] (empty)
+  http_addr =
   # The http port to use
-  http_port = 3000                                          # [conf/defaults.ini:L41]
+  http_port = 3000
   # The public facing domain name used to access grafana from a browser
-  domain = localhost                                        # [conf/defaults.ini:L44]
+  domain = localhost
   # The full public facing url
-  root_url = %(protocol)s://%(domain)s:%(http_port)s/       # [conf/defaults.ini:L51]
-  socket = /tmp/grafana.sock                                # [conf/defaults.ini:L83]
+  root_url = %(protocol)s://%(domain)s:%(http_port)s/
+  # Unix socket path
+  socket = /tmp/grafana.sock
   ```
 
 ### Reasoning / Why
@@ -119,7 +119,7 @@ defaults — the browser-facing URL `http://localhost:3000/`.
 
 ---
 
-## Q2 — After signing in with the default admin credentials, Grafana immediately asks for something before letting me proceed. What internal state is being finalized at that point?
+## Q2 — After signing in with the default admin credentials, Grafana immediately asks for something before letting me proceed, which makes me wonder what internal state is being finalized at that point.
 
 > After "signing in with the default admin credentials, Grafana immediately asks for something before letting me proceed, which makes me wonder what internal state is being finalized at that point."
 
@@ -145,39 +145,109 @@ seeded default credential**, layered on top of an already-authenticated session.
 
 ### Citations
 
-- Default admin is created at startup by the SQL store — `pkg/services/sqlstore/sqlstore.go` [pkg/services/sqlstore/sqlstore.go:L190] and [pkg/services/sqlstore/sqlstore.go:L222]:
+- Default admin is created at startup by the SQL store. `ensureMainOrgAndAdminUser` is defined at [pkg/services/sqlstore/sqlstore.go:L190]; when no user yet exists it creates the admin from the configured `[security]` values and logs `Created default admin` at [pkg/services/sqlstore/sqlstore.go:L222]. The admin-creation block ([pkg/services/sqlstore/sqlstore.go:L209-L223]) is:
 
   ```go
-  func (ss *SQLStore) ensureMainOrgAndAdminUser(test bool) error {   // [L190]
-      // …seeds the admin user from cfg when no users exist…
-      ss.log.Info("Created default admin", "user", ss.cfg.AdminUser)  // [L222]
+  // ensure admin user
+  if !ss.cfg.DisableInitAdminCreation {
+      ss.log.Debug("Creating default admin user")
+
+      if _, err := ss.createUser(ctx, sess, user.CreateUserCommand{
+          Login:    ss.cfg.AdminUser,
+          Email:    ss.cfg.AdminEmail,
+          Password: user.Password(ss.cfg.AdminPassword),
+          IsAdmin:  true,
+      }); err != nil {
+          return fmt.Errorf("failed to create admin user: %s", err)
+      }
+
+      ss.log.Info("Created default admin", "user", ss.cfg.AdminUser)
+  }
   ```
 
-- The seeded values come from `conf/defaults.ini` `[security]`:
+- The seeded values come from `conf/defaults.ini` `[security]` (header at [conf/defaults.ini:L323]; `admin_user` [conf/defaults.ini:L328], `admin_password` [conf/defaults.ini:L331], `admin_email` [conf/defaults.ini:L334]). The relevant lines, quoted verbatim, are:
 
   ```ini
-  [security]                                # [conf/defaults.ini:L323]
-  disable_initial_admin_creation = false    # [conf/defaults.ini:L325]
-  admin_user = admin                        # [conf/defaults.ini:L328]
-  admin_password = admin                    # [conf/defaults.ini:L331]
-  admin_email = admin@localhost             # [conf/defaults.ini:L334]
+  [security]
+  # disable creation of admin user on first start of grafana
+  disable_initial_admin_creation = false
+  # default admin user, created on startup
+  admin_user = admin
+  # default admin password, can be changed before first start of grafana, or in profile settings
+  admin_password = admin
+  # default admin email, created on startup
+  admin_email = admin@localhost
   ```
 
-- The client gate lives in `public/app/core/components/Login/LoginCtrl.tsx`. The sign-in call that establishes the session is at [public/app/core/components/Login/LoginCtrl.tsx:L113-L114]:
+- The client gate lives in `public/app/core/components/Login/LoginCtrl.tsx`. The sign-in request it issues is at [public/app/core/components/Login/LoginCtrl.tsx:L113-L114]:
 
   ```ts
   getBackendSrv()
     .post<LoginDTO>('/login', formModel, { showErrorAlert: false })
   ```
 
+  That `POST /login` is handled **server-side**, and it is the backend — not the client — that actually establishes the session by writing the login cookie. The route is registered in `pkg/api/api.go` at [pkg/api/api.go:L81]:
+
+  ```go
+  r.Post("/login", requestmeta.SetOwner(requestmeta.TeamAuth), quota(string(auth.QuotaTargetSrv)), routing.Wrap(hs.LoginPost))
+  ```
+
+  `hs.LoginPost` performs the login and returns through `authn.HandleLoginResponse` — `pkg/api/login.go` [pkg/api/login.go:L230-L242]:
+
+  ```go
+  func (hs *HTTPServer) LoginPost(c *contextmodel.ReqContext) response.Response {
+      identity, err := hs.authnService.Login(c.Req.Context(), authn.ClientForm, &authn.Request{HTTPRequest: c.Req})
+      if err != nil {
+          tokenErr := &auth.CreateTokenErr{}
+          if errors.As(err, &tokenErr) {
+              return response.Error(tokenErr.StatusCode, tokenErr.ExternalErr, tokenErr.InternalErr)
+          }
+          return response.Err(err)
+      }
+
+      metrics.MApiLoginPost.Inc()
+      return authn.HandleLoginResponse(c.Req, c.Resp, hs.Cfg, identity, hs.ValidateRedirectTo, hs.Features)
+  }
+  ```
+
+  `HandleLoginResponse` delegates to `handleLogin`, whose very first action is to write the session cookie — `pkg/services/authn/authn.go` [pkg/services/authn/authn.go:L254-L259] and [pkg/services/authn/authn.go:L272-L273]:
+
+  ```go
+  // HandleLoginResponse is a utility function to perform common operations after a successful login and returns response.NormalResponse
+  func HandleLoginResponse(r *http.Request, w http.ResponseWriter, cfg *setting.Cfg, identity *Identity, validator RedirectValidator, features featuremgmt.FeatureToggles) *response.NormalResponse {
+      result := map[string]any{"message": "Logged in"}
+      result["redirectUrl"] = handleLogin(r, w, cfg, identity, validator, features, "")
+      return response.JSON(http.StatusOK, result)
+  }
+  ```
+
+  ```go
+  func handleLogin(r *http.Request, w http.ResponseWriter, cfg *setting.Cfg, identity *Identity, validator RedirectValidator, features featuremgmt.FeatureToggles, redirectToCookieName string) string {
+      WriteSessionCookie(w, cfg, identity.SessionToken)
+  ```
+
+  `WriteSessionCookie` sets the actual login cookie (`cfg.LoginCookieName`) on the HTTP response — `pkg/services/authn/authn.go` [pkg/services/authn/authn.go:L313-L319]:
+
+  ```go
+  func WriteSessionCookie(w http.ResponseWriter, cfg *setting.Cfg, token *usertoken.UserToken) {
+      maxAge := int(cfg.LoginMaxLifetime.Seconds())
+      if cfg.LoginMaxLifetime <= 0 {
+          maxAge = -1
+      }
+
+      cookies.WriteCookie(w, cfg.LoginCookieName, url.QueryEscape(token.UnhashedToken), maxAge, nil)
+  ```
+
+  Only after this `200` response (with the cookie set) does the frontend promise resolve into its `.then((result) => …)` block — which is why, by the time any prompt appears, the session is already established.
+
   The decision of whether to prompt is at [public/app/core/components/Login/LoginCtrl.tsx:L117], [public/app/core/components/Login/LoginCtrl.tsx:L118] and [public/app/core/components/Login/LoginCtrl.tsx:L121]:
 
   ```ts
   if (formModel.password !== 'admin' || config.ldapEnabled || config.authProxyEnabled) {
-    this.toGrafana();                                // go straight in — no prompt
+    this.toGrafana();
     return;
   } else {
-    this.changeView(formModel.password === 'admin'); // open the change-password view
+    this.changeView(formModel.password === 'admin');
   }
   ```
 
@@ -200,23 +270,61 @@ seeded default credential**, layered on top of an already-authenticated session.
 
   Supporting prop/state declarations: `isChangingPassword` at [public/app/core/components/Login/LoginCtrl.tsx:L41], `skipPasswordChange: Function` at [public/app/core/components/Login/LoginCtrl.tsx:L42], and `showDefaultPasswordWarning` at [public/app/core/components/Login/LoginCtrl.tsx:L52] and [public/app/core/components/Login/LoginCtrl.tsx:L60].
 
-- If the user does change the password, the form submits to the server handler and route — `pkg/api/user.go` [pkg/api/user.go:L546] and `pkg/api/api.go` [pkg/api/api.go:L277]:
+- If the user does change the password, the **frontend** submits it via `PUT /api/user/password` from the `changePassword` handler — `public/app/core/components/Login/LoginCtrl.tsx` [public/app/core/components/Login/LoginCtrl.tsx:L78-L105] (the `else` branch issues the `put`; note the `oldPassword: 'admin'` payload):
+
+  ```ts
+  changePassword = (password: string) => {
+    const pw = {
+      newPassword: password,
+      confirmNew: password,
+      oldPassword: 'admin',
+    };
+
+    if (this.props.resetCode) {
+      const resetModel = {
+        code: this.props.resetCode,
+        newPassword: password,
+        confirmPassword: password,
+      };
+
+      getBackendSrv()
+        .post('/api/user/password/reset', resetModel)
+        .then(() => {
+          this.toGrafana();
+        });
+    } else {
+      getBackendSrv()
+        .put('/api/user/password', pw)
+        .then(() => {
+          this.toGrafana();
+        })
+        .catch((err) => console.error(err));
+    }
+  };
+  ```
+
+- That `PUT /api/user/password` request is **served** by the `ChangeUserPassword` handler — `pkg/api/user.go` [pkg/api/user.go:L546] — which is bound to the route in `pkg/api/api.go` [pkg/api/api.go:L277]:
 
   ```go
-  func (hs *HTTPServer) ChangeUserPassword(c *contextmodel.ReqContext) response.Response {   // user.go [L546]
+  func (hs *HTTPServer) ChangeUserPassword(c *contextmodel.ReqContext) response.Response {
   ```
 
   ```go
-  userRoute.Put("/password", routing.Wrap(hs.ChangeUserPassword))                            // api.go [L277]
+  userRoute.Put("/password", routing.Wrap(hs.ChangeUserPassword))
   ```
 
 ### Reasoning / Why
 
 The key insight is that the prompt is *not* an authentication step. Authentication is
-already complete the moment `POST /login` returns success and the session cookie is set —
-that call is issued at [public/app/core/components/Login/LoginCtrl.tsx:L113-L114], inside the
-`.then(...)` of which the controller has the authenticated `result` in hand. Everything that
-follows is a **client-side UX decision**, not a server gate.
+already complete the moment the **server-side** `POST /login` handler returns success:
+`hs.LoginPost` ([pkg/api/login.go:L230-L242]) finishes by calling `authn.HandleLoginResponse`,
+whose `handleLogin` writes the session cookie via `WriteSessionCookie`
+([pkg/services/authn/authn.go:L254-L259], [pkg/services/authn/authn.go:L272-L273],
+[pkg/services/authn/authn.go:L313-L319]). The frontend call that triggers this is issued at
+[public/app/core/components/Login/LoginCtrl.tsx:L113-L114], and its `.then((result) => …)` only
+runs *after* that `200`-with-cookie response — so by the time the controller holds the
+authenticated `result`, the cookie is already set. Everything that follows is a
+**client-side UX decision**, not a server gate.
 
 That decision is the conditional at [public/app/core/components/Login/LoginCtrl.tsx:L117]: the
 React controller inspects the password you just typed. Only if it is still the literal default
@@ -242,7 +350,7 @@ already fully authenticated.
 
 ---
 
-## Q3 — There's a health endpoint that returns JSON. What does a healthy response actually look like, and what is the `database` field really telling me about the system's readiness?
+## Q3 — There's a health endpoint that returns JSON, but what does a healthy response actually look like, and what is the database field really telling me about the system's readiness?
 
 > "There's a health endpoint that returns JSON, but what does a healthy response actually look like, and what is the database field really telling me about the system's readiness?"
 
@@ -296,6 +404,7 @@ never touches the database.
       if notHeadOrGet || ctx.Req.URL.Path != "/healthz" {
           return
       }
+
       ctx.Resp.WriteHeader(http.StatusOK)
       if _, err := ctx.Resp.Write([]byte("Ok")); err != nil {
           hs.log.Error("could not write to response", "err", err)
@@ -315,46 +424,55 @@ never touches the database.
   }
   ```
 
-- The readiness handler builds the body, chooses the status code, and serializes it — `pkg/api/http_server.go` [pkg/api/http_server.go:L710], [pkg/api/http_server.go:L716-L736]:
+- The readiness handler builds the body, chooses the status code, and serializes it. The status code is `503` when the DB probe fails ([pkg/api/http_server.go:L727-L730]) and `200` otherwise ([pkg/api/http_server.go:L731-L733]); the body is pretty-printed via `json.MarshalIndent` ([pkg/api/http_server.go:L736]) — `pkg/api/http_server.go` [pkg/api/http_server.go:L710-L736]:
 
   ```go
-  func (hs *HTTPServer) apiHealthHandler(ctx *web.Context) {                 // [L710]
-      // …
-      data := healthResponse{                                               // [L716]
-          Database: "ok",                                                   // [L717]
+  func (hs *HTTPServer) apiHealthHandler(ctx *web.Context) {
+      notHeadOrGet := ctx.Req.Method != http.MethodGet && ctx.Req.Method != http.MethodHead
+      if notHeadOrGet || ctx.Req.URL.Path != "/api/health" {
+          return
       }
-      if !hs.Cfg.Anonymous.HideVersion {                                    // [L719]
+
+      data := healthResponse{
+          Database: "ok",
+      }
+      if !hs.Cfg.Anonymous.HideVersion {
           data.Version = hs.Cfg.BuildVersion
           data.Commit = hs.Cfg.BuildCommit
           if hs.Cfg.EnterpriseBuildCommit != "NA" && hs.Cfg.EnterpriseBuildCommit != "" {
               data.EnterpriseCommit = hs.Cfg.EnterpriseBuildCommit
           }
       }
-      if !hs.databaseHealthy(ctx.Req.Context()) {                           // [L727]
-          data.Database = "failing"                                         // [L728]
-          ctx.Resp.Header().Set("Content-Type", "application/json; charset=UTF-8")  // [L729]
-          ctx.Resp.WriteHeader(http.StatusServiceUnavailable)               // [L730] -> 503
+
+      if !hs.databaseHealthy(ctx.Req.Context()) {
+          data.Database = "failing"
+          ctx.Resp.Header().Set("Content-Type", "application/json; charset=UTF-8")
+          ctx.Resp.WriteHeader(http.StatusServiceUnavailable)
       } else {
-          ctx.Resp.Header().Set("Content-Type", "application/json; charset=UTF-8")  // [L732]
-          ctx.Resp.WriteHeader(http.StatusOK)                               // [L733] -> 200
+          ctx.Resp.Header().Set("Content-Type", "application/json; charset=UTF-8")
+          ctx.Resp.WriteHeader(http.StatusOK)
       }
-      dataBytes, err := json.MarshalIndent(data, "", "  ")                  // [L736]
+
+      dataBytes, err := json.MarshalIndent(data, "", "  ")
   ```
 
-- The `database` value comes from a cached `SELECT 1` probe — `pkg/api/health.go` [pkg/api/health.go:L10], [pkg/api/health.go:L13-L23]:
+- The `database` value comes from a cached `SELECT 1` probe — `pkg/api/health.go` [pkg/api/health.go:L10-L25] (the result is cached for five seconds at [pkg/api/health.go:L23]):
 
   ```go
-  func (hs *HTTPServer) databaseHealthy(ctx context.Context) bool {   // [L10]
+  func (hs *HTTPServer) databaseHealthy(ctx context.Context) bool {
       const cacheKey = "db-healthy"
-      if cached, found := hs.CacheService.Get(cacheKey); found {       // [L13-L15] cache hit
+
+      if cached, found := hs.CacheService.Get(cacheKey); found {
           return cached.(bool)
       }
-      err := hs.SQLStore.WithDbSession(ctx, func(session *db.Session) error {  // [L17-L20]
+
+      err := hs.SQLStore.WithDbSession(ctx, func(session *db.Session) error {
           _, err := session.Exec("SELECT 1")
           return err
       })
-      healthy := err == nil                                            // [L21]
-      hs.CacheService.Set(cacheKey, healthy, time.Second*5)            // [L23] 5-second cache
+      healthy := err == nil
+
+      hs.CacheService.Set(cacheKey, healthy, time.Second*5)
       return healthy
   }
   ```
@@ -386,7 +504,7 @@ so it appears only on enterprise builds.
 
 ---
 
-## Q4 — I noticed several background services starting during boot. Which components are those logs hinting at, and how much of Grafana is already active before the UI appears?
+## Q4 — I also noticed several background services starting during boot, and I'm curious which components those logs are hinting at and how much of Grafana is already active before the UI appears.
 
 > "I also noticed several background services starting during boot, and I'm curious which components those logs are hinting at and how much of Grafana is already active before the UI appears."
 
@@ -400,8 +518,9 @@ so it appears only on enterprise builds.
 - **Fail-fast.** Because the group is an `errgroup`, the first non-context error tears the
   rest down, and only that first error is returned to the caller.
 - **The logs only "hint."** The generic per-service message `Starting background service` is
-  emitted at **DEBUG** level, so at the default **INFO** log level it is **hidden** — which is
-  exactly why boot logs only *hint* at these services rather than announcing each one.
+  emitted at **DEBUG** level, so at the default **INFO** log level ([conf/defaults.ini:L1073-L1074])
+  it is **hidden** — which is exactly why boot logs only *hint* at these services rather than
+  announcing each one.
 - **The HTTP server is itself a background service — the *first* one registered.** So the
   UI/API server comes up as a *peer* alongside the others, not strictly before them.
 - After the loop has dispatched the services, Grafana signals readiness to systemd via
@@ -454,28 +573,35 @@ gate that the rest waits behind; it is one of 36 services coming up together.
 
 ### Citations
 
-- The run loop launches each enabled service as a goroutine in an `errgroup` — `pkg/server/server.go` [pkg/server/server.go:L139], [pkg/server/server.go:L146], [pkg/server/server.go:L150], [pkg/server/server.go:L155-L156], [pkg/server/server.go:L162-L163], [pkg/server/server.go:L176], [pkg/server/server.go:L179]:
+- The run loop launches each enabled service as a goroutine in an `errgroup` (`s.childRoutines`) — `pkg/server/server.go` [pkg/server/server.go:L139-L180]. Note the disabled-service skip ([pkg/server/server.go:L150]), the concurrent dispatch ([pkg/server/server.go:L156]), the per-service DEBUG log ([pkg/server/server.go:L162]), the fail-fast comment ([pkg/server/server.go:L164-L166]), the systemd `READY=1` ([pkg/server/server.go:L176]), and the blocking `Wait()` ([pkg/server/server.go:L179]):
 
   ```go
-  func (s *Server) Run() error {                                   // [L139]
-      // …
-      services := s.backgroundServices                             // [L146]
+  func (s *Server) Run() error {
+      defer close(s.shutdownFinished)
+
+      if err := s.Init(); err != nil {
+          return err
+      }
+
+      services := s.backgroundServices
+
       // Start background services.
       for _, svc := range services {
-          if registry.IsDisabled(svc) {                            // [L150] skip disabled
+          if registry.IsDisabled(svc) {
               continue
           }
+
           service := svc
-          serviceName := reflect.TypeOf(service).String()          // [L155]
-          s.childRoutines.Go(func() error {                        // [L156] concurrent goroutine
+          serviceName := reflect.TypeOf(service).String()
+          s.childRoutines.Go(func() error {
               select {
               case <-s.context.Done():
                   return s.context.Err()
               default:
               }
-              s.log.Debug("Starting background service", "service", serviceName)  // [L162] DEBUG
-              err := service.Run(s.context)                        // [L163]
-              // Do not return context.Canceled error since errgroup.Group only   // [L164-L166]
+              s.log.Debug("Starting background service", "service", serviceName)
+              err := service.Run(s.context)
+              // Do not return context.Canceled error since errgroup.Group only
               // returns the first error to the caller - thus we can miss a more
               // interesting error.
               if err != nil && !errors.Is(err, context.Canceled) {
@@ -486,28 +612,62 @@ gate that the rest waits behind; it is one of 36 services coming up together.
               return nil
           })
       }
-      s.notifySystemd("READY=1")                                   // [L176]
-      s.log.Debug("Waiting on services...")                        // [L178]
-      return s.childRoutines.Wait()                                // [L179]
+
+      s.notifySystemd("READY=1")
+
+      s.log.Debug("Waiting on services...")
+      return s.childRoutines.Wait()
   }
   ```
 
-- The registry enumerates exactly 36 services with `httpServer` first — `pkg/registry/backgroundsvcs/background_services.go` [pkg/registry/backgroundsvcs/background_services.go:L53], [pkg/registry/backgroundsvcs/background_services.go:L80-L116]:
+- The registry enumerates exactly 36 services with `httpServer` first. They are constructed in `ProvideBackgroundServiceRegistry` ([pkg/registry/backgroundsvcs/background_services.go:L53]); the `NewBackgroundServiceRegistry(...)` call passes all 36 in order — `httpServer` first ([pkg/registry/backgroundsvcs/background_services.go:L81]) through `appRegistry` 36th ([pkg/registry/backgroundsvcs/background_services.go:L116]) — `pkg/registry/backgroundsvcs/background_services.go` [pkg/registry/backgroundsvcs/background_services.go:L80-L117]:
 
   ```go
-  func ProvideBackgroundServiceRegistry(            // [L53]
-      // …injected services…
-  ) *BackgroundServiceRegistry {
-      return NewBackgroundServiceRegistry(          // [L80]
-          httpServer,                               // [L81] — first entry
-          ng,
-          cleanup,
-          live,
-          // …32 more, in the order listed above…
-          accessControl,
-          appRegistry,                              // [L116] — 36th entry
-      )
-  }
+  return NewBackgroundServiceRegistry(
+      httpServer,
+      ng,
+      cleanup,
+      live,
+      pushGateway,
+      notifications,
+      rendering,
+      tokenService,
+      provisioning,
+      grafanaUpdateChecker,
+      pluginsUpdateChecker,
+      metrics,
+      usageStats,
+      statsCollector,
+      tracing,
+      remoteCache,
+      secretsService,
+      StorageService,
+      searchService,
+      entityEventsService,
+      grpcServerProvider,
+      saService,
+      pluginStore,
+      secretMigrationProvider,
+      loginAttemptService,
+      bundleService,
+      publicDashboardsMetric,
+      keyRetriever,
+      dynamicAngularDetectorsProvider,
+      grafanaAPIServer,
+      anon,
+      ssoSettings,
+      pluginExternal,
+      pluginInstaller,
+      accessControl,
+      appRegistry,
+  )
+  ```
+
+- The default log level is `info`, which is why the per-service DEBUG line is suppressed unless the level is lowered — `conf/defaults.ini` `[log]` [conf/defaults.ini:L1073-L1074]:
+
+  ```ini
+  # Either "debug", "info", "warn", "error", "critical", default is "info"
+  level = info
   ```
 
 ### Reasoning / Why
@@ -522,9 +682,10 @@ the rest down. That is the mechanism behind the "several services starting" you 
 
 The reason the boot logs only *hint* at the services — rather than announcing each by name —
 is the log level. The per-service "Starting background service" message is emitted with
-`s.log.Debug(...)` at [pkg/server/server.go:L162], and at the default INFO level DEBUG lines
-are suppressed. So you infer the services from surrounding signals (and from the registry)
-rather than seeing a clean "started X" line for each.
+`s.log.Debug(...)` at [pkg/server/server.go:L162], and the default log level is `info`
+([conf/defaults.ini:L1073-L1074]), at which DEBUG lines are suppressed. So you infer the
+services from surrounding signals (and from the registry) rather than seeing a clean
+"started X" line for each.
 
 The most important structural fact is that `httpServer` is the **first entry** in the
 registry ([pkg/registry/backgroundsvcs/background_services.go:L81]) — it is one of the 36
@@ -543,8 +704,8 @@ readiness to an init system such as systemd.
 **Basis of these answers.** Every conclusion above is derived from **static source
 analysis** of the cited files at commit `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`. The code
 is authoritative; a runtime build/run is **optional and confirmatory only** — it is not
-required to establish any of the answers, all of which are grounded in exact `[path:locator]`
-citations.
+required to establish any of the answers, all of which are grounded in exact `path:line`
+source citations.
 
 **Optional, reproducible runtime-verification procedure.** If you want to observe the
 behavior live, the repository ships canonical build/run targets:
@@ -567,7 +728,7 @@ What to observe once it is running at `http://localhost:3000`:
 - The live health JSON, e.g. `curl -s http://localhost:3000/api/health` (Q3).
 - The DEBUG `Starting background service` lines (Q4) — visible only after raising the log
   level to `debug` (for example `cfg:log.level=debug`), since they are suppressed at the
-  default INFO level.
+  default INFO level ([conf/defaults.ini:L1073-L1074]).
 - The post-login change-password prompt after signing in with `admin`/`admin` (Q2).
 
 **Mandatory cleanup / repository immutability.** Any such runtime verification **must** be
