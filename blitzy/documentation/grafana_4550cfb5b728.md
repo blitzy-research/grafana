@@ -62,12 +62,15 @@ states := st.setNextStateForRule(ctx, alertRule, results, extraLabels, logger)
 staleStates := st.deleteStaleStatesFromCache(ctx, logger, evaluatedAt, alertRule)
 ```
 
-`pkg/services/ngalert/state/manager.go:589-601` (the stale transition itself)
+`pkg/services/ngalert/state/manager.go:589-591` (collect the stale series and evict them from the cache in one pass)
 ```go
 staleStates := st.cache.deleteRuleStates(alertRule.GetKey(), func(s *State) bool {
     return stateIsStale(evaluatedAt, s.LastEvaluationTime, alertRule.IntervalSeconds)
 })
-// for each stale state s:
+```
+
+`pkg/services/ngalert/state/manager.go:599-601` (the stale transition itself, applied to each evicted state inside the loop)
+```go
 s.State = eval.Normal
 s.StateReason = ngModels.StateReasonMissingSeries
 s.EndsAt = evaluatedAt
@@ -230,15 +233,23 @@ ok  	github.com/grafana/grafana/pkg/services/ngalert/state	0.041s
 
 `NeedsSending` reads all three values and applies three rules in order; `updateLastSentAt` stamps `LastSentAt` after a qualifying send and runs **before** persistence.
 
-`pkg/services/ngalert/state/state.go:507-519`
+Each rule is shown below with its own citation. **(a) Resolved-since-last-notification** — `pkg/services/ngalert/state/state.go:507-509`:
 ```go
 if a.ResolvedAt != nil && (a.LastSentAt == nil || a.ResolvedAt.After(*a.LastSentAt)) {
-    return true                                                                      // (a) just resolved
+    return true
 }
+```
+
+**(b) Retention cutoff for `Normal` states** — `pkg/services/ngalert/state/state.go:513-515`:
+```go
 if a.State == eval.Normal && (a.ResolvedAt == nil || a.LastEvaluationTime.Sub(*a.ResolvedAt) > resolvedRetention) {
-    return false                                                                     // (b) retention exhausted
+    return false
 }
-return a.LastSentAt == nil || !a.LastSentAt.Add(resendDelay).After(a.LastEvaluationTime) // (c) resend gate
+```
+
+**(c) The resend gate** — `pkg/services/ngalert/state/state.go:519`:
+```go
+return a.LastSentAt == nil || !a.LastSentAt.Add(resendDelay).After(a.LastEvaluationTime)
 ```
 
 `pkg/services/ngalert/state/manager.go:362-363`
@@ -268,11 +279,11 @@ if t.NeedsSending(st.ResendDelay, st.ResolvedRetention) {
 | … each minute … | Normal | `T₁` | … | (c) (1m ≥ 30s) | yes | advances |
 | `T₁+16m` | Normal | `T₁` | `T₁+15m` | (b): `16m > 15m` | **no** | unchanged |
 
-The cadence of re-sends is therefore `max(interval, ResendDelay)` while resolved-and-present, and the stream stops once retention is exceeded.
+The next re-send therefore lands on the **first evaluation cycle** that satisfies `LastSentAt + ResendDelay <= LastEvaluationTime`, so the effective cadence depends on how the evaluation ticks align with `ResendDelay` and is **not** simply `max(interval, ResendDelay)`. In the table above the interval (60 s) exceeds `ResendDelay` (30 s), so every tick passes the gate and the cadence equals the interval; but when the interval is **shorter** than `ResendDelay`, the next send lands on the first tick at or beyond `ResendDelay` — e.g. with a 20 s interval and the 30 s `ResendDelay`, the next send is 40 s after the prior one, not 30 s. The stream stops once retention is exceeded (rule (b)).
 
 ### 3.5.4 Runtime evidence
 
-`TestNeedsSending`'s alerting cases pin the resend gate exactly at `LastEvaluationTime + ResendDelay`: before it → send; equal/after it → don't.
+`TestNeedsSending`'s alerting cases exercise the resend gate `LastSentAt + ResendDelay <= LastEvaluationTime` (equivalently `LastSentAt <= LastEvaluationTime − ResendDelay`). With `ResendDelay = 1m` and `LastEvaluationTime = T`: a `LastSentAt` of `T − 2m` sends, a `LastSentAt` of exactly `T − 1m` still sends (the boundary is **inclusive** because the code uses `!After`), and a `LastSentAt` of `T` does not. The subtest names phrase the boundary as `LastEvaluationTime + ResendDelay`, but the code compares `LastSentAt + ResendDelay` against `LastEvaluationTime`.
 
 ```text
     --- PASS: TestNeedsSending/state:_alerting_and_LastSentAt_before_LastEvaluationTime_+_ResendDelay (0.00s)
@@ -314,8 +325,9 @@ if shouldTakeImage(currentState.State, oldState, currentState.Image, newlyResolv
 
 `pkg/services/ngalert/state/state.go:581-585` (the gate predicate)
 ```go
-func shouldTakeImage(state, previousState eval.State, previousImage *ngModels.Image, resolved bool) bool {
-    return resolved || state == eval.Alerting && previousState != eval.Alerting ||
+func shouldTakeImage(state, previousState eval.State, previousImage *models.Image, resolved bool) bool {
+    return resolved ||
+        state == eval.Alerting && previousState != eval.Alerting ||
         state == eval.Alerting && previousImage == nil
 }
 ```
@@ -355,12 +367,15 @@ Both routes converge on the same fallback semantics: `takeImage` returns `nil, n
 
 `deleteStaleStatesFromCache` transitions a stale series straight to `Normal`/`MissingSeries` with **no `For`/pending check anywhere in the function**, and assigns `ResolvedAt` **only** when the prior state was `Alerting`.
 
-`pkg/services/ngalert/state/manager.go:599-605`
+`pkg/services/ngalert/state/manager.go:599-601` (immediate transition to `Normal`/`MissingSeries` — no `For`/pending check)
 ```go
 s.State = eval.Normal
 s.StateReason = ngModels.StateReasonMissingSeries
 s.EndsAt = evaluatedAt
-s.LastEvaluationTime = evaluatedAt
+```
+
+`pkg/services/ngalert/state/manager.go:604-605` (`ResolvedAt` is set only when the prior state was `Alerting`)
+```go
 if oldState == eval.Alerting {
     s.ResolvedAt = &evaluatedAt
 ```
@@ -461,7 +476,7 @@ ok  	github.com/grafana/grafana/pkg/services/ngalert/state	0.278s
 
 At commit `4550cfb5b7`, the staleness multiplier is the **hardcoded literal `2`** inside `stateIsStale` (`pkg/services/ngalert/state/manager.go:627-629`), and there is **no** configurable "Missing series evaluations to resolve" field in the alert-rule model — the only relevant field is `IntervalSeconds` (`pkg/services/ngalert/models/alert_rule.go:254`), which feeds the formula but does not change the `2`.
 
-Newer public Grafana documentation describes a configurable *Missing series evaluations to resolve* setting; per the Grafana docs the default is <q>2 by default</q>, which matches this commit's hardcoded value. That configurability was introduced by a **later** change (the `MissingSeriesEvalsToResolve` field added to the `AlertRule` model in a subsequent pull request) and therefore **does not apply to this commit**. The newer docs and the default-of-two it cites serve here as **corroboration only**; the binding answer is the code at `4550cfb5b7`, where the threshold is fixed at `2 × interval`. The same docs corroborate the `grafana_state_reason = MissingSeries` annotation and that a resolved notification is sent only if the instance was previously firing — both consistent with the `oldState == eval.Alerting` guard at `manager.go:604`.
+Newer public Grafana documentation describes a configurable *Missing series evaluations to resolve* setting; per the Grafana docs the default is <q>2 by default</q>, which matches this commit's hardcoded value. A repository-wide search at this commit finds no `MissingSeriesEvalsToResolve` (or equivalent) configurable field on the `AlertRule` model, so the multiplier remains the literal `2`. The newer docs and the default-of-two it cites serve here as **corroboration only**; the binding answer is the code at `4550cfb5b7`, where the threshold is fixed at `2 × interval`. The same docs corroborate the `grafana_state_reason = MissingSeries` annotation and that a resolved notification is sent only if the instance was previously firing — both consistent with the `oldState == eval.Alerting` guard at `manager.go:604`.
 
 ---
 
