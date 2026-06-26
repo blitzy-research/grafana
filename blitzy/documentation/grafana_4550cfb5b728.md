@@ -45,10 +45,10 @@ All evidence comes from two channels exposed by the running process:
 
 | | **Stressed** | **Normal** |
 |---|---|---|
-| Rules | many (60 slow + up to 700 fast) | few (3) |
+| Rules | many (60 slow + up to 700 fast) | few — **3** (timing baseline) / **24** (churn comparison) |
 | Rule interval | `10s` (minimum) | `60s` (default) |
 | Data source | a **slow HTTP datasource** whose latency exceeds the 30s eval timeout | a healthy fast TestData source |
-| Rule churn | scripted create/update/delete mid-run | none |
+| Rule churn | scripted create / update / delete / **type-change** mid-run | the **same** scripted create / update / delete / type-change churn |
 | Scheduler tick | `1s` (via the `configurableSchedulerTick` feature toggle) to magnify and accelerate the effect | `10s` (default) |
 
 > **A note on the stressed tick interval.** Grafana allows the scheduler tick to be overridden when the `configurableSchedulerTick` feature toggle is enabled; the value is parsed at `[pkg/setting/setting_unified_alerting.go:L335]` and gated by the toggle at `[pkg/setting/setting_unified_alerting.go:L336]`. Using `1s` does not change *what* the scheduler does — it only makes "falling behind" accumulate faster and more visibly. The normal scenario uses the real default `10s` tick for an honest baseline.
@@ -165,7 +165,9 @@ grafana_alerting_schedule_periodic_duration_seconds_sum 317.9696965410002
 grafana_alerting_schedule_periodic_duration_seconds_count 275
 ```
 
-The gauge reads **46.97s behind** (it peaked around **64.5s** during the run). The `schedule_periodic_duration_seconds` histogram `[pkg/services/ngalert/metrics/scheduler.go:L147]` explains *why*: most ticks are fast (211 of 275 finish under 1s) but a heavy tail runs longer than 10s, so the mean tick-processing time (`sum/count` ≈ 317.97/275 ≈ **1.16s**) exceeds the **1s** tick interval — every such tick pushes the scheduler further behind. The consumed-tick timestamp trails the next-tick timestamp, exactly the "queue, don't drop" signature.
+The gauge reads **46.97s behind** (it peaked around **64.5s** during the run). The `schedule_periodic_duration_seconds` histogram `[pkg/services/ngalert/metrics/scheduler.go:L147]` explains *why*: most ticks are fast (211 of 275 finish under 1s) but a heavy tail runs longer than 10s, so the mean tick-processing time (`sum/count` ≈ 317.97/275 ≈ **1.16s**) exceeds the **1s** tick interval — every such tick pushes the scheduler further behind.
+
+A subtle point about the two ticker timestamps in this snapshot: `ticker_next_tick_timestamp_seconds − ticker_last_consumed_tick_timestamp_seconds = 1.782509079e9 − 1.782509078e9 = ` **exactly 1s — the tick interval, not the backlog.** This is structural: the ticker computes `next := t.last.Add(t.interval)` and publishes it as `NextTickTime`, then advances `t.last = next` and sets `LastTickTime` *only after* the scheduler consumes the tick `[pkg/util/ticker/ticker.go:L54-L65]`, so `next − last_consumed` is always one interval by construction and can never widen into a backlog reading. Backpressure instead surfaces as the rising **`scheduler_behind_seconds`** (46.97s here) — computed as wall-clock now minus the timestamp of the tick currently being processed `[pkg/services/ngalert/schedule/schedule.go:L214-L215]`. The ticker itself *queues rather than drops*: its `last` marker advances monotonically by exactly one interval per consumed tick and never skips a tick number `[pkg/util/ticker/ticker.go:L12-L16]`, so "falling behind" is visible as a growing `behind_seconds` (and a `last_consumed` timestamp lagging wall-clock), never as gaps in the tick sequence — exactly the "queue, don't drop" signature.
 
 **(b) The per-rule "too slow" signal: WARN + missed counter.** Real log lines (identifiers preserved — note `org_id` and `rule_uid`):
 
@@ -288,49 +290,72 @@ The post-eval guard returns `nil` **without** calling `ProcessEvalResults`, so a
 
 ### 3.2 Live evidence (stressed run with scripted churn)
 
-During the stressed run I drove scripted create/update/**delete** churn so the deletion and cancellation paths fired for real. The three outcomes have three distinct, greppable signatures.
+During the stressed run I drove scripted churn against **named UIDs** so each path is UID-traceable rather than inferred from aggregate counts: I deleted `fast0000…fast0009` (clean teardown), deleted the slow, timing-out rules `slow0000…slow0009` while their evaluations were *in flight* (in-flight cancel), updated `fast0020` (state reset *without* a routine stop), and forced a **type change** on `fast0021` (`alerting → recording`, which forces a *restart* with state preserved). The capture's timeline markers pin each action's wall-clock time, so every signature below can be correlated to a specific UID and instant.
 
-**(a) Clean teardown on delete — the routine stops:**
-
-```json
-{"level":"debug","logger":"ngalert.scheduler","msg":"Stopping alert rule routine","org_id":1,"rule_uid":"dfqc5wlu8893ff","t":"2026-06-26T21:31:59.029242584Z"}
-{"level":"debug","logger":"ngalert.scheduler","msg":"Stopping alert rule routine","org_id":1,"rule_uid":"ffqc5wlu5qcqob","t":"2026-06-26T21:31:59.030025768Z"}
-{"level":"debug","logger":"ngalert.scheduler","msg":"Stopping alert rule routine","org_id":1,"rule_uid":"ffqc5wluaq5fka","t":"2026-06-26T21:31:59.030041131Z"}
-```
-
-**(b) …and the state is reset for each deleted rule** (the `DeleteStateByRuleUID` path, logged by the state manager):
+**(a) Delete → clean teardown, correlated on a single UID.** For the deleted rule `fast0000`, three lines fire within ~1 ms on the *same* `org_id`/`rule_uid`: the state manager resets the rule's state, reports how many states it removed, and the scheduler stops the routine:
 
 ```json
-{"level":"debug","logger":"ngalert.state.manager","msg":"Resetting state of the rule","org_id":1,"rule_uid":"dfqc5wlu8893ff","t":"2026-06-26T21:31:59.013254627Z"}
-{"level":"debug","logger":"ngalert.state.manager","msg":"Resetting state of the rule","org_id":1,"rule_uid":"cfqc5wlu8893ea","t":"2026-06-26T21:31:59.013359957Z"}
-{"level":"debug","logger":"ngalert.state.manager","msg":"Resetting state of the rule","org_id":1,"rule_uid":"cfqc5wlu88936d","t":"2026-06-26T21:31:59.013387201Z"}
+{"level":"debug","logger":"ngalert.state.manager","msg":"Resetting state of the rule","org_id":1,"rule_uid":"fast0000","t":"2026-06-26T22:43:13.005044886Z"}
+{"level":"info","logger":"ngalert.state.manager","msg":"Rules state was reset","org_id":1,"rule_uid":"fast0000","states":1,"t":"2026-06-26T22:43:13.006231399Z"}
+{"level":"debug","logger":"ngalert.scheduler","msg":"Stopping alert rule routine","org_id":1,"rule_uid":"fast0000","t":"2026-06-26T22:43:13.006249575Z"}
 ```
 
-**(c) In-flight evaluations canceled mid-flight — state write skipped:**
+Crucially — and this is precisely *why an aggregate count cannot prove cleanup* — the **same** `"Resetting state of the rule"` line also appears at **creation** time for `fast0000`, ~18 s earlier, but with **no** accompanying `"Rules state was reset"` because there were zero states to remove yet:
 
 ```json
-{"fingerprint":"2f14a3278002883c","level":"debug","logger":"ngalert.scheduler","msg":"Skip updating the state because the context has been cancelled","now":"2026-06-26T21:31:48Z","org_id":1,"rule_uid":"afqc5wlu88935c","t":"2026-06-26T21:31:59.012974438Z","version":1}
-{"fingerprint":"…","level":"debug","logger":"ngalert.scheduler","msg":"Skip updating the state because the context has been cancelled","now":"2026-06-26T21:31:48Z","org_id":1,"rule_uid":"efqc5wlu88939c","t":"2026-06-26T21:31:59.013066807Z","version":1}
+{"level":"debug","logger":"ngalert.state.manager","msg":"Resetting state of the rule","org_id":1,"rule_uid":"fast0000","t":"2026-06-26T22:42:55.006014358Z"}
 ```
 
-**The counts make the cleanup symmetry exact and verifiable:**
+This is structural: `DeleteStateByRuleUID` logs `"Resetting state of the rule"` *unconditionally on entry* `[pkg/services/ngalert/state/manager.go:L236-L238]`, then returns early — **without** logging `"Rules state was reset"` — when there are no states to remove `[pkg/services/ngalert/state/manager.go:L240-L242,L278]`. So the cleanup proof must be **per-UID**, not a global tally: the *delete* of `fast0000` is the line at `22:43:13` that is **paired with a routine stop**, and the `states:1` field confirms one live state was actually removed (resolved notifications are then pushed by `expireAndSend` `[pkg/services/ngalert/schedule/alert_rule.go:L355-L356]`). After this instant, `fast0000` never appears in another `"Processing tick"`/`"Tick processed"` line — the routine is genuinely gone.
+
+**(b) Update → state reset *without* a routine stop (the reason a global count is ambiguous).** Updating `fast0020` mid-run emits `"Clearing the state of the rule because it was updated"` `[pkg/services/ngalert/schedule/alert_rule.go:L257]`, which calls `resetState → ResetStateByRuleUID → DeleteStateByRuleUID` `[pkg/services/ngalert/schedule/alert_rule.go:L259,L483-L489; pkg/services/ngalert/state/manager.go:L285-L287]` — so it **also** logs `"Resetting state of the rule"` — but there is **no** `"Stopping alert rule routine"` for `fast0020`, and its routine keeps evaluating:
+
+```json
+{"fingerprint":"2aecd1703593714a","isPaused":false,"level":"info","logger":"ngalert.scheduler","msg":"Clearing the state of the rule because it was updated","org_id":1,"rule_uid":"fast0020","t":"2026-06-26T22:43:19.00465433Z"}
+{"level":"debug","logger":"ngalert.state.manager","msg":"Resetting state of the rule","org_id":1,"rule_uid":"fast0020","t":"2026-06-26T22:43:19.00466926Z"}
+```
+
+This is the concrete reason the earlier "count the resets, count the stops, compare" approach is unsound: `"Resetting state of the rule"` is emitted by **delete *and* update *and* pause** (all three route through `DeleteStateByRuleUID`), while `"Stopping alert rule routine"` is emitted by **delete *and* restart**. The two totals draw from overlapping-but-different populations, so their equality proves nothing. The reliable disambiguator is the **pairing on the same UID**: *delete* = reset **+** stop; *update* = reset **without** stop.
+
+**(c) Restart (type change) → routine stops *without* a delete-time reset; state preserved.** Forcing `fast0021` from `alerting` to `recording` makes `processTick` observe `item.Type() != ruleRoutine.Type()` `[pkg/services/ngalert/schedule/schedule.go:L293]`, log the restart, and stop the *old* routine with the `errRuleRestarted` cause `[pkg/services/ngalert/schedule/schedule.go:L295-L296,L386-L387; pkg/services/ngalert/schedule/registry.go:L20]`:
+
+```json
+{"level":"debug","logger":"ngalert.scheduler","msg":"Rule restarted because type changed","new":"recording","old":"alerting","org_id":1,"rule_uid":"fast0021","t":"2026-06-26T22:43:24.004565903Z"}
+{"level":"debug","logger":"ngalert.scheduler","msg":"Stopping alert rule routine","org_id":1,"rule_uid":"fast0021","t":"2026-06-26T22:43:24.004983486Z"}
+```
+
+The decisive contrast with delete is what is **absent**: for `fast0021` the *only* `"Resetting state of the rule"` was at creation (`22:42:55`, ~29 s earlier) — there is **no** reset at restart time (`22:43:24`), even though the routine stopped 418 µs after the restart was logged. The `errRuleDeleted` guard at `[pkg/services/ngalert/schedule/alert_rule.go:L349]` is **false** for `errRuleRestarted`, so the teardown branch is skipped and the state survives the restart. *Delete throws state away; restart keeps it* — and the runtime signature is exactly that asymmetry (reset+stop for `fast0000`, stop-only for `fast0021`).
+
+**(d) In-flight evaluation canceled → state write skipped.** Deleting the slow rules while their (timing-out) evaluations were in flight tripped the **post-eval** cancel guard. Each of `slow0000…slow0009` logged exactly one `"Skip updating the state because the context has been cancelled"` `[pkg/services/ngalert/schedule/alert_rule.go:L393]`; e.g. `slow0003`, whose evaluation began at `now=22:43:04` and was cancelled ~12 s later at `t=22:43:16`, carrying its `version`/`fingerprint`:
+
+```json
+{"fingerprint":"0cd3fae3aee26d70","level":"debug","logger":"ngalert.scheduler","msg":"Skip updating the state because the context has been cancelled","now":"2026-06-26T22:43:04Z","org_id":1,"rule_uid":"slow0003","t":"2026-06-26T22:43:16.005097491Z","version":2}
+```
+
+The guard returns `nil` *before* `ProcessEvalResults`, so nothing partial is persisted `[pkg/services/ngalert/schedule/alert_rule.go:L391-L394]` — an interrupted evaluation leaves no half-written state.
+
+**(e) `/metrics` corroboration (M1).** The Prometheus endpoint corroborates the same churn from the counter side. As the two delete batches landed, `grafana_alerting_schedule_alert_rules` `[pkg/services/ngalert/metrics/scheduler.go:L156]` stepped **down** in exact lock-step — `70 → 60` when `fast0000…fast0009` were removed at `22:43:13`, then `→ 50` when `slow0000…slow0009` were removed at `22:43:16` — while `rule_evaluations_total` kept climbing and the slow-datasource timeouts surfaced as rising `rule_evaluation_failures_total` and `schedule_rule_evaluations_missed_total` (the per-second scrape CSV; columns trimmed for readability):
 
 ```text
-Stopping alert rule routine:               182
-Resetting state of the rule:               182
-Skip updating the state (post-eval cancel): 57
+wall_iso                schedule_alert_rules  rule_evaluations_total  rule_evaluation_failures_total  schedule_rule_evaluations_missed_total
+2026-06-26T22:43:12Z    70                    100                     0                               0
+2026-06-26T22:43:13Z    60                    100                     0                               0   <- DELETE fast0000..fast0009
+2026-06-26T22:43:15Z    60                    100                     0                               0
+2026-06-26T22:43:16Z    50                    100                     0                               0   <- DELETE slow0000..slow0009 (mid-eval)
+2026-06-26T22:44:08Z    50                    219                     4                               120
 ```
 
-**182 routines stopped == 182 state resets.** Every single deleted rule that stopped its routine also had its state reset — there is no residue. Separately, **57** in-flight evaluations were canceled and each one took the `return nil` short-circuit *without* writing state.
+Interpretation: the gauge **falling** in lock-step with the delete markers is the metric-side proof that removed rules are *fully unregistered* — not merely paused, and not leaked (a leaked routine would keep the gauge flat and keep emitting ticks for the dead UID, which we do not observe). The `failures`/`missed` counters rising afterward confirm the timed-out and canceled evaluations are **accounted for** in the meta-metrics rather than silently disappearing. (The headline backpressure gauge `scheduler_behind_seconds` stayed near zero in this 70-rule churn run because the load here is the *churn*, not raw rule count; the tens-of-seconds backlog is the separate 760-rule run in [§2.2](#22-live-evidence-stressed-run).)
 
 ### 3.3 Rationale — why this answers Q2
 
-- **"Does anything get left behind?"** For a **delete**, no: the count equality (182 == 182) is direct evidence that every stopped routine performed `DeleteStateByRuleUID` `[pkg/services/ngalert/state/manager.go:L236]`, i.e., state was removed and resolved notifications were sent via `expireAndSend` `[pkg/services/ngalert/schedule/alert_rule.go:L355-L356]`. For a **canceled in-flight evaluation**, also no: the post-eval guard returns before any state write `[pkg/services/ngalert/schedule/alert_rule.go:L391-L394]`, so nothing partial is persisted — confirmed by the 57 `"Skip updating the state because the context has been cancelled"` lines, each carrying `org_id`/`rule_uid`/`version`/`fingerprint`.
-- **"…or does the system cleanly move on?"** Yes, and the *cause* determines the cleanup policy: `errRuleDeleted` triggers teardown, while `errRuleRestarted` deliberately **preserves** state `[pkg/services/ngalert/schedule/registry.go:L19-L20]`, `[pkg/services/ngalert/schedule/alert_rule.go:L349]`. That is the design distinction between "the rule is gone" and "the rule is being re-created."
-- **"What signs at runtime tell you which one happened?"** Three different log signatures, all carrying the `org_id` and `rule_uid` identifiers:
-  1. **Delete** → `ngalert.state.manager` `"Resetting state of the rule"` **paired with** `ngalert.scheduler` `"Stopping alert rule routine"`.
-  2. **Restart** → routine stops, but there is **no** `"Resetting state of the rule"` for that UID (state survives).
-  3. **In-flight cancel** → `"Skip updating the state because the context has been cancelled"` (post-eval) or `"Skip evaluation and updating the state because the context has been cancelled"` (pre-eval), with **no** state change recorded.
+- **"Does anything get left behind?"** For a **delete**, no — and the proof is **per-UID**, not a global tally. For `fast0000`, the *same* `org_id`/`rule_uid` shows `"Resetting state of the rule"` **+** `"Rules state was reset" states:1` **+** `"Stopping alert rule routine"` within ~1 ms `[pkg/services/ngalert/state/manager.go:L236-L238,L278; pkg/services/ngalert/schedule/alert_rule.go:L355-L358]`, the `states:1` field confirms a live state was actually removed, resolved notifications are pushed via `expireAndSend` `[pkg/services/ngalert/schedule/alert_rule.go:L356]`, and `fast0000` never appears in a later tick. *(The earlier draft's aggregate "182 == 182" equality is **not** a valid proof: `"Resetting state of the rule"` also fires for **updates/pauses** via `ResetStateByRuleUID` `[pkg/services/ngalert/state/manager.go:L285-L287]` — shown live by `fast0020` — and even at **creation** with zero states, while `"Stopping alert rule routine"` also fires for **restarts**; the two totals draw from overlapping-but-different populations, so their equality is coincidental, not causal.)* For a **canceled in-flight evaluation**, also no: the post-eval guard returns before any state write `[pkg/services/ngalert/schedule/alert_rule.go:L391-L394]`, so nothing partial is persisted — confirmed by the per-UID `"Skip updating the state because the context has been cancelled"` line for each of `slow0000…slow0009`, each carrying `org_id`/`rule_uid`/`version`/`fingerprint`.
+- **"…or does the system cleanly move on?"** Yes, and the *cause* determines the cleanup policy: `errRuleDeleted` triggers teardown (reset **+** stop, seen for `fast0000`), while `errRuleRestarted` deliberately **preserves** state (stop **without** a delete-time reset, seen for `fast0021`) `[pkg/services/ngalert/schedule/registry.go:L19-L20]`, `[pkg/services/ngalert/schedule/alert_rule.go:L349]`. That is the design distinction between "the rule is gone" and "the rule is being re-created." The metric side agrees: `grafana_alerting_schedule_alert_rules` steps down `70 → 60 → 50` exactly as the two delete batches land, so removed rules are fully unregistered rather than leaked.
+- **"What signs at runtime tell you which one happened?"** Distinct, UID-correlated signatures, all carrying the `org_id` and `rule_uid` identifiers:
+  1. **Delete** → `ngalert.state.manager` `"Resetting state of the rule"` (+ `"Rules state was reset"` when state existed) **paired on the same UID with** `ngalert.scheduler` `"Stopping alert rule routine"`, and the rule vanishes from later ticks (`fast0000`).
+  2. **Update/pause** → `"Clearing the state of the rule because it was updated"` + `"Resetting state of the rule"` **without** any `"Stopping alert rule routine"`; the routine keeps evaluating (`fast0020`).
+  3. **Restart (type change)** → `"Rule restarted because type changed"` + `"Stopping alert rule routine"`, but **no** `"Resetting state of the rule"` for that UID at restart time — state survives (`fast0021`).
+  4. **In-flight cancel** → `"Skip updating the state because the context has been cancelled"` (post-eval) or `"Skip evaluation and updating the state because the context has been cancelled"` (pre-eval), with **no** state change recorded (`slow0000…slow0009`).
 
 
 ---
@@ -359,34 +384,48 @@ The newest-wins drain discussed in [§2.1](#21-what-the-code-does) does not unde
 
 ### 4.2 Live evidence (stressed run)
 
-The observable proof is the per-evaluation `now` field (the scheduled tick time) for a single rule, read in the order the lines were logged. Here is rule `fast0000` during the stressed window:
+The observable proof is the **ordered pair** of log lines the single consumer emits for *each* evaluation: `"Processing tick"` when it picks the evaluation up `[pkg/services/ngalert/schedule/alert_rule.go:L269]` and `"Tick processed"` when it finishes `[pkg/services/ngalert/schedule/alert_rule.go:L332]`. Both are stamped, by the same per-evaluation logger `[pkg/services/ngalert/schedule/alert_rule.go:L268]`, with the evaluation's `now` (scheduled tick time), `version`, and `fingerprint`. Here is the slow, timing-out rule `slow0015` during the stressed window, read top-to-bottom in log order:
 
 ```json
-{"attempt":1,"duration":"5.152405ms",   "msg":"Tick processed","now":"2026-06-26T21:20:06Z","org_id":1,"rule_uid":"fast0000","t":"2026-06-26T21:20:06.01700325Z","version":2}
-{"attempt":1,"duration":"52.445933ms",  "msg":"Tick processed","now":"2026-06-26T21:20:16Z","org_id":1,"rule_uid":"fast0000","t":"2026-06-26T21:20:25.311266974Z","version":2}
-{"attempt":1,"duration":"13.0814ms",    "msg":"Tick processed","now":"2026-06-26T21:20:26Z","org_id":1,"rule_uid":"fast0000","t":"2026-06-26T21:20:56.494778634Z","version":2}
-{"attempt":1,"duration":"13.475444ms",  "msg":"Tick processed","now":"2026-06-26T21:20:36Z","org_id":1,"rule_uid":"fast0000","t":"2026-06-26T21:21:05.169460569Z","version":2}
-{"attempt":1,"duration":"10.014511001s","msg":"Tick processed","now":"2026-06-26T21:20:46Z","org_id":1,"rule_uid":"fast0000","t":"2026-06-26T21:21:26.05847728Z","version":2}
-{"attempt":3,"duration":"18.374618172s","msg":"Tick processed","now":"2026-06-26T21:20:56Z","org_id":1,"rule_uid":"fast0000","t":"2026-06-26T21:21:57.150108539Z","version":2}
+{"fingerprint":"9d471f93fcf206b6","level":"debug","logger":"ngalert.scheduler","msg":"Processing tick","now":"2026-06-26T22:43:04Z","org_id":1,"rule_uid":"slow0015","t":"2026-06-26T22:43:04.377384509Z","version":2}
+{"attempt":3,"duration":"1m32.00589391s","fingerprint":"9d471f93fcf206b6","level":"debug","logger":"ngalert.scheduler","msg":"Tick processed","now":"2026-06-26T22:43:04Z","org_id":1,"rule_uid":"slow0015","t":"2026-06-26T22:44:36.38331178Z","version":2}
+{"fingerprint":"9d471f93fcf206b6","level":"debug","logger":"ngalert.scheduler","msg":"Processing tick","now":"2026-06-26T22:44:34Z","org_id":1,"rule_uid":"slow0015","t":"2026-06-26T22:44:36.383326037Z","version":2}
+{"attempt":3,"duration":"1m32.006717979s","fingerprint":"9d471f93fcf206b6","level":"debug","logger":"ngalert.scheduler","msg":"Tick processed","now":"2026-06-26T22:44:34Z","org_id":1,"rule_uid":"slow0015","t":"2026-06-26T22:46:08.390053766Z","version":2}
+{"fingerprint":"9d471f93fcf206b6","level":"debug","logger":"ngalert.scheduler","msg":"Processing tick","now":"2026-06-26T22:46:04Z","org_id":1,"rule_uid":"slow0015","t":"2026-06-26T22:46:08.390069487Z","version":2}
+{"attempt":3,"duration":"1m32.016401955s","fingerprint":"9d471f93fcf206b6","level":"debug","logger":"ngalert.scheduler","msg":"Tick processed","now":"2026-06-26T22:46:04Z","org_id":1,"rule_uid":"slow0015","t":"2026-06-26T22:47:40.406488859Z","version":2}
 ```
 
-Two things are visible at once:
+Three independent observations confirm ordering held even though each evaluation took **92 s** (`attempt:3`, datasource timing out):
 
-- The **`now` field is strictly monotonic** and exactly 10s apart: `:06 → :16 → :26 → :36 → :46 → :56`. The rule's evaluations are processed in scheduled order with no gaps and no inversions.
-- The **wall-clock `t` field lags further and further behind `now`** (e.g., the `now=:46` tick was actually *processed* at `t=21:21:26`, ~40s late) and the per-evaluation `duration` balloons from ~5ms to **10s and then 18s** with `attempt:3` — i.e., the system is under heavy stress and retrying. Yet **the order is still preserved**: lateness and retries change *when* a result is produced, never its *sequence*.
+- **`Processing tick` and `Tick processed` strictly alternate, and `now` is monotonic** — `:43:04 → :44:34 → :46:04`, each pair fully bracketed before the next begins. There is never a second `Processing tick` before the prior `Tick processed`, so two evaluations of `slow0015` are never in flight at once. (The `now` advances by ~90 s rather than the 10 s interval because, while the consumer was busy for 92 s, the newest-wins drain discarded the intervening ticks — they are *dropped and counted as missed* per [§2](#2-q1--work-selection-under-backpressure), never reordered; the surviving `now` values are still strictly increasing.)
+- **The single consumer is visible in the timestamps:** each `Processing tick`'s wall-clock `t` equals the *previous* `Tick processed`'s `t` to the microsecond — e.g. `now=:43:04` finished at `t=22:44:36.383311`, then `now=:44:34` was picked up at `t=22:44:36.383326`, just **15 µs** later. The consumer literally cannot start tick *N+1* until it has finished tick *N*, which is the structural guarantee of [§4.1](#41-what-the-code-does) made observable.
+- **`fingerprint` is stable and `version` is constant** — `fingerprint:"9d471f93fcf206b6"` and `version:2` on every line, because the rule definition did not change during this window. The stable fingerprint ties every line to the *same* rule definition, so the monotonic `now` is a like-for-like ordering of that definition's evaluations. (Either field changes only when the rule is *edited* — a changed fingerprint is the "this is a different definition" signal, not a reordering.)
+
+**`/metrics` corroboration (M1).** The Prometheus side shows the same forward-only progress aligned to the window above. The ticker's consumed-tick marker advances by exactly one interval per scrape and **never rewinds or skips**, and the evaluation counter is monotonically non-decreasing (per-second scrape CSV, columns trimmed):
+
+```text
+wall_iso                ticker_last_consumed_tick_timestamp_seconds  rule_evaluations_total
+2026-06-26T22:43:04Z    1.782513784e+09                              46
+2026-06-26T22:43:05Z    1.782513785e+09                              70
+2026-06-26T22:43:06Z    1.782513786e+09                              70
+2026-06-26T22:43:07Z    1.782513787e+09                              82
+2026-06-26T22:43:08Z    1.782513788e+09                              100
+```
+
+`ticker_last_consumed_tick_timestamp_seconds` `[pkg/util/ticker/metrics.go:L16-L19]` increments by exactly `1e9` ns (the 1 s interval) each row — the ticker's `last` marker only ever advances forward by one interval as each tick is consumed `[pkg/util/ticker/ticker.go:L64]` — and `grafana_alerting_rule_evaluations_total` `[pkg/services/ngalert/metrics/scheduler.go:L52]` only ever rises. A counter that never decreases and a tick marker that never rewinds are the metric-level shadow of the per-rule in-order consumption: there is no observable signal of an evaluation being processed "behind" an already-processed later one.
 
 ### 4.3 Rationale — why this answers Q3
 
 - **"Do evaluation results ever appear out of order?"** No — not for a given rule. The single-consumer-on-an-unbuffered-channel structure `[pkg/services/ngalert/schedule/alert_rule.go:L161,L242,L262]` makes concurrent evaluation of the same rule impossible, so its results are emitted strictly in scheduled order.
-- **"What observable behavior suggests the ordering was preserved?"** The **monotonically increasing `now`/scheduled-at timestamps** in a rule's own log stream — shown above advancing `:06→:16→:26→:36→:46→:56` *even while* `duration` grew to 18s and the wall-clock `t` fell ~40s behind. If results could overtake one another, you would see a smaller `now` logged after a larger `now` for the same `rule_uid`; that never occurs. The increasing `version` field and stable per-rule `fingerprint` corroborate that each emitted result corresponds to a well-defined, in-order evaluation. The newest-wins drain means a skipped tick is *dropped and counted* ([§2](#2-q1--work-selection-under-backpressure)), never reordered.
-- **Timing/rhythm note (meta-requirement):** the widening gap between `now` and `t`, plus the jump to `attempt:3` and multi-second `duration`s, is the visible "rhythm change" of Q3's "same window" — the cadence stretches and stalls under load, but the ordering invariant holds throughout.
+- **"What observable behavior suggests the ordering was preserved?"** The **monotonically advancing `now`/scheduled-at timestamps** in a rule's own log stream — shown above advancing `:43:04→:44:34→:46:04` *even while* each `duration` was **92 s** with `attempt:3` and the wall-clock `t` fell ~92 s behind. If results could overtake one another, you would see a smaller `now` logged after a larger `now` for the same `rule_uid`; that never occurs. The corroborating identifier is the **stable per-rule `fingerprint`** (`9d471f93fcf206b6` on every `slow0015` line): it confirms all those lines belong to the *same* rule definition, so the `now` ordering is a like-for-like sequence. The `version` field stays **constant** (`2`) for the same reason — it is *not* an increasing sequence number; it changes only when the rule is edited, which is a different event from reordering. On the metric side this is mirrored by `rule_evaluations_total` only ever rising and the ticker's consumed-tick marker only ever advancing. The newest-wins drain means a skipped tick is *dropped and counted* ([§2](#2-q1--work-selection-under-backpressure)), never reordered.
+- **Timing/rhythm note (meta-requirement):** the widening gap between `now` and `t`, plus the jump to `attempt:3` and the **92 s** `duration`s, is the visible "rhythm change" of Q3's "same window" — the cadence stretches and stalls under load (and, after the datasource recovers, snaps back to `attempt:1` ~200 ms evaluations 10 s apart, see [§5.3](#53-recovery-demonstration)), but the ordering invariant holds throughout.
 
 
 ---
 
 ## 5. Stressed vs. normal comparison
 
-The same scenario was repeated under **normal load**: **3 rules** at the default **60s** interval, the default **10s** scheduler tick, and a **healthy fast** TestData data source. Below are the real captured signals from the normal run, then a side-by-side delta.
+The same scenario was repeated under **normal load** in two parts: a **timing/volume baseline** (3 rules at the default 60s interval, default 10s tick, healthy fast TestData) and a **churn repeat** that re-ran the *same* create/update/delete/type-change script at normal load (24 rules @60s, healthy fast DS) so the Q2 cleanup/cancel and Q3 ordering paths can be compared directly against the stressed run. Below are the real captured signals from the baseline (§5.1), the throughput delta (§5.2), recovery (§5.3), the visible changes (§5.4), and the normal-load churn comparison (§5.5).
 
 ### 5.1 Normal run — captured signals
 
@@ -434,7 +473,8 @@ Notice the **same ordering invariant from Q3 holds here too**, but cleanly: `now
 | `…rule_evaluation_failures_total` | `0 → 174` | **0** |
 | per-evaluation `duration` | up to **30.01s** (datasource timeout) → also 10–18s with retries | **1–3.5 ms** |
 | per-rule cadence | bunched, stalled, `attempt:3` retries | exact **60s**, always `attempt:1` |
-| ticker consumed-vs-next gap | lagging ~**50–60s** | exactly **10.0s** |
+| ticker `next − last_consumed` gap (= tick interval by construction `[pkg/util/ticker/ticker.go:L54-L65]`; **not** a backlog signal) | exactly **1.0s** (1s tick) | exactly **10.0s** (10s tick) |
+| `last_consumed` timestamp vs **wall-clock now** (the true backlog, mirrors `scheduler_behind_seconds`) | lags by tens of seconds (peak ~**64.5s**) | ≤ one interval (**≈0s**) |
 | `…rule_evaluations_total` growth | `1459 → 14922` | **13** over ~4 min |
 | `…schedule_periodic_duration_seconds` (mean tick) | ~**1.16s**/tick (heavy tail >10s) | sub-tick (single-digit ms class) |
 
@@ -453,8 +493,61 @@ The `duration` dropped from ~30s to ~501ms, the `attempt` fell back to `1`, and 
 ### 5.4 What visibly changes
 
 - **Volume:** evaluation throughput in the stressed run is far higher and *failing* (14922 evals, 174 failures, 927 missed) versus a trickle of clean successes in the normal run (13 evals, 0 failures, 0 missed).
-- **Timing:** the stressed run shows tens of seconds of `behind_seconds`, a consumed-tick timestamp lagging the next-tick timestamp, ballooning per-eval durations, retries to `attempt:3`, and an irregular, stalling rhythm. The normal run is metronomic: `behind_seconds`≈0, ticker gap exactly equal to the interval, single-attempt evaluations a few ms long, and `now`/`t` essentially coincident.
+- **Timing:** the stressed run shows tens of seconds of `behind_seconds` — i.e. the consumed-tick timestamp lagging **wall-clock now**, while the `next − last_consumed` ticker gap stays pinned at the 1s interval — plus ballooning per-eval durations, retries to `attempt:3`, and an irregular, stalling rhythm. The normal run is metronomic: `behind_seconds`≈0, `next − last_consumed` ticker gap exactly equal to the 10s interval, single-attempt evaluations a few ms long, and `now`/`t` essentially coincident.
+- **Churn (cleanup / cancel / order):** the delete-teardown and type-change-restart signatures are **identical in kind** under both loads (delete = reset + stop; restart = stop, no reset), and the `schedule_alert_rules` gauge steps down on every delete in both (24 → 14 normal, 70 → 60 → 50 stressed). The one behavior that *visibly* changes is **in-flight cancellation**: the stressed run produced **10** `"Skip updating the state…"` lines (slow evaluations caught mid-flight by a delete) while the normal run produced **0** — under a healthy data source evaluations finish in milliseconds, so a delete essentially never lands while one is running. Cancellation is therefore a *symptom of backpressure*, not of deletion itself. Detailed side-by-side churn evidence is in [§5.5](#55-normal-load-churn--the-same-scenario-repeated).
 
+### 5.5 Normal-load churn — the same scenario, repeated
+
+To compare the **cleanup, cancellation, and ordering** behavior (not just throughput) under normal load, I re-ran the *same* churn script — bulk-create, then delete `fast0000…fast0009`, update `fast0020`, and type-change `fast0021` (`alerting → recording`) — against a **healthy fast** TestData source with **24 rules @60s** and the default **10s** tick.
+
+**Delete → clean teardown, same signature as stress.** `fast0000` shows the state-manager reset paired with the routine stop on the same UID, ~24 µs apart:
+
+```json
+{"level":"debug","logger":"ngalert.state.manager","msg":"Resetting state of the rule","org_id":1,"rule_uid":"fast0000","t":"2026-06-26T22:49:40.002976587Z"}
+{"level":"debug","logger":"ngalert.scheduler","msg":"Stopping alert rule routine","org_id":1,"rule_uid":"fast0000","t":"2026-06-26T22:49:40.003000241Z"}
+```
+
+The one *visible* difference from the stressed delete is the **absence of `"Rules state was reset"`**: at the 60 s interval, `fast0000` had not yet completed an evaluation when it was deleted ~13 s after creation, so there were **zero** cached states to remove — recall `DeleteStateByRuleUID` logs `"Resetting state of the rule"` unconditionally but only logs `"Rules state was reset"` when `len(states) > 0` `[pkg/services/ngalert/state/manager.go:L240-L242,L278]`. Same teardown path; there was simply less accumulated state to clean.
+
+**Restart (type change) → same state-preserving signature.** `fast0021` produces the identical restart pair as the stressed run — the restart is logged and the old routine is stopped with `errRuleRestarted`, with **no** `"Resetting state of the rule"` at restart time:
+
+```json
+{"level":"debug","logger":"ngalert.scheduler","msg":"Rule restarted because type changed","new":"recording","old":"alerting","org_id":1,"rule_uid":"fast0021","t":"2026-06-26T22:50:00.002619754Z"}
+{"level":"debug","logger":"ngalert.scheduler","msg":"Stopping alert rule routine","org_id":1,"rule_uid":"fast0021","t":"2026-06-26T22:50:00.00268299Z"}
+```
+
+**In-flight cancellation → the headline delta: it essentially does not happen under normal load.** Under stress, deleting the slow rules caught 10 evaluations mid-flight and produced 10 `"Skip updating the state…"` lines. Under normal load, with a healthy data source every evaluation finishes in a few milliseconds, so a delete almost never lands while an evaluation is running — the entire normal run produced **zero** cancel lines of either kind:
+
+```text
+Skip updating the state because the context has been cancelled:                 0   (stressed: 10)
+Skip evaluation and updating the state because the context has been cancelled:   0   (stressed: present)
+```
+
+There is nothing in flight to cancel: cancellation is a *consequence of backpressure*, not of deletion per se.
+
+**Ordering still holds, cleanly.** `fast0015` advances by exactly 60 s with no inversions — the same Q3 invariant as the stressed run, but without the 92 s stalls (stable `fingerprint`, constant `version`, `attempt:1`, single-digit-ms durations):
+
+```json
+{"fingerprint":"a70a2ac5ec3f4f19","level":"debug","logger":"ngalert.scheduler","msg":"Processing tick","now":"2026-06-26T22:49:50Z","org_id":1,"rule_uid":"fast0015","t":"2026-06-26T22:49:53.573646138Z","version":2}
+{"attempt":1,"duration":"4.706774ms","fingerprint":"a70a2ac5ec3f4f19","level":"debug","logger":"ngalert.scheduler","msg":"Tick processed","now":"2026-06-26T22:49:50Z","org_id":1,"rule_uid":"fast0015","t":"2026-06-26T22:49:53.578445027Z","version":2}
+{"fingerprint":"a70a2ac5ec3f4f19","level":"debug","logger":"ngalert.scheduler","msg":"Processing tick","now":"2026-06-26T22:50:50Z","org_id":1,"rule_uid":"fast0015","t":"2026-06-26T22:50:53.573847147Z","version":2}
+{"attempt":1,"duration":"44.945653ms","fingerprint":"a70a2ac5ec3f4f19","level":"debug","logger":"ngalert.scheduler","msg":"Tick processed","now":"2026-06-26T22:50:50Z","org_id":1,"rule_uid":"fast0015","t":"2026-06-26T22:50:53.618861289Z","version":2}
+```
+
+**Churn-signal delta (stressed-churn vs normal-churn):**
+
+| Q2/Q3 signal | **Stressed churn** (70 rules @10s, slow DS, 1s tick) | **Normal churn** (24 rules @60s, healthy DS, 10s tick) |
+|---|---|---|
+| Delete teardown (`Resetting state` + `Stopping routine`, same UID) | present (`fast0000`, + `Rules state was reset` `states:1`) | present (`fast0000`, no states to reset yet) |
+| Restart on type change (`Rule restarted` + stop, no reset) | present (`fast0021`) | present (`fast0021`) |
+| In-flight cancels (`Skip updating the state…`) | **10** (slow rules caught mid-eval) | **0** (evaluations finish in ms) |
+| `grafana_alerting_schedule_alert_rules` on delete | `70 → 60 → 50` | `24 → 14` |
+| `…rule_evaluation_failures_total` | `0 → 4` | **0** |
+| `…schedule_rule_evaluations_missed_total` | `0 → 120` | **0** |
+| WARN `"Tick dropped…too slow"` | many (`120` in the capture window) | **0** |
+| Per-rule ordering (`now` monotonic) | holds (with 92 s stalls) | holds (clean 60 s cadence) |
+
+**What this shows.** The *cleanup* and *ordering* behaviors are **identical in kind** under both loads — delete tears down, restart preserves state, ordering holds — exactly as the code predicts, because those paths do not depend on load. What load changes is *how often the cancellation path is exercised at all*: in-flight cancellation is a side-effect of an evaluation outliving the moment its rule is deleted, which only happens when evaluations are slow. Under normal load that window is microscopic, so cancellation effectively disappears while teardown and ordering look the same — just faster and without stalls.
 
 ---
 
@@ -469,11 +562,15 @@ All of the following ran **outside** the repository tree (under `/tmp`); the rep
 # build ./pkg/cmd/grafana for the actual binary). Requires Go 1.23.1 [go.mod:L3].
 go build -o ./bin/linux-amd64/grafana ./pkg/cmd/grafana
 
-# Run with an OUT-OF-REPO config + data/log/provisioning dirs, repo as homepath.
+# Explicit paths used for these runs. All config/data/log/provisioning dirs live
+# OUTSIDE the repository tree (under /tmp/blitzy_obs); the repo is only the homepath.
+REPO=/tmp/blitzy/grafana/blitzy-fd396a32-9746-4b6c-babd-1717a5987128_95dd04  # repository root (your checkout path)
+SCENARIO=stress                              # one of: stress | normal
+CONFIG=/tmp/blitzy_obs/${SCENARIO}/grafana.ini  # e.g. /tmp/blitzy_obs/stress/grafana.ini or /tmp/blitzy_obs/normal/grafana.ini
+
+# Run with the out-of-repo config, repo as homepath.
 # Unified Alerting is on by default [conf/defaults.ini:L1220-L1222].
-./bin/linux-amd64/grafana server \
-  --config=/tmp/blitzy_obs/<scenario>.ini \
-  --homepath=/tmp/blitzy/grafana/<repo>
+./bin/linux-amd64/grafana server --config="${CONFIG}" --homepath="${REPO}"
 ```
 
 Key out-of-repo config knobs used (in the temporary `.ini` files, never in `conf/defaults.ini`):
@@ -520,10 +617,12 @@ flowchart TD
 
 The code is the authority; the following official Grafana documentation only *corroborates* the code-derived interpretation.
 
-- **`scheduler_behind_seconds` semantics.** Grafana's meta-monitoring docs describe it as <cite index="1-14,1-15,1-16">"a gauge that shows you the number of seconds that the scheduler is behind"</cite>, which increases when `schedule_periodic_duration_seconds` exceeds 10 seconds and decreases otherwise, with a smallest value of 0. This matches the code at `[pkg/services/ngalert/schedule/schedule.go:L214-L215]` and the live behavior in [§2.2](#22-live-evidence-stressed-run) and the recovery demo in [§5.3](#53-recovery-demonstration).
-- **Tick accumulation.** The same docs note that <cite index="1-10,1-11">"If the scheduler takes longer than 10 seconds to process a tick then pending evaluations start to accumulate"</cite>, corroborating the queue-don't-drop ticker `[pkg/util/ticker/ticker.go:L12-L16]` and the rising-gauge/lagging-consumed-tick signature rather than skipped ticks.
+- **`scheduler_behind_seconds` semantics.** Grafana's [Meta monitoring documentation][meta-monitoring] describes it as "a gauge that shows you the number of seconds that the scheduler is behind", which (per the same page) increases when `schedule_periodic_duration_seconds` exceeds 10 seconds and decreases otherwise, with a smallest value of 0. This matches the code at `[pkg/services/ngalert/schedule/schedule.go:L214-L215]` and the live behavior in [§2.2](#22-live-evidence-stressed-run) and the recovery demo in [§5.3](#53-recovery-demonstration).
+- **Tick accumulation.** The same [Meta monitoring documentation][meta-monitoring] notes that when the scheduler takes longer than its tick interval to process a tick, "pending evaluations start to accumulate", corroborating the queue-don't-drop ticker `[pkg/util/ticker/ticker.go:L12-L16]` and the rising-gauge / lagging-consumed-tick signature rather than skipped ticks.
 - **`/metrics` exposure.** The docs confirm metrics are exposed at the `/metrics` endpoint and that `[metrics] enabled = true` controls it, matching the gating at `[pkg/api/http_server.go:L661]`.
 - **Data-source error → Error instance.** Official docs describe a timing-out/erroring data source producing a `DatasourceError` alert instance, corroborating the `Error`-state result path `[pkg/services/ngalert/eval/eval.go:L265-L267]` observed in [§2.2](#22-live-evidence-stressed-run).
+
+[meta-monitoring]: https://grafana.com/docs/grafana/latest/alerting/set-up/meta-monitoring/
 
 ---
 
