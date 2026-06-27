@@ -42,7 +42,7 @@ Run (server listens on http://localhost:3000 — `conf/defaults.ini` line 41; ad
 Startup banner confirming the injected version (verbatim captured line):
 
 ```
-logger=settings t=2026-06-26T19:58:03.011136327Z level=info msg="Starting Grafana" version=11.5.0-pre commit=4550cfb5b7 branch=grafana_4550cfb5b728 compiled=2024-12-13T14:22:02Z
+logger=settings t=2026-06-27T00:03:52.561847139Z level=info msg="Starting Grafana" version=11.5.0-pre commit=4550cfb5b7 branch=grafana_4550cfb5b728 compiled=2024-12-13T14:22:02Z
 ```
 
 Frontend / tests (Node 22, Yarn 4.5.3):
@@ -68,45 +68,63 @@ yarn jest <spec-path> --watchAll=false --verbose
 
 > After the server has been running for at least 60 seconds with no user requests, what are the exact recurring log entries that appear? Provide the actual log output as runtime evidence.
 
-### (b) Runtime evidence (verbatim — server held idle with ZERO user requests, started 19:58:02)
+### (b) Runtime evidence (verbatim — server held idle with ZERO user requests, started 00:03:52)
 
-The prominent guaranteed recurring INFO line — emitted on a **10-minute** cadence (proven by two consecutive ticks exactly 10 minutes apart):
+**Two** INFO log entries recur on a **10-minute** cadence on an idle instance. The first is the cleanup service's completion line; its 10-minute ticker has no immediate run, so its first occurrence is at the +10-minute tick (two consecutive ticks captured exactly 10 minutes apart):
 
 ```
-logger=cleanup t=2026-06-26T20:08:04.908749806Z level=info msg="Completed cleanup jobs" duration=54.310109ms
-logger=cleanup t=2026-06-26T20:18:04.911003261Z level=info msg="Completed cleanup jobs" duration=56.414094ms
+logger=cleanup t=2026-06-27T00:13:54.696206613Z level=info msg="Completed cleanup jobs" duration=80.086188ms
+logger=cleanup t=2026-06-27T00:23:54.619607856Z level=info msg="Completed cleanup jobs" duration=3.365954ms
+```
+
+The second is the plugins update-checker's success line. It runs once immediately at startup and then advances the same 10-minute ticker, so it appears at startup, +10 min and +20 min — at near-identical timestamps to the cleanup ticks above:
+
+```
+logger=plugins.update.checker t=2026-06-27T00:03:54.649506013Z level=info msg="Update check succeeded" duration=33.64092ms
+logger=plugins.update.checker t=2026-06-27T00:13:54.678893715Z level=info msg="Update check succeeded" duration=29.053884ms
+logger=plugins.update.checker t=2026-06-27T00:23:54.751967238Z level=info msg="Update check succeeded" duration=102.103736ms
+```
+
+A third `"Update check succeeded"` line is emitted once at startup by a *different* logger — the core Grafana update checker (`grafana.update.checker`) — whose ticker is 24 hours, so it does NOT recur within the idle window:
+
+```
+logger=grafana.update.checker t=2026-06-27T00:03:54.655878047Z level=info msg="Update check succeeded" duration=40.226756ms
 ```
 
 At DEBUG level the cleanup tick is preceded by the full job list:
 
 ```
-logger=cleanup t=2026-06-26T20:08:03.197573539Z level=debug msg="Starting cleanup jobs" jobs="[\"clean up temporary files\" \"delete expired snapshots\" \"delete expired dashboard versions\" \"delete expired images\" \"cleanup old annotations\" \"expire old user invites\" \"delete stale query history\" \"expire old email verifications\" \"cleanup trash dashboards\" \"delete stale short URLs\"]"
+logger=cleanup t=2026-06-27T00:13:54.616160793Z level=debug msg="Starting cleanup jobs" jobs="[\"clean up temporary files\" \"delete expired snapshots\" \"delete expired dashboard versions\" \"delete expired images\" \"cleanup old annotations\" \"expire old user invites\" \"delete stale query history\" \"expire old email verifications\" \"cleanup trash dashboards\" \"delete stale short URLs\"]"
 ```
 
 The alerting scheduler logs a one-time INFO at startup, then advances a 10-second ticker whose per-tick output is DEBUG (not INFO):
 
 ```
-logger=ngalert.scheduler t=2026-06-26T19:58:04.854129512Z level=info msg="Starting scheduler" tickInterval=10s maxAttempts=3
-logger=ngalert.scheduler t=2026-06-26T19:58:10.000605332Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-06-26T19:58:20.000587512Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-06-27T00:03:54.6626732Z level=info msg="Starting scheduler" tickInterval=10s maxAttempts=3
+logger=ngalert.scheduler t=2026-06-27T00:04:00.000840894Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-06-27T00:04:10.000741767Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
 ```
 
 Other recurring DEBUG-level activity observed on a ~60-second cadence while idle:
 
 ```
-logger=ngalert.multiorg.alertmanager t=2026-06-26T19:58:03.182636592Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.sender.router t=2026-06-26T19:58:03.193115479Z level=debug msg="Attempting to sync admin configs" count=0
-logger=secrets t=2026-06-26T19:59:03.197819856Z level=debug msg="Removing expired data keys from cache..."
-logger=ssosettings.service t=2026-06-26T19:59:03.19787511Z level=debug msg="reloading SSO Settings for all providers"
+logger=ngalert.multiorg.alertmanager t=2026-06-27T00:03:54.554693515Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.sender.router t=2026-06-27T00:03:54.560647595Z level=debug msg="Attempting to sync admin configs" count=0
+logger=secrets t=2026-06-27T00:04:54.616618281Z level=debug msg="Removing expired data keys from cache..."
+logger=ssosettings.service t=2026-06-27T00:04:54.616525005Z level=debug msg="reloading SSO Settings for all providers"
 ```
 
 ### (c) Rationale
 
 - Grafana runs long-lived background services as goroutines; idle-time recurrence comes from their periodic tickers, NOT from request handling.
-- At the **default `level = info`**, a strict 60-second idle window is nearly silent: after the startup burst, the only post-startup INFO is a ONE-TIME `logger=infra.usagestats msg="Usage stats are ready to report"` (~+70 s) — it does not recur within minutes. Therefore, within 60 s you may see no NEW recurring INFO line; the first guaranteed RECURRING INFO line appears at the **10-minute** mark.
-- The single prominent guaranteed recurring INFO entry is `logger=cleanup ... msg="Completed cleanup jobs"`, emitted once per 10-minute tick. The two captured ticks at `20:08:04` and `20:18:04` are exactly 10 minutes apart, proving the cadence matches the code's `time.NewTicker(time.Minute * 10)`.
-- Shorter-cadence recurrence (scheduler every 10 s; secrets/alertmanager/SSO every ~60 s) is logged at DEBUG, which is why the run was also captured at `cfg:log.level=debug` to surface it. The remote-cache DB GC ticker also fires every 10 minutes, but its periodic loop (`internalRunGC`) emits a log line **only if the garbage-collect `DELETE` itself fails**, and that line is at **ERROR** level (line 51), not DEBUG. On a healthy idle instance the `DELETE` succeeds (deleting zero or more expired rows is still success), so the periodic GC loop is silent at every level. (The DEBUG `"Deletion of expired key failed"` line at line 74 lives in the cache `Get` path, not in the periodic GC loop.)
-- Conclusion: **The exact recurring INFO log entry on an idle instance is `level=info msg="Completed cleanup jobs" duration=…` from `logger=cleanup`, recurring every 10 minutes.** Additional recurring entries exist only at DEBUG (scheduler 10 s; secrets/alertmanager/router/SSO ~60 s).
+- At the **default `level = info`**, a strict 60-second idle window is sparse. The INFO lines visible within the first ~60 s are: the **startup occurrence** of `logger=plugins.update.checker msg="Update check succeeded"` (which runs immediately at boot and then recurs — see below), the one-time `logger=grafana.update.checker msg="Update check succeeded"` (24-hour ticker, effectively startup-only), and the one-time `logger=infra.usagestats msg="Usage stats are ready to report"` (captured here at `00:05:37`, ≈ +1 m 45 s; observed exactly once, does not recur). To *observe a recurrence* — a second occurrence that proves periodicity — you must watch for ≥ 10 minutes, because the cleanup line first appears only at the +10-minute tick and the update-check line's second occurrence is at +10 minutes.
+- **There are exactly two INFO entries that recur on an idle instance, both on a 10-minute cadence:**
+  - `logger=cleanup msg="Completed cleanup jobs"` — emitted once per 10-minute tick. Its ticker has no immediate run, so its first occurrence is at the +10-minute mark. The captured ticks at `00:13:54` and `00:23:54` are 10 minutes apart (measured Δ = 599.923 s), matching the code's `time.NewTicker(time.Minute * 10)`.
+  - `logger=plugins.update.checker msg="Update check succeeded"` — the plugins update checker runs once immediately at startup and then advances a 10-minute ticker, so it appears at startup, +10 min and +20 min. The captured occurrences at `00:03:54`, `00:13:54` and `00:23:54` are 10 minutes apart (measured Δ = 600.029 s and 600.073 s), again matching `time.NewTicker(time.Minute * 10)`. It is enabled by default (`check_for_plugin_updates = true`). At the +10 and +20 marks this line and the cleanup line appear at near-identical timestamps.
+- An exhaustive scan of every INFO `msg=` value present at BOTH the +10-minute and +20-minute marks returns exactly these two identities and no others. (A transient `logger=sqlstore.transactions msg="Database locked, sleeping then retrying"` INFO line appeared once at the +10-minute mark but NOT at +20, so it is an incidental SQLite busy-retry, not a recurring entry.)
+- The third `"Update check succeeded"` line shares the same message text but is emitted by a **different** logger — the core Grafana update checker `grafana.update.checker` — on a **24-hour** ticker, so on an idle instance it appears only once at startup and does NOT recur within the idle window (it is gated by `check_for_updates = true`). The two update-checker loggers are distinct: `plugins.update.checker` (10-minute, recurring) vs `grafana.update.checker` (24-hour, startup-only).
+- Shorter-cadence recurrence is logged at **DEBUG**, which is why the run was also captured at `cfg:log.level=debug` to surface it: the alerting scheduler emits `"Alert rules fetched"` every 10 s, and `secrets` / `ngalert.multiorg.alertmanager` / `ngalert.sender.router` / `ssosettings.service` each emit their line every ~60 s. The remote-cache DB GC ticker also fires every 10 minutes, but its periodic loop (`internalRunGC`) emits a log line **only if the garbage-collect `DELETE` itself fails**, and that line is at **ERROR** level (line 51), not DEBUG. On a healthy idle instance the `DELETE` succeeds (deleting zero or more expired rows is still success), so the periodic GC loop is silent at every level (confirmed: zero `"garbage collect"` lines in ~24 minutes of idling). (The DEBUG `"Deletion of expired key failed"` line at line 74 lives in the cache `Get` path, not in the periodic GC loop.)
+- Conclusion: **an idle Grafana instance at the default `level = info` has exactly two recurring INFO log entries, both on a 10-minute cadence — `msg="Completed cleanup jobs"` from `logger=cleanup` and `msg="Update check succeeded"` from `logger=plugins.update.checker`.** All other periodic background activity (alerting scheduler ~10 s; secrets / alertmanager / router / SSO ~60 s) is emitted at **DEBUG**; and although the core `grafana.update.checker "Update check succeeded"` line is also at INFO, its 24-hour ticker makes it a startup-only line rather than a recurring one.
 
 ### (d) Responsible code
 
@@ -115,7 +133,21 @@ logger=ssosettings.service t=2026-06-26T19:59:03.19787511Z level=debug msg="relo
   - line 80 — `ticker := time.NewTicker(time.Minute * 10)` (the 10-minute cadence)
   - lines 82–86 — the `select` loop: `case <-ticker.C: srv.clean(ctx)` and `case <-ctx.Done(): return ctx.Err()`
   - line 116 — `logger.Debug("Starting cleanup jobs", …)` (DEBUG job list)
-  - line 128 — `logger.Info("Completed cleanup jobs", "duration", time.Since(start))` (the recurring INFO line)
+  - line 128 — `logger.Info("Completed cleanup jobs", "duration", time.Since(start))` (the cleanup recurring INFO line)
+- `pkg/services/updatechecker/plugins.go` (logger `plugins.update.checker` — the **second recurring INFO line**):
+  - line 75 — `func (s *PluginsService) Run(ctx context.Context) error`
+  - line 76 — `s.instrumentedCheckForUpdates(ctx)` (runs once immediately at startup, before the ticker loop — this is why the first occurrence is at startup rather than +10 min)
+  - line 78 — `ticker := time.NewTicker(time.Minute * 10)` (the 10-minute cadence)
+  - line 84 — `case <-ticker.C: s.instrumentedCheckForUpdates(ctx)` (re-runs the check on every tick)
+  - line 112 — `func (s *PluginsService) instrumentedCheckForUpdates(ctx context.Context)`
+  - line 120 — `ctxLogger.Debug("Update check failed", "error", err, "duration", …)` (the failure path is DEBUG; taken only if the grafana.com request errors)
+  - line 123 — `ctxLogger.Info("Update check succeeded", "duration", time.Since(start))` (the recurring INFO line, emitted on the success path)
+  - enabled by default via `cfg.CheckForPluginUpdates` ← `check_for_plugin_updates = true` (`conf/defaults.ini` line 275; mapped at `pkg/setting/setting.go` line 1157 — `cfg.CheckForPluginUpdates = analytics.Key("check_for_plugin_updates").MustBool(true)`)
+- `pkg/services/updatechecker/grafana.go` (logger `grafana.update.checker` — the SAME `"Update check succeeded"` message, but on a 24-hour ticker → emitted only once at startup, NOT recurring):
+  - line 60 — `func (s *GrafanaService) Run(ctx context.Context) error`
+  - line 63 — `ticker := time.NewTicker(time.Hour * 24)` (24-hour cadence)
+  - line 89 — `ctxLogger.Info("Update check succeeded", "duration", time.Since(start))`
+  - gated by `cfg.CheckForGrafanaUpdates` ← `check_for_updates = true` (`conf/defaults.ini` line 268; mapped at `pkg/setting/setting.go` line 1156 — `cfg.CheckForGrafanaUpdates = analytics.Key("check_for_updates").MustBool(true)`)
 - `pkg/services/ngalert/schedule/schedule.go`:
   - line 157 — `sch.log.Info("Starting scheduler", "tickInterval", sch.baseInterval, "maxAttempts", sch.maxAttempts)`
   - line 158 — ticker advanced at `baseInterval` (per-tick output is DEBUG)
@@ -133,7 +165,7 @@ logger=ssosettings.service t=2026-06-26T19:59:03.19787511Z level=debug msg="relo
 
 ### (b) Runtime evidence (verbatim)
 
-All three captures below were produced by running `./bin/linux-amd64/grafana server` against a dedicated, throw-away data directory (`cfg:paths.data=/tmp/grafana-o2-fresh`) and reading the migrator output from the captured stdout log. These migration runs are deliberately separate from the idle-behavior run used for O1 (and carry their own, later timestamps), because demonstrating both the fresh `performed=N` case and the already-migrated `performed=0` case inherently requires two successive starts against the same database — which cannot come from the single idle run. Every fenced block contains only verbatim, consecutive log lines exactly as captured; where output is long, the omitted portion is described in prose **outside** the fence (no placeholder text appears inside any evidence block).
+All three captures below were produced by running `./bin/linux-amd64/grafana server` against a dedicated, throw-away data directory (`cfg:paths.data=/tmp/grafana-o2-fresh`) and reading the migrator output from the captured stdout log. These migration runs are deliberately separate from the idle-behavior run used for O1 (and carry their own, independent timestamps), because demonstrating both the fresh `performed=N` case and the already-migrated `performed=0` case inherently requires two successive starts against the same database — which cannot come from the single idle run. Every fenced block contains only verbatim, consecutive log lines exactly as captured; where output is long, the omitted portion is described in prose **outside** the fence (no placeholder text appears inside any evidence block).
 
 On an ALREADY-MIGRATED database (schema up to date) — INFO level — the migrator's entire output is the lock / start / complete / unlock envelope with `performed=0`, having executed NOTHING. The following is the complete, unedited INFO migrator output for both migrator instances (no lines omitted):
 
@@ -264,7 +296,7 @@ Cross-check via the frontend settings `buildInfo` object (GET `/api/frontend/set
 
 - `pkg/api/http_server.go`:
   - lines 694–699 — `type healthResponse struct { Database string \`json:"database"\`; Version string \`json:"version,omitempty"\`; Commit string \`json:"commit,omitempty"\`; … }`
-  - line 710 — `func (hs *HTTPServer) apiHealthHandler(c *contextmodel.ReqContext)`
+  - line 710 — `func (hs *HTTPServer) apiHealthHandler(ctx *web.Context)` — note the parameter is `*web.Context` (not the conventional `*contextmodel.ReqContext`) because this handler is registered as middleware at line 634 (`m.Use(hs.apiHealthHandler)`), so it receives the raw web context
   - lines 716–718 — `data := healthResponse{Database: "ok"}`
   - line 719 — `if !hs.Cfg.Anonymous.HideVersion {`
   - line 720 — `data.Version = hs.Cfg.BuildVersion` (and line 721 `data.Commit = …`)
