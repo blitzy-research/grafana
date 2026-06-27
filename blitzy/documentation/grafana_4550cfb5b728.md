@@ -117,13 +117,13 @@ The `query()` method begins at **L130**. The key steps:
 
 - **Request body** (`packages/grafana-runtime/src/utils/DataSourceWithBackend.ts:L192-L196`):
   ```ts
-  const body: Record<string, unknown> = { queries };
-  if (range) {
-    body.from = range.from.valueOf().toString();
-    body.to = range.to.valueOf().toString();
-  }
+  const body = {
+    queries,
+    from: range?.from.valueOf().toString(),
+    to: range?.to.valueOf().toString(),
+  };
   ```
-  i.e., `{ queries, from, to }`, where `from`/`to` are epoch-millis strings.
+  i.e., `{ queries, from, to }`, where `from`/`to` are epoch-millis strings produced via optional chaining on `range` (`range?.from`/`range?.to`).
 
 - **URL** (`...:L209`): `let url = '/api/ds/query?ds_type=' + this.type;`
   - `'&expression=true'` is appended when the batch contains expressions (`...:L225`).
@@ -308,7 +308,7 @@ Data-source resolution happens in `getDataSourceFromQuery` (`...:L344`):
 - the special `grafanads.DatasourceUID` case is handled (`...:L363-L365`);
 - otherwise it resolves **by uid** via `s.dataSourceCache.GetDatasourceByUID(ctx, uid, user, skipDSCache)` (**`...:L368`**) or **by id** via `GetDatasource(...)` (**`...:L378`**).
 
-`dataSourceCache` is a `datasources.CacheService` (`...:L43`, injected at `...:L74`). This is the **data-source-config** cache examined in [Section 5(b)](#5b-data-source-config-caching--the-real-observable-backend-difference) — the source of the only observable *backend* difference between the two runs. After resolution, the request is routed into the plugin client, which passes through the **caching middleware** ([Section 5(a)](#5a-query-result-caching--no-op-in-oss-the-headline)) before reaching the TestData backend.
+`dataSourceCache` is a `datasources.CacheService` struct field (`...:L74`), injected via the `ProvideService` constructor parameter (`...:L43`). This is the **data-source-config** cache examined in [Section 5(b)](#5b-data-source-config-caching--the-real-observable-backend-difference) — the source of the only observable *backend* difference between the two runs. After resolution, the request is routed into the plugin client, which passes through the **caching middleware** ([Section 5(a)](#5a-query-result-caching--no-op-in-oss-the-headline)) before reaching the TestData backend.
 
 ### 3.4 The TestData backend — `pkg/tsdb/grafana-testdata-datasource/`
 
