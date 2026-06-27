@@ -575,3 +575,28 @@ describe('O5: backend rule definition populates query state on edit-view open', 
 - The only temporary script created inside the repository during the investigation (the O5 spec `rule-form.o5tmp.test.ts`) was deleted immediately after capturing its output; `git status` was verified clean. The O1–O3 evidence was captured from the built binary, and the O4 evidence was produced by running the existing, committed `PanelDataQueriesTab.test.tsx` (no new file). Build/runtime artifacts (`bin/`, `pkg/server/wire_gen.go`, and the runtime `data/` directory created when the server starts) are git-ignored (`.gitignore` — e.g. `/data/*`) and not committed.
 - This document (`blitzy/documentation/grafana_4550cfb5b728.md`) is the single committed artifact of the task.
 
+---
+
+## Validation checklist
+
+The confirmations below summarize the verification performed for this investigation. Each item restates a fact already evidenced in the sections above (the relevant location is noted in parentheses); nothing here introduces a new claim, endpoint, value, or citation.
+
+**Per-objective four-part completeness** — every objective section presents, in order, **(a)** the verbatim question, **(b)** verbatim runtime evidence in fenced code blocks, **(c)** the rationale, and **(d)** the responsible-code citation:
+
+- [x] **O1 — Idle background logging** — four parts present (Section O1, parts a–d). Conclusion: an idle instance at the default `level = info` has exactly two recurring INFO entries, both on a 10-minute cadence — `msg="Completed cleanup jobs"` (`logger=cleanup`) and `msg="Update check succeeded"` (`logger=plugins.update.checker`); all shorter-cadence periodic activity is emitted at DEBUG, and the core `grafana.update.checker` line is startup-only (24-hour ticker).
+- [x] **O2 — Database migration check** — four parts present (Section O2, parts a–d). Conclusion: the "schema is up to date" evidence is the terminal INFO line `msg="migrations completed" performed=0 skipped=<n>` (captured as `performed=0 skipped=626` for `logger=migrator` and `performed=0 skipped=18` for `logger=resource-migrator`).
+- [x] **O3 — Build information via API** — four parts present (Section O3, parts a–d). Conclusion: the exact `version` string reported by the API is `11.5.0-pre`, captured from `GET /api/health` and cross-checked against the `/api/frontend/settings` `buildInfo` object.
+- [x] **O4 — Datasource picker auto-resolution** — four parts present (Section O4, parts a–d). Conclusion: yes — when a panel's queries define a datasource, the picker auto-resolves to and displays it (proven by the existing `PanelDataQueriesTab.test.tsx`, 25/25 passing); the responsible code is `PanelDataQueriesTab.loadDataSource` reading `this.queryRunner.state.datasource`.
+- [x] **O5 — Alerting rule query-state population** — four parts present (Section O5, parts a–d). Conclusion: yes — opening the edit view populates the query state from the backend rule definition's `data` array (proven by a temporary, since-deleted adjacent spec, 2/2 passing); the responsible code is `formValuesFromExistingRule` → `rulerRuleToFormValues`.
+
+**Methodology, evidence, and constraint compliance:**
+
+- [x] The exact build and run commands are recorded, including the ldflags `-X main.version=11.5.0-pre` that govern the O3 version value (see *Build & Run Methodology*).
+- [x] All runtime evidence was captured from a locally built-and-run instance — idle/migration logs, live API JSON, and Jest output — rather than inferred (Sections O1–O5, part b).
+- [x] Code is treated as the source of truth: every conclusion is backed by a file-path + line-number citation verified at HEAD `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` (Sections O1–O5, part d).
+- [x] A rationale is provided for each of the five answers (Sections O1–O5, part c).
+- [x] No existing repository file was modified, created, or deleted; this document is the single committed artifact (see *Methodology compliance & cleanup*).
+- [x] The only temporary script created during the investigation (the O5 spec `rule-form.o5tmp.test.ts`) was deleted after evidence capture, leaving the working tree clean (see *Methodology compliance & cleanup*).
+- [x] The document is named after the source branch (`grafana_4550cfb5b728.md`) and placed in `blitzy/documentation/`, per the project rule.
+- [x] Jest specs were executed non-interactively with `--watchAll=false` (see *Build & Run Methodology*).
+
