@@ -269,9 +269,21 @@ $ curl -s http://localhost:3000/api/health
 }
 ```
 
-Cross-check via the frontend settings `buildInfo` object (GET `/api/frontend/settings`):
+Cross-check via the frontend settings `buildInfo` object (GET `/api/frontend/settings`). **Unlike `/api/health`, this endpoint is *not* anonymously accessible** — it is registered inside the authenticated `/api` route group (guarded by the `reqSignedIn` middleware), so an unauthenticated request is rejected with HTTP `401 Unauthorized` before the handler runs (verbatim captured response):
 
 ```
+$ curl -s -i http://localhost:3000/api/frontend/settings
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json; charset=UTF-8
+Content-Length: 102
+
+{"extra":null,"message":"Unauthorized","messageId":"auth.unauthorized","statusCode":401,"traceID":""}
+```
+
+Supplying the default `admin:admin` credentials returns HTTP 200; the `buildInfo` object (extracted with `jq .buildInfo`) reports the same version (`11.5.0-pre`) and commit (`4550cfb5b7`) as `/api/health`:
+
+```
+$ curl -s -u admin:admin http://localhost:3000/api/frontend/settings | jq .buildInfo
 {
   "hideVersion": false,
   "version": "11.5.0-pre",
@@ -291,6 +303,7 @@ Cross-check via the frontend settings `buildInfo` object (GET `/api/frontend/set
 - **The exact `version` string reported by the API is `11.5.0-pre`.** Two independent API surfaces report it consistently: `/api/health` (`"version": "11.5.0-pre"`) and `/api/frontend/settings` `buildInfo` (`"version": "11.5.0-pre"`, and `versionString: "Grafana v11.5.0-pre (4550cfb5b7)"`).
 - The value originates from `hs.Cfg.BuildVersion`, which is set from the binary's compiled-in `main.version`. Because the binary was built with `-X main.version=11.5.0-pre` (see Methodology), the API reports `11.5.0-pre` rather than the source-level fallback `"9.2.0"`. This is why the document records the exact build command alongside the API value — the runtime value is build-dependent and the running instance is the source of truth.
 - The `version` field appears in `/api/health` only when `!hs.Cfg.Anonymous.HideVersion`. With version-hiding at its default (disabled), the field is present for both authenticated and anonymous callers, which the two captured `curl` responses confirm.
+- **The two API surfaces differ in *access control*, which is why the `/api/health` evidence is captured without credentials but the `/api/frontend/settings` cross-check requires `-u admin:admin`.** `/api/health` is registered as a standalone monitoring middleware via `m.Use(hs.apiHealthHandler)` — explicitly outside the authenticated route group (the surrounding comment states these endpoints "should not be redirected or rejected") — so it answers anonymous callers (subject only to the version-hiding toggle above). `/api/frontend/settings`, by contrast, is registered inside the `r.Group("/api", …)` block that is closed with the `reqSignedIn` middleware, so an anonymous request is rejected with HTTP `401 Unauthorized` (`messageId: "auth.unauthorized"`) before the handler runs; only an authenticated caller reaches the `buildInfo` payload. Both surfaces nonetheless report the identical version `11.5.0-pre`, so the cross-check stands once the request is authenticated.
 
 ### (d) Responsible code
 
@@ -303,6 +316,10 @@ Cross-check via the frontend settings `buildInfo` object (GET `/api/frontend/set
 - `pkg/api/index.go` — line 128 — `BuildVersion: setting.BuildVersion` (feeds the frontend settings `buildInfo`)
 - `pkg/build/cmd.go` — line 247 — `b.WriteString(fmt.Sprintf(" -X main.version=%s", opts.version))` (linker flag that injects the version)
 - `pkg/cmd/grafana/main.go` — line 17 — `var version = "9.2.0"` (the compiled-in fallback used only when ldflags are absent); line 47 — `commands.ServerCommand(version, …)`
+- **Access-control distinction (why the `/api/frontend/settings` `buildInfo` cross-check needs `-u admin:admin` while `/api/health` does not):**
+  - `pkg/api/api.go` — line 439 — `apiRoute.Get("/frontend/settings/", hs.GetFrontendSettings)` is registered inside `r.Group("/api", func(apiRoute routing.RouteRegister) {` (line 257), and that group is closed with `}, reqSignedIn)` (line 559); `reqSignedIn := middleware.ReqSignedIn` (line 63). So every `/api/*` route — frontend settings included — is guarded by `reqSignedIn`, and an unauthenticated caller is rejected with HTTP 401 by `middleware.ReqSignedIn` → `notAuthorized`, which writes `http.StatusUnauthorized` (`pkg/middleware/auth.go` lines 42–44).
+  - `pkg/api/http_server.go` — line 634 — `m.Use(hs.apiHealthHandler)` registers `/api/health` as a standalone monitoring endpoint *outside* the authenticated `/api` group (lines 631–632: "These endpoints are used for monitoring the Grafana instance and should not be redirected or rejected"), which is why it answers anonymous callers.
+  - `pkg/api/frontendsettings.go` — line 247 — `BuildInfo: dtos.FrontendSettingsBuildInfoDTO{ … }` builds the `buildInfo` object; line 160 — `hideVersion := hs.Cfg.Anonymous.HideVersion && !c.IsSignedIn`.
 
 ---
 
