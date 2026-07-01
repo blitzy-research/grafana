@@ -35,31 +35,51 @@ The module workspace is **enabled** (`go.work` is present at the repo root), the
 ```bash
 # 1) generate the git-ignored dependency-injection file  (.gitignore:194 = **/wire_gen.go)
 go run ./pkg/build/wire/cmd/wire/main.go gen -tags oss ./pkg/server   # writes pkg/server/wire_gen.go
-# 2) compile the server (workspace ON, CGO ON for the SQLite driver)
-CGO_ENABLED=1 go build -o ./bin/grafana ./pkg/cmd/grafana
+# 2) compile the server to a path OUTSIDE the repo tree (workspace ON, CGO ON for the SQLite driver)
+CGO_ENABLED=1 go build -o /tmp/grafana-blitzy/bin/grafana ./pkg/cmd/grafana
 ```
 
-`bin/grafana` is git‑ignored (`.gitignore:73` = `/bin/*`) and `pkg/server/wire_gen.go` is git‑ignored (`.gitignore:194`), so neither dirties the working tree.
+The binary is written to **`/tmp/grafana-blitzy/bin/grafana`, outside the repository tree**, and `pkg/server/wire_gen.go` is git‑ignored (`.gitignore:194`) and is removed after capture — so neither dirties the working tree. (Compiling instead to `./bin/grafana` would also be clean, since `/bin/*` is git‑ignored at `.gitignore:73`; the `/tmp` location is used here so that *nothing whatsoever* is written inside the repository tree.)
 
 ### Backend run (isolated — the repository is never written to)
 
-All writable paths are redirected outside the repository, the port is fixed to `3010`, and logs go to stdout:
+All writable paths are redirected outside the repository, the port is fixed to `3010`, and logs go to stdout. These are the **exact commands run** (no placeholders). The binary path and the `--homepath` value are the concrete paths used in this investigation:
+
+- `BIN  = /tmp/grafana-blitzy/bin/grafana` (the binary compiled above, outside the tree)
+- `REPO = /tmp/blitzy/grafana/blitzy-202fc7b9-dc8a-44db-8cd4-0a229a947c6a_42d862` (the repository root, i.e. `$(pwd)`, passed verbatim as `--homepath`)
 
 ```bash
+# Run A — FRESH (empty) database, DEBUG level, idle 130 s, ZERO requests:
 env GF_PATHS_DATA=/tmp/grafana-blitzy/data \
     GF_PATHS_LOGS=/tmp/grafana-blitzy/logs \
     GF_PATHS_PLUGINS=/tmp/grafana-blitzy/plugins \
     GF_PATHS_PROVISIONING=/tmp/grafana-blitzy/prov \
-    GF_SERVER_HTTP_PORT=3010 GF_LOG_MODE=console GF_LOG_LEVEL=<info|debug> \
-    ./bin/grafana server --homepath <repo-root>
+    GF_SERVER_HTTP_PORT=3010 GF_LOG_MODE=console GF_LOG_LEVEL=debug \
+    /tmp/grafana-blitzy/bin/grafana server \
+    --homepath /tmp/blitzy/grafana/blitzy-202fc7b9-dc8a-44db-8cd4-0a229a947c6a_42d862 \
+    > /tmp/grafana-blitzy/runA_debug.log 2>&1 &
+
+# Run B — WARM (already-migrated) database reused, INFO level, idle 130 s, then curl:
+env GF_PATHS_DATA=/tmp/grafana-blitzy/data \
+    GF_PATHS_LOGS=/tmp/grafana-blitzy/logs \
+    GF_PATHS_PLUGINS=/tmp/grafana-blitzy/plugins \
+    GF_PATHS_PROVISIONING=/tmp/grafana-blitzy/prov \
+    GF_SERVER_HTTP_PORT=3010 GF_LOG_MODE=console GF_LOG_LEVEL=info \
+    /tmp/grafana-blitzy/bin/grafana server \
+    --homepath /tmp/blitzy/grafana/blitzy-202fc7b9-dc8a-44db-8cd4-0a229a947c6a_42d862 \
+    > /tmp/grafana-blitzy/runB_info.log 2>&1 &
 ```
 
 Two runs were used to gather all backend evidence:
 
-- **Run A** — a **fresh** (empty) SQLite database, `GF_LOG_LEVEL=debug`, left completely idle for **75 s** with **zero** user/API requests. It became ready ~5 s after launch (`HTTP Server Listen`).
-- **Run B** — the **already‑migrated** database from Run A reused, `GF_LOG_LEVEL=info`, left idle for **70 s** with zero requests, after which a single `curl -i /api/health` was issued.
+- **Run A** — a **fresh** (empty) SQLite database, `GF_LOG_LEVEL=debug`, left completely idle for **130 s** with **zero** user/API requests. It became ready ~4 s after launch (`HTTP Server Listen` at `t=2026-07-01T05:20:09.814Z`).
+- **Run B** — the **already‑migrated** database from Run A reused, `GF_LOG_LEVEL=info`, left idle for **130 s** with zero requests, after which `curl -i /api/health` and `curl /api/frontend/settings` were issued.
+
+Both idle windows comfortably exceed the ≥ 60 s the questions specify; 130 s was chosen so each window also spans the usage‑stats readiness delay (a random 30–120 s, see Q1) and captures that one‑time line.
 
 ### Frontend tests
+
+The **generic** jest invocation is shown below as a template; the **concrete, evidence‑producing** commands (with the real spec paths and their full output) appear in Q4 and Q5:
 
 ```bash
 CI=true yarn jest <specPath> --ci --watchAll=false [--verbose]
@@ -67,11 +87,11 @@ CI=true yarn jest <specPath> --ci --watchAll=false [--verbose]
 
 ### Read‑only guarantee
 
-The **only** repository write is this document. The compiled binary, the isolated SQLite data directory, and all captured logs live under `/tmp` (outside the tree); the generated `pkg/server/wire_gen.go` is git‑ignored; every temporary observation script was deleted after capture. At completion `git status --porcelain` shows only `blitzy/documentation/grafana_4550cfb5b728.md`.
+The **only** repository write is this document. The compiled binary (`/tmp/grafana-blitzy/bin/grafana`), the isolated SQLite data directory, and all captured logs live under `/tmp` (outside the tree); the generated `pkg/server/wire_gen.go` is git‑ignored (`.gitignore:194`) and was removed after capture; the one temporary observation script (the Q5 forward‑mapping spec, below) was deleted immediately after capture. At completion `git status --porcelain` shows only `blitzy/documentation/grafana_4550cfb5b728.md`.
 
 ### Known, harmless output noise (so the captured output is read correctly)
 
-- A startup **`WARNING: A UI theme could not be found` / missing generated JavaScript under `public/build`** can appear because the frontend assets were not built; it does **not** affect `/api/health` or backend logging.
+- A startup line **`logger=settings … level=error msg="Failed to detect generated javascript files in public/build"`** appears because the frontend assets were not built; it does **not** affect `/api/health` or backend logging. Likewise, with empty provisioning directories the server logs harmless `can't read … provisioning files from directory` errors, and a bundled plugin logs `Failed to install plugin … not compatible with your Grafana version: 9.2.0` — all expected noise in this isolated run.
 - jest prints **`jest-haste-map: duplicate manual mock found: …`** warnings and a Node **`punycode` DeprecationWarning** — these are noise, not failures.
 - `/api/frontend/settings` requires authentication (returns `401`); `/api/health` is the canonical **unauthenticated** version/build endpoint.
 
@@ -84,80 +104,124 @@ The **only** repository write is this document. The compiled binary, the isolate
 ### (a) Command that produced the evidence
 
 ```bash
-# Run A: fresh DB, DEBUG, idle 75s (>=60s), ZERO requests, then stopped by pid
+# Run A: fresh DB, DEBUG, idle 130s (>=60s), ZERO requests, then stopped by pid (see the exact command in Environment above)
 env GF_PATHS_DATA=/tmp/grafana-blitzy/data GF_PATHS_LOGS=/tmp/grafana-blitzy/logs \
     GF_PATHS_PLUGINS=/tmp/grafana-blitzy/plugins GF_PATHS_PROVISIONING=/tmp/grafana-blitzy/prov \
     GF_SERVER_HTTP_PORT=3010 GF_LOG_MODE=console GF_LOG_LEVEL=debug \
-    ./bin/grafana server --homepath <repo-root>   # left idle 75s, no user requests
+    /tmp/grafana-blitzy/bin/grafana server \
+    --homepath /tmp/blitzy/grafana/blitzy-202fc7b9-dc8a-44db-8cd4-0a229a947c6a_42d862 \
+    > /tmp/grafana-blitzy/runA_debug.log 2>&1 &   # left idle 130s, no user requests
 # extract the recurring line:
 grep "Alert rules fetched" /tmp/grafana-blitzy/runA_debug.log
 ```
 
 ### (b) Verbatim captured output
 
-The **one** log entry that recurs on a fixed short cadence while the server is idle is the alerting scheduler's rule‑fetch DEBUG line. All eight occurrences from the 75‑second idle window:
+Two distinct recurring cadences appear while the server is idle (the steady state between `HTTP Server Listen` at `t=…05:20:09.814` and `Shutdown started` at `t=…05:22:20.786`, ≈ 131 s). Both are DEBUG-level.
+
+**Primary — every 10 s: the alerting scheduler's rule-fetch line.** All 14 occurrences captured in the ≥ 60 s idle window (Run A, `GF_LOG_LEVEL=debug`):
 
 ```text
-logger=ngalert.scheduler t=2026-07-01T04:03:50.000641679Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-01T04:04:00.000256245Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-01T04:04:10.000846645Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-01T04:04:20.001125725Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-01T04:04:30.000848719Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-01T04:04:40.00104702Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-01T04:04:50.000778553Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-01T04:05:00.000472397Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-01T05:20:10.129229957Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-01T05:20:20.001345845Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-01T05:20:30.00084328Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-01T05:20:40.00057025Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-01T05:20:50.000907967Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-01T05:21:00.000495509Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-01T05:21:10.000705857Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-01T05:21:20.000589842Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-01T05:21:30.000529674Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-01T05:21:40.000276929Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-01T05:21:50.000289182Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-01T05:22:00.001111095Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-01T05:22:10.000703814Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-01T05:22:20.001220897Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
 ```
 
-**Measured cadence** (deltas between consecutive timestamps): `10.000s, 10.001s, 10.000s, 10.000s, 10.000s, 10.000s, 10.000s` — i.e. **exactly every 10 seconds**, 8 lines across the ≥60 s idle window.
+**Measured cadence** (deltas between consecutive timestamps): the first interval is `9.872 s` (the scheduler aligns its first tick to the wall-clock 10 s boundary), and every subsequent interval is `10.000 s` (±0.001 s) — i.e. **exactly every 10 seconds**, 14 lines across the ≥ 60 s idle window.
 
-A complete grouping of *every* distinct `(level, logger, msg)` seen in the idle steady‑state window (between `HTTP Server Listen` and shutdown, 24 lines total) confirms nothing else recurs on a short timer:
+**Secondary — every 60 s: an aligned burst of maintenance ticks.** A cluster of background services shares a 1-minute cadence and fires together as one burst. In the idle window the cluster fired at `t=…05:21:09.813` and again at `t=…05:22:09.813` — exactly `60.000 s` apart. One complete burst, verbatim:
 
 ```text
-  8  [debug] logger=ngalert.scheduler        msg="Alert rules fetched"
-  7  [debug] logger=ssosettings.service      msg="No SSO Settings found in the database, using system settings"
-  1  [info]  logger=infra.usagestats         msg="Usage stats are ready to report"
-  1  [debug] logger=ssosettings.service      msg="reloading SSO Settings for all providers"
-  1  [debug] logger=secrets                  msg="Removing expired data keys from cache..."
-  1  [debug] logger=secrets                  msg="Removing expired data keys from cache finished successfully"
-  1  [debug] logger=ngalert.sender.router    msg="Attempting to sync admin configs"
-  1  [debug] logger=ngalert.sender.router    msg="Finish of admin configuration sync"
-  1  [debug] logger=ngalert.multiorg.alertmanager  msg="Synchronizing Alertmanagers for orgs"
-  1  [debug] logger=ngalert.notifier.alertmanager  msg="Config hasn't changed, skipping configuration sync."
-  1  [debug] logger=ngalert.multiorg.alertmanager  msg="Done synchronizing Alertmanagers for orgs"
+logger=ssosettings.service t=2026-07-01T05:21:09.813411483Z level=debug msg="reloading SSO Settings for all providers"
+logger=ngalert.multiorg.alertmanager t=2026-07-01T05:21:09.81341605Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.sender.router t=2026-07-01T05:21:09.813575312Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ngalert.sender.router t=2026-07-01T05:21:09.813599364Z level=debug msg="Finish of admin configuration sync"
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-01T05:21:09.814077444Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=ngalert.multiorg.alertmanager t=2026-07-01T05:21:09.814233249Z level=debug msg="Done synchronizing Alertmanagers for orgs"
+logger=ssosettings.service t=2026-07-01T05:21:09.814690179Z level=debug msg="No SSO Settings found in the database, using system settings"
+logger=ssosettings.service t=2026-07-01T05:21:09.814709958Z level=debug msg="No SSO Settings found in the database, using system settings"
+logger=ssosettings.service t=2026-07-01T05:21:09.81471732Z level=debug msg="No SSO Settings found in the database, using system settings"
+logger=ssosettings.service t=2026-07-01T05:21:09.814732567Z level=debug msg="No SSO Settings found in the database, using system settings"
+logger=ssosettings.service t=2026-07-01T05:21:09.814739292Z level=debug msg="No SSO Settings found in the database, using system settings"
+logger=ssosettings.service t=2026-07-01T05:21:09.814745645Z level=debug msg="No SSO Settings found in the database, using system settings"
+logger=ssosettings.service t=2026-07-01T05:21:09.814761702Z level=debug msg="No SSO Settings found in the database, using system settings"
 ```
 
-Two important qualifications drawn from the data (not assumptions):
-
-- The 7 `ssosettings.service` `"No SSO Settings found in the database, using system settings"` lines are **not** a 10‑second recurrence — they are a single **burst** emitted at one instant (all timestamped `2026-07-01T04:04:48.4839…`, Δ = 0.000 s between them), one per configured OAuth provider, immediately after a single `"reloading SSO Settings for all providers"` event. It is a periodic *reload* whose interval is longer than this window (it fired once in 75 s).
-- `"Usage stats are ready to report"` is a **one‑time** INFO readiness line, observed once:
+Each cluster member therefore appears **twice** in the window (the SSO `"No SSO Settings found…"` line appears `2 × 7 = 14` times — one per configured provider, per burst). Grouping the recurring 60 s cluster by `(logger, msg)`:
 
 ```text
-logger=infra.usagestats t=2026-07-01T04:04:29.489195945Z level=info msg="Usage stats are ready to report"
+  2  logger=ssosettings.service           msg="reloading SSO Settings for all providers"
+ 14  logger=ssosettings.service           msg="No SSO Settings found in the database, using system settings"
+  2  logger=ngalert.multiorg.alertmanager msg="Synchronizing Alertmanagers for orgs"
+  2  logger=ngalert.multiorg.alertmanager msg="Done synchronizing Alertmanagers for orgs"
+  2  logger=ngalert.sender.router         msg="Attempting to sync admin configs"
+  2  logger=ngalert.sender.router         msg="Finish of admin configuration sync"
+  2  logger=ngalert.notifier.alertmanager msg="Config hasn't changed, skipping configuration sync."
+  2  logger=secrets                       msg="Removing expired data keys from cache..."
+  2  logger=secrets                       msg="Removing expired data keys from cache finished successfully"
 ```
 
-  It appeared at **+44.689 s** after `Starting Grafana` (`t=2026-07-01T04:03:44.799…`), i.e. **not** at ~60 s. It is emitted by `SetReadyToReport`, not by the send‑ticker, so it is a startup readiness signal rather than a recurring entry.
+**One-time (not recurring): usage-stats readiness.** A single INFO readiness line appeared once:
 
-At `GF_LOG_LEVEL=info` (Run B) the idle window is effectively **silent**: after the startup‑tail INFO lines settle (all within +0.6 s of `HTTP Server Listen`), **nothing** is logged from +0.6 s until +70.7 s, when the closing `curl` produced a single `logger=context … msg="Request Completed"`. So at INFO an idle server produces no recurring lines in a 60–70 s window.
+```text
+logger=infra.usagestats t=2026-07-01T05:21:47.814013990Z level=info msg="Usage stats are ready to report"
+```
 
-### (c) Exact recurring entry (the value the question asks for)
+It appeared `+98.0 s` after `HTTP Server Listen`. This is **not** a fixed ~60 s signal: it is emitted once by `SetReadyToReport` after a randomised 30–120 s startup delay, so its offset varies run to run (Run B observed it at +34 s). It does not recur.
+
+**Cleanup ticker does NOT recur in a 60 s window (F4).** The cleanup service's periodic job runs on a `time.NewTicker(time.Minute * 10)` — a **10-minute** period — so it cannot fire within a 60 s idle window. Confirmed empirically: across the entire 131 s run there were **zero** `"cleanup background job"` spans (`grep -c 'cleanup background job' → 0`). The only `logger=cleanup` output is three one-time startup lines from `cleanUpTmpFiles` (run once, before the ticker loop):
+
+```text
+logger=cleanup t=2026-07-01T05:20:09.812620715Z level=debug msg="Found old rendered file to delete" folder=/tmp/grafana-blitzy/data/png deleted=0 kept=0
+logger=cleanup t=2026-07-01T05:20:09.812648193Z level=debug msg="Found old rendered file to delete" folder=/tmp/grafana-blitzy/data/csv deleted=0 kept=0
+logger=cleanup t=2026-07-01T05:20:09.812672014Z level=debug msg="Found old rendered file to delete" folder=/tmp/grafana-blitzy/data/pdf deleted=0 kept=0
+```
+
+**At `GF_LOG_LEVEL=info` (Run B) the idle window is effectively silent.** Every recurring entry above is DEBUG, so at INFO none of them appear. After the startup-tail INFO lines settle (all within +0.5 s of `HTTP Server Listen`), nothing is logged until the one-time `"Usage stats are ready to report"` readiness line, after which the window stays silent through to shutdown. So at INFO an idle server produces no recurring lines.
+
+### (c) Exact recurring entries (the values the question asks for)
+
+Every **10 seconds** (primary; 14 lines in the window):
 
 ```text
 logger=ngalert.scheduler … level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
 ```
-emitted **every 10.000 seconds** (8 times in 75 s). At INFO the idle window is silent apart from the one‑time `"Usage stats are ready to report"` readiness line.
+
+Every **60 seconds** (a single aligned burst of maintenance ticks), most prominently:
+
+```text
+logger=ssosettings.service           … level=debug msg="reloading SSO Settings for all providers"
+logger=ngalert.sender.router         … level=debug msg="Attempting to sync admin configs" count=0
+logger=ngalert.multiorg.alertmanager … level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=secrets                       … level=debug msg="Removing expired data keys from cache..."
+```
+
+At `GF_LOG_LEVEL=info` the idle window is silent apart from the one-time `"Usage stats are ready to report"` readiness line.
 
 ### (d) Responsible code (`file:line`)
 
-- The recurring line: `pkg/services/ngalert/schedule/fetcher.go:39` —
-  `sch.log.Debug("Alert rules fetched", "rulesCount", len(q.ResultRules), "foldersCount", len(q.ResultFoldersTitles), "updatedRules", len(d.updated))`.
-- The 10‑second cadence: `pkg/setting/setting_unified_alerting.go:62` — `SchedulerBaseInterval = 10 * time.Second` (and `:64` `DefaultRuleEvaluationInterval = SchedulerBaseInterval * 6 // == 60 seconds`).
-- The one‑time readiness INFO line: `pkg/infra/usagestats/service/service.go:117` — `uss.log.Info("Usage stats are ready to report")` (inside `SetReadyToReport`); the send interval is separately clamped to ≥ 1 minute at `:72-73`.
-- The SSO reload burst: `pkg/services/ssosettings/ssosettingsimpl/service.go:414` (`"No SSO Settings found in the database, using system settings"`) preceded by `:384` (`"reloading SSO Settings for all providers"`).
-- Origin of all idle background activity: `pkg/server/server.go:139` — `func (s *Server) Run() error` launches the background services via an `errgroup` created at `pkg/server/server.go:63`.
+- **Primary 10 s line** — `pkg/services/ngalert/schedule/fetcher.go:39`: `sch.log.Debug("Alert rules fetched", "rulesCount", len(q.ResultRules), "foldersCount", len(q.ResultFoldersTitles), "updatedRules", len(d.updated))`. Cadence from `pkg/setting/setting_unified_alerting.go:62` — `SchedulerBaseInterval = 10 * time.Second`.
+- **60 s SSO reload burst** — interval `pkg/setting/setting.go:1662`: `cfg.SSOSettingsReloadInterval = ssoSettings.Key("reload_interval").MustDuration(1 * time.Minute)`; ticker `pkg/services/ssosettings/ssosettingsimpl/service.go:368` (`time.NewTicker(interval)`); log lines `:384` (`"reloading SSO Settings for all providers"`) and `:414` (`"No SSO Settings found in the database, using system settings"`, one per provider).
+- **60 s admin-config sync** — default interval `pkg/setting/setting_unified_alerting.go:50` (`schedulerDefaultAdminConfigPollInterval = time.Minute`); log `pkg/services/ngalert/sender/router.go:90` (`"Attempting to sync admin configs"`); ticker `pkg/services/ngalert/sender/router.go:384` (`case <-time.After(d.adminConfigPollInterval)`).
+- **60 s Alertmanager sync** — default interval `pkg/setting/setting_unified_alerting.go:24` (`alertmanagerDefaultConfigPollInterval = time.Minute`); log `pkg/services/ngalert/notifier/multiorg_alertmanager.go:255` (`"Synchronizing Alertmanagers for orgs"`); ticker `pkg/services/ngalert/notifier/multiorg_alertmanager.go:246` (`case <-time.After(moa.settings.UnifiedAlerting.AlertmanagerConfigPollInterval)`).
+- **One-time readiness INFO line** — `pkg/infra/usagestats/service/service.go:117`: `uss.log.Info("Usage stats are ready to report")` (inside `SetReadyToReport`, `:116`); the report send-interval is separately clamped to ≥ 1 minute at `:72-73`, and the randomised 30–120 s readiness delay is set in the stats collector.
+- **Cleanup ticker (does not recur in 60 s) — F4** — `pkg/services/cleanup/cleanup.go:80`: `ticker := time.NewTicker(time.Minute * 10)` inside `Run` (`:77`); the periodic job `srv.clean(ctx)` (`:84`) opens the `"cleanup background job"` span (`:94`). The three one-time startup lines come from `srv.cleanUpTmpFiles(ctx)` (`:78`), called once before the loop. A 10-minute period cannot elapse within a 60 s idle window.
+- **Origin of all idle background activity** — `pkg/server/server.go` — `func (s *Server) Run()` launches the 60+ background services via an `errgroup`; the recurring tickers above live inside those services.
 
 ### (e) Reasoning
 
-With no alert rules configured, the ngalert scheduler still ticks on its base interval (`SchedulerBaseInterval = 10 * time.Second`), and on each tick the rule fetcher logs `"Alert rules fetched"` with `rulesCount=0`. The measured 10.000 s spacing across 8 consecutive lines matches that constant exactly, which is why this is *the* recurring idle log entry. Everything else observed in the window is either a one‑time readiness/init message or a longer‑interval reload that merely happened to fire once — none of them recur every few seconds. At INFO the scheduler's fetch line is suppressed (it is DEBUG), leaving the idle window quiet.
+With no alert rules configured and no user traffic, an idle Grafana server still runs its periodic background tickers, which produce two DEBUG cadences. The **10-second** cadence is the ngalert scheduler: on every `SchedulerBaseInterval` tick the rule fetcher logs `"Alert rules fetched"` with `rulesCount=0`; the measured 10.000 s spacing across 14 consecutive lines matches that constant exactly, making it the most frequent recurring idle entry. A **60-second** cadence is produced by a cluster of maintenance services that each default to a 1-minute interval (SSO settings reload, ngalert admin-config sync, multi-org Alertmanager sync, and the secrets key-cache sweep); because they were all started together at boot, they fire as a single aligned burst every 60 s (observed at `05:21:09.813` and `05:22:09.813`, exactly 60.000 s apart). Everything else in the window is one-time startup/readiness output — notably `"Usage stats are ready to report"`, which fires once after a randomised 30–120 s delay and does not recur. The cleanup service's 10-minute ticker (F4) never fires inside a 60 s window, which is why only its three one-time startup `cleanUpTmpFiles` lines appear. At `GF_LOG_LEVEL=info` every one of these recurring lines is suppressed (they are all DEBUG), so the idle INFO window is silent apart from the single usage-stats readiness line.
 
 ---
 
@@ -181,34 +245,34 @@ grep "migrations completed" /tmp/grafana-blitzy/runB_info.log
 **Pass 1 (fresh DB — migrations run).** The migrator opens with `Starting DB migrations`, executes each migration, and finishes with a summary whose `performed` count is > 0:
 
 ```text
-logger=migrator t=2026-07-01T04:03:44.801519367Z level=info msg="Starting DB migrations"
-logger=migrator t=2026-07-01T04:03:44.801740173Z level=info msg="Executing migration" id="create migration_log table"
-logger=migrator t=2026-07-01T04:03:44.801939786Z level=info msg="Migration successfully executed" id="create migration_log table" duration=199.203µs
-... (625 more "Executing migration" / "Migration successfully executed" pairs) ...
-logger=migrator t=2026-07-01T04:03:47.299991984Z level=info msg="migrations completed" performed=626 skipped=0 duration=2.498268052s
-logger=resource-migrator t=2026-07-01T04:03:48.480442611Z level=info msg="migrations completed" performed=18 skipped=0 duration=906.508521ms
+logger=migrator t=2026-07-01T05:20:07.843033056Z level=info msg="Starting DB migrations"
+logger=migrator t=2026-07-01T05:20:07.843283063Z level=info msg="Executing migration" id="create migration_log table"
+logger=migrator t=2026-07-01T05:20:07.843499743Z level=info msg="Migration successfully executed" id="create migration_log table" duration=216.58µs
+... (further "Executing migration" / "Migration successfully executed" INFO lines — see the exact counts below) ...
+logger=migrator t=2026-07-01T05:20:09.601882192Z level=info msg="migrations completed" performed=626 skipped=0 duration=1.758618574s
+logger=resource-migrator t=2026-07-01T05:20:09.809716948Z level=info msg="migrations completed" performed=18 skipped=0 duration=48.329915ms
 ```
 
-(The fresh run logged **644** `Executing migration` and **641** `Migration successfully executed` lines.)
+(The fresh run logged **644** `Executing migration` and **641** `Migration successfully executed` INFO lines across the `migrator` and `resource-migrator` combined — `migrator` alone: 626 `Executing migration`, 623 `Migration successfully executed`. The 3‑line gap is exactly 3 condition‑skipped migrations that instead log `Skipping migration: Already executed, but not recorded in migration log` at `migrator.go:371`; `migrationsPerformed` is still incremented for them at `migrator.go:282`, so `performed=626` holds.)
 
 **Pass 2 (warm DB — schema already up to date).** Re‑running against the same data directory, the migrator performs **zero** migrations — no `Executing migration` lines at all — and the summary reports `performed=0`:
 
 ```text
-logger=migrator t=2026-07-01T04:07:55.384571861Z level=info msg="migrations completed" performed=0 skipped=626 duration=733.757µs
-logger=resource-migrator t=2026-07-01T04:07:55.583377482Z level=info msg="migrations completed" performed=0 skipped=18 duration=29.8µs
+logger=migrator t=2026-07-01T05:24:21.989874886Z level=info msg="migrations completed" performed=0 skipped=626 duration=711.216µs
+logger=resource-migrator t=2026-07-01T05:24:22.207935943Z level=info msg="migrations completed" performed=0 skipped=18 duration=43.474µs
 ```
 
 Side‑by‑side, the contrast is the signal:
 
 | Run | `migrations completed` (migrator) |
 |-----|-----------------------------------|
-| Fresh DB | `performed=626 skipped=0 duration=2.498268052s` |
-| **Warm DB (up to date)** | **`performed=0 skipped=626 duration=733.757µs`** |
+| Fresh DB | `performed=626 skipped=0 duration=1.758618574s` |
+| **Warm DB (up to date)** | **`performed=0 skipped=626 duration=711.216µs`** |
 
 ### (c) Exact confirming output (the value the question asks for)
 
 ```text
-logger=migrator … level=info msg="migrations completed" performed=0 skipped=626 duration=733.757µs
+logger=migrator … level=info msg="migrations completed" performed=0 skipped=626 duration=711.216µs
 ```
 
 **`performed=0`** is the exact "schema version is up to date" signal: on startup the migrator found every one of the 626 migrations already applied, so it **skipped** all of them and **performed** none. (A companion `resource-migrator` line likewise reports `performed=0 skipped=18`.)
@@ -234,7 +298,7 @@ The migrator iterates every registered migration; each one already recorded in t
 ### (a) Command that produced the evidence
 
 ```bash
-curl -i http://localhost:3010/api/health
+curl -sS -i http://localhost:3010/api/health
 ```
 
 ### (b) Verbatim captured output (status line + headers + body)
@@ -246,7 +310,7 @@ Content-Type: application/json; charset=UTF-8
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Wed, 01 Jul 2026 04:09:06 GMT
+Date: Wed, 01 Jul 2026 05:26:32 GMT
 Content-Length: 62
 
 {
@@ -256,16 +320,16 @@ Content-Length: 62
 }
 ```
 
-Corroborating startup log line (both runs), which carries the same version attribute:
+Corroborating startup log line (both runs carry the same version attribute; shown from Run B):
 
 ```text
-logger=settings t=2026-07-01T04:03:44.799840822Z level=info msg="Starting Grafana" version=9.2.0 commit=NA branch=main compiled=2026-07-01T04:03:44Z
+logger=settings t=2026-07-01T05:24:21.980766442Z level=info msg="Starting Grafana" version=9.2.0 commit=NA branch=main compiled=2026-07-01T05:24:21Z
 ```
 
 And the binary's own report:
 
 ```text
-$ ./bin/grafana --version
+$ /tmp/grafana-blitzy/bin/grafana --version
 grafana version 9.2.0
 ```
 
@@ -314,14 +378,14 @@ The `/api/health` endpoint reports the version string **`9.2.0`** (with `"databa
 
 ### (e) Reasoning
 
-`apiHealthHandler` builds a `healthResponse`, and — because version display is not hidden — sets `data.Version = hs.Cfg.BuildVersion` (`http_server.go:720`) before serializing with `json.MarshalIndent` (`:736`). `hs.Cfg.BuildVersion` traces back to the compiled‑in constant `var version = "9.2.0"` (`main.go:17`). This checkout is Grafana **`11.5.0-pre`** per `package.json`, but because the binary was produced by a plain `go build` with **no** ldflags, the source default `9.2.0` is what is compiled in — hence the API, the startup log, and `./bin/grafana --version` all agree on **`9.2.0`**. An official release build would inject `11.5.0-pre` via the ldflags at `build/cmd.go:247`. The reported value therefore reflects *this specific build*, exactly as required.
+`apiHealthHandler` builds a `healthResponse`, and — because version display is not hidden — sets `data.Version = hs.Cfg.BuildVersion` (`http_server.go:720`) before serializing with `json.MarshalIndent` (`:736`). `hs.Cfg.BuildVersion` traces back to the compiled‑in constant `var version = "9.2.0"` (`main.go:17`). This checkout is Grafana **`11.5.0-pre`** per `package.json`, but because the binary was produced by a plain `go build` with **no** ldflags, the source default `9.2.0` is what is compiled in — hence the API, the startup log, and `/tmp/grafana-blitzy/bin/grafana --version` all agree on **`9.2.0`**. An official release build would inject `11.5.0-pre` via the ldflags at `build/cmd.go:247`. The reported value therefore reflects *this specific build*, exactly as required.
 
 ---
 
 
 ## Q4 — Dashboard‑scene datasource picker (view → panel‑editor transition)
 
-> **Question (verbatim):** *"Investigate its initialization logic during the transition from the dashboard view to the panel editor… provide test script outputs to prove whether the picker automatically resolves to and displays the datasource already defined in the panel queries. Tell me which part of the codebase is responsible for this."*
+> **Question (verbatim):** *"Investigate its initialization logic during the transition from the dashboard view to the panel editor. Specifically, provide test script outputs to prove whether the picker automatically resolves to and displays the datasource already defined in the panel queries. Tell me which part of the codebase is responsible for this."*
 
 ### (a) Command that produced the evidence
 
@@ -333,32 +397,53 @@ CI=true yarn jest public/app/features/dashboard-scene/panel-edit/PanelDataPane/P
 ### (b) Verbatim captured output (jest)
 
 ```text
+... (leading jest-haste-map "duplicate manual mock" warnings and a Node punycode DeprecationWarning omitted — see "Known, harmless output noise" above; no failures) ...
 PASS public/app/features/dashboard-scene/panel-edit/PanelDataPane/PanelDataQueriesTab.test.tsx
   PanelDataQueriesTab
     Adding queries
-      ✓ can add a new query (26 ms)
+      ✓ can add a new query (28 ms)
       ✓ Can add a new query when datasource is mixed (7 ms)
     PanelDataQueriesTab
-      ✓ renders query group top section (99 ms)
-      ✓ renders queries rows when queries are set (64 ms)
-      ✓ allow to add a new query when user clicks on add new (122 ms)
-      ✓ allow to remove a query when user clicks on remove (388 ms)
+      ✓ renders query group top section (100 ms)
+      ✓ renders queries rows when queries are set (65 ms)
+      ✓ allow to add a new query when user clicks on add new (129 ms)
+      ✓ allow to remove a query when user clicks on remove (418 ms)
     query options
       activation
         ✓ should load data source (5 ms)
         ✓ should store loaded data source in local storage (5 ms)
-        ✓ should load default datasource if the datasource passed is not found (6 ms)
+        ✓ should load default datasource if the datasource passed is not found (7 ms)
       data source change
-        ✓ should load new data source (5 ms)
+        ✓ should load new data source (6 ms)
         ✓ changing from one plugin to another (4 ms)
         ✓ changing from a plugin to a dashboard data source (4 ms)
-        ✓ changing from dashboard data source to a plugin (4 ms)
-      ...
+        ✓ changing from dashboard data source to a plugin (5 ms)
+      query options change
+        time overrides
+          ✓ should create PanelTimeRange object (5 ms)
+          ✓ should update hoverHeader (4 ms)
+          ✓ should update PanelTimeRange object on time options update (5 ms)
+          ✓ should remove PanelTimeRange object on time options cleared (5 ms)
+        max data points and interval
+          ✓ should update max data points (6 ms)
+          ✓ should update min interval (5 ms)
+          ✓ should update min interval to undefined if empty input (4 ms)
+        query caching
+          ✓ updates cacheTimeout and queryCachingTTL (8 ms)
+      query inspection
+        ✓ allows query inspection from the tab (5 ms)
+      change queries
+        plugin queries
+          ✓ should update queries (4 ms)
+        dashboard queries
+          ✓ should update queries (4 ms)
+          ✓ should load last used data source if no data source specified for a panel (4 ms)
 
 Test Suites: 1 passed, 1 total
 Tests:       25 passed, 25 total
 Snapshots:   0 total
-Time:        4.787 s, estimated 19 s
+Time:        4.869 s
+Ran all test suites matching /public\/app\/features\/dashboard-scene\/panel-edit\/PanelDataPane\/PanelDataQueriesTab.test.tsx/i.
 ```
 
 The decisive test is `query options › activation › should load data source`. Its body (`PanelDataQueriesTab.test.tsx:361-365`) is:
@@ -404,13 +489,13 @@ Opening the panel editor activates `PanelEditor`, which creates a `PanelDataPane
 
 ### (a) Commands / code that produced the evidence
 
-**(1) Committed spec** (proves the mapping module loads and passes at runtime):
+**(1) Committed spec — _supporting_ module/runtime evidence.** The committed `rule-form.test.ts` does **not** itself call `formValuesFromExistingRule` or `rulerRuleToFormValues` (confirmed: neither identifier appears in the spec). It imports and exercises the *reverse* mapping `formValuesToRulerGrafanaRuleDTO` and sibling helpers (`getContactPointsFromDTO`, `getNotificationSettingsForDTO`, `getDefautManualRouting`, `cleanAnnotations`, `cleanLabels`). It therefore proves the mapping **module compiles, loads, and passes at runtime**, but it is *supporting* evidence — **not** the direct proof of the edit‑view query‑state behavior:
 
 ```bash
 CI=true yarn jest public/app/features/alerting/unified/utils/rule-form.test.ts --ci --watchAll=false
 ```
 
-**(2) Temporary observation spec** — created to directly exercise the *forward* mapping (backend rule → form values) that the committed spec does not cover, then **deleted** afterward (read‑only guarantee). It was written to `public/app/features/alerting/unified/utils/blitzy_adhoc_test_ruleFormEdit.test.ts`:
+**(2) Temporary observation spec — the _direct_ behavior proof.** Because the committed spec does not cover it, this temporary spec directly exercises the *forward* mapping (backend rule → form values) — i.e. it actually calls `formValuesFromExistingRule`/`rulerRuleToFormValues` and asserts the query state is carried through. It was **deleted** afterward (read‑only guarantee). It was written to `public/app/features/alerting/unified/utils/blitzy_adhoc_test_ruleFormEdit.test.ts`:
 
 ```ts
 import { GrafanaAlertStateDecision } from 'app/types/unified-alerting-dto';
@@ -465,9 +550,12 @@ CI=true yarn jest public/app/features/alerting/unified/utils/blitzy_adhoc_test_r
 
 ```text
 PASS public/app/features/alerting/unified/utils/rule-form.test.ts
+
 Test Suites: 1 passed, 1 total
 Tests:       21 passed, 21 total
-Time:        3.921 s, estimated 4 s
+Snapshots:   7 passed, 7 total
+Time:        4.199 s, estimated 17 s
+Ran all test suites matching /public\/app\/features\/alerting\/unified\/utils\/rule-form.test.ts/i.
 ```
 
 **Temporary forward‑mapping spec (direct proof):**
@@ -475,12 +563,14 @@ Time:        3.921 s, estimated 4 s
 ```text
 PASS public/app/features/alerting/unified/utils/blitzy_adhoc_test_ruleFormEdit.test.ts
   Q5 — edit view populates query state from backend rule definition
-    ✓ rulerRuleToFormValues maps queries<-grafana_alert.data and condition<-grafana_alert.condition (rule-form.ts:402-403) (3 ms)
-    ✓ formValuesFromExistingRule (edit entry used by AlertRuleForm.tsx:105) carries the query state through (3 ms)
+    ✓ rulerRuleToFormValues maps queries<-grafana_alert.data and condition<-grafana_alert.condition (rule-form.ts:402-403) (4 ms)
+    ✓ formValuesFromExistingRule (edit entry used by AlertRuleForm.tsx:105) carries the query state through (2 ms)
 
 Test Suites: 1 passed, 1 total
 Tests:       2 passed, 2 total
-Time:        4.032 s
+Snapshots:   0 total
+Time:        4.179 s
+Ran all test suites matching /public\/app\/features\/alerting\/unified\/utils\/blitzy_adhoc_test_ruleFormEdit.test.ts/i.
 ```
 
 ### (c) Exact answer the question asks for
@@ -512,8 +602,8 @@ When the alert‑rule editor opens for an existing rule, `AlertRuleForm` receive
 
 | # | Question (short) | Exact answer / value | Responsible code |
 |---|------------------|----------------------|------------------|
-| Q1 | Idle recurring log entries (≥60 s) | `logger=ngalert.scheduler … level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0`, **every 10.000 s** (8× in 75 s). At INFO the idle window is silent apart from the one‑time `"Usage stats are ready to report"`. | `fetcher.go:39`; cadence `setting_unified_alerting.go:62` |
-| Q2 | Output confirming schema up to date | `msg="migrations completed" performed=0 skipped=626 duration=733.757µs` — **`performed=0`** | `migrator.go:287` |
+| Q1 | Idle recurring log entries (≥60 s) | Primary: `logger=ngalert.scheduler … level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0`, **every 10.000 s** (14× in ~131 s). Secondary: a **60 s** DEBUG maintenance burst (SSO reload, admin‑config sync, Alertmanager sync, secrets cache sweep). The cleanup ticker (10‑min) does **not** recur in a 60 s window. At INFO the idle window is silent apart from the one‑time `"Usage stats are ready to report"`. | `fetcher.go:39`; cadence `setting_unified_alerting.go:62`; 60 s: `setting.go:1662`, `setting_unified_alerting.go:50/24`; cleanup `cleanup.go:80` |
+| Q2 | Output confirming schema up to date | `msg="migrations completed" performed=0 skipped=626 duration=711.216µs` — **`performed=0`** | `migrator.go:287` |
 | Q3 | Exact `version` from the API | `"version": "9.2.0"` (from `GET /api/health`, `HTTP/1.1 200 OK`) | `http_server.go:720` (`data.Version = hs.Cfg.BuildVersion`); default `main.go:17` |
 | Q4 | Does the picker auto‑resolve to the panel‑query datasource? | **YES** — proven by `✓ should load data source` (25/25 passed) | `PanelDataQueriesTab.loadDataSource()` `PanelDataQueriesTab.tsx:63/71/106`, reached via `PanelEditor.tsx:205` → `PanelDataPane.tsx:35` |
 | Q5 | Does the backend rule definition populate edit‑view query state? | **YES** — `queries ← grafana_alert.data`, `condition ← grafana_alert.condition` (2/2 direct proof; committed 21/21) | `formValuesFromExistingRule` `rule-form.ts:916` → `rulerRuleToFormValues` `:365` (`:402-403`), via `AlertRuleForm.tsx:103-105` |
@@ -524,10 +614,11 @@ When the alert‑rule editor opens for an existing rule, `AlertRuleForm` receive
 
 | Q | Distinct sub‑part the question asks for | Where answered | Verdict |
 |---|------------------------------------------|----------------|---------|
-| **Q1** | (i) the *exact* recurring log entries | Q1 (b)/(c): `ngalert.scheduler "Alert rules fetched"` verbatim | ✔ |
-| | (ii) actual runtime log output as evidence | Q1 (b): 8 verbatim timestamped lines from `runA_debug.log` | ✔ |
-| | (iii) the ≥60 s idle, "no user requests" condition honored | Environment + Q1 (a): fresh run idled **75 s**, zero requests | ✔ |
-| | (iv) cadence + responsible code | Q1 (b) measured **10.000 s**; (d) `fetcher.go:39`, `setting_unified_alerting.go:62` | ✔ |
+| **Q1** | (i) the *exact* recurring log entries | Q1 (b)/(c): primary `ngalert.scheduler "Alert rules fetched"` (10 s) + the 60 s maintenance burst, both verbatim | ✔ |
+| | (ii) actual runtime log output as evidence | Q1 (b): 14 verbatim timestamped `Alert rules fetched` lines + a full 60 s burst from `runA_debug.log` | ✔ |
+| | (iii) the ≥60 s idle, "no user requests" condition honored | Environment + Q1 (a): fresh run idled **~131 s** (≥ 60 s), zero requests | ✔ |
+| | (iv) cadence + responsible code | Q1 (b) measured **10.000 s** (primary) and **60.000 s** (secondary cluster); (d) `fetcher.go:39`, `setting_unified_alerting.go:62`, plus 60 s + cleanup refs | ✔ |
+| | (v) cleanup ticker note (F4) | Q1 (b)/(d): `cleanup.go:80` `time.NewTicker(time.Minute * 10)` — 10‑min period, 0 `"cleanup background job"` spans in 131 s | ✔ |
 | **Q2** | (i) the *specific* confirming output | Q2 (b)/(c): `migrations completed … performed=0 …` verbatim | ✔ |
 | | (ii) that it means the schema is up to date (`performed=0`) | Q2 (c)/(e): fresh `performed=626` vs warm `performed=0`; `migrator.go:287` | ✔ |
 | **Q3** | (i) verify build info via the running API (raw request/response) | Q3 (a)/(b): `curl -i /api/health`, full status + headers + JSON | ✔ |
@@ -545,7 +636,7 @@ When the alert‑rule editor opens for an existing rule, `AlertRuleForm` receive
 ### Verification limits (stated explicitly)
 
 - The `/api/health` `version` reflects **this locally built binary** (a plain `go build`, no ldflags), so it is the compiled‑in default `9.2.0` (`main.go:17`), not the checkout's `package.json` release version `11.5.0-pre`; an official ldflags build would report the latter (`build/cmd.go:247`). This is provenance, not a discrepancy.
-- Q1's `"Usage stats are ready to report"` timing (`+44.689 s`) is what was **observed** in this run; it is a one‑time readiness signal (`service.go:117`, `SetReadyToReport`), not a fixed‑cadence recurrence, so its exact offset can vary between runs.
+- Q1's `"Usage stats are ready to report"` timing (observed **+98 s** in Run A, **+34 s** in Run B, relative to `HTTP Server Listen`) is a one‑time readiness signal (`service.go:117`, `SetReadyToReport`) fired after a **randomised 30–120 s** startup delay, **not** a fixed‑cadence recurrence, so its exact offset varies between runs.
 - Q4/Q5 behaviors are proven with jest (the "test script output" the questions request), which exercises the responsible modules directly; they were not additionally reproduced through a live browser session.
 
 ---
