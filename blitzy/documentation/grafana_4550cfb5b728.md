@@ -34,7 +34,7 @@ Per the governing rule, the behavior was established by **running the real code 
 - `grafana` monorepo, branch `grafana_4550cfb5b728`, HEAD `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`, clean working tree.
 - Node is pinned to **`v22.11.0`** via `.nvmrc` (with `engines` `"node": ">= 22"` in `package.json`); the package manager is **`yarn@4.5.3`** via corepack. `yarn install` was run once (npm registry available).
 
-**Command 1 — the real transformer test suite** (`yarn jest groupingToMatrix`). This is the authoritative, committed test that proves what the transformer emits for absent intersections.
+**Command 1 — the real transformer test suite** (`CI=true corepack yarn jest groupingToMatrix --ci --watchAll=false`). This is the authoritative, committed test that proves what the transformer emits for absent intersections.
 
 **Command 2 — a temporary observation harness** (already removed). A throwaway Jest file was created at `packages/grafana-data/src/transformations/transformers/groupingToMatrixMissingCell.observation.test.ts` and executed with the exact command:
 
@@ -44,20 +44,69 @@ CI=true yarn jest groupingToMatrixMissingCell.observation --ci --watchAll=false
 
 It fed an illustrative sparse `DataFrame` through the transformer and then through `anyToNumber`, `getDisplayProcessor(...).display()`, and `reduceField`, and printed the emitted cell value, its runtime `typeof`, the display `text`/`numeric`/`color`, and the footer `sum`/`mean`/`count` under each `emptyValue` and `nullValueMode` setting. It used `process.stdout.write` to bypass Grafana's `jest-fail-on-console` guard so the suite passed cleanly (observed `Test Suites: 1 passed, 1 total`, `Tests: 1 passed, 1 total`, exit code 0). The harness's **full source is reproduced verbatim in the Appendix** at the end of this document, so the block below is exactly reproducible. **The harness was deleted after capturing output; `git status --porcelain` is empty and the repository is otherwise unchanged.**
 
-### Verbatim OUTPUT BLOCK 1 — real test suite
+### OUTPUT BLOCK 1 — real test suite (raw verbatim capture + normalized markers)
+
+The producing command, run from the repository root, is:
+
+```bash
+CI=true corepack yarn jest groupingToMatrix --ci --watchAll=false
+```
+
+**(a) Raw verbatim capture (one run).** The fenced block below is the _unedited_ combined `stdout`+`stderr` of a single real invocation of that command in this environment, pasted exactly. Three parts of it are inherently run-/environment-specific, are expected to differ between runs, and are shown here verbatim rather than elided: the process id in the `(node:…)` line, the `Time:` value, and the `jest-haste-map: duplicate manual mock` warnings together with the `punycode` `DeprecationWarning` — all of which are emitted by unrelated files elsewhere in the monorepo, not by the transformer under test. The exit code was confirmed separately with `echo $?`, which printed `0`:
 
 ```text
-$ yarn jest groupingToMatrix
+jest-haste-map: duplicate manual mock found: store.navIndex.mock
+  The following files share their name; please delete one of them:
+    * <rootDir>/public/app/features/connections/__mocks__/store.navIndex.mock.ts
+    * <rootDir>/public/app/features/datasources/__mocks__/store.navIndex.mock.ts
+
+jest-haste-map: duplicate manual mock found: index
+  The following files share their name; please delete one of them:
+    * <rootDir>/public/app/features/datasources/__mocks__/index.ts
+    * <rootDir>/public/app/features/plugins/admin/__mocks__/index.ts
+
+jest-haste-map: duplicate manual mock found: datasource
+  The following files share their name; please delete one of them:
+    * <rootDir>/public/app/plugins/datasource/azuremonitor/__mocks__/datasource.ts
+    * <rootDir>/public/app/plugins/datasource/influxdb/__mocks__/datasource.ts
+
+jest-haste-map: duplicate manual mock found: query
+  The following files share their name; please delete one of them:
+    * <rootDir>/public/app/plugins/datasource/azuremonitor/__mocks__/query.ts
+    * <rootDir>/public/app/plugins/datasource/influxdb/__mocks__/query.ts
+
+jest-haste-map: duplicate manual mock found: datasource
+  The following files share their name; please delete one of them:
+    * <rootDir>/public/app/plugins/datasource/influxdb/__mocks__/datasource.ts
+    * <rootDir>/public/app/plugins/datasource/loki/__mocks__/datasource.ts
+
+jest-haste-map: duplicate manual mock found: datasource
+  The following files share their name; please delete one of them:
+    * <rootDir>/public/app/plugins/datasource/loki/__mocks__/datasource.ts
+    * <rootDir>/packages/grafana-prometheus/src/test/__mocks__/datasource.ts
+
+(node:91254) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+PASS packages/grafana-data/src/transformations/transformers/groupingToMatrix.test.ts
+
+Test Suites: 1 passed, 1 total
+Tests:       4 passed, 4 total
+Snapshots:   1 passed, 1 total
+Time:        1.509 s, estimated 2 s
+Ran all test suites matching /groupingToMatrix/i.
+```
+
+**(b) Normalized substantive markers (reproducible on every run).** This is a curated excerpt — **not** a verbatim capture — listing only the markers that are invariant across runs (the `Time:` value, the `(node:…)` process id, and the haste-map/deprecation warnings shown above are deliberately excluded here because they vary):
+
+```text
 PASS packages/grafana-data/src/transformations/transformers/groupingToMatrix.test.ts
 Test Suites: 1 passed, 1 total
 Tests:       4 passed, 4 total
 Snapshots:   1 passed, 1 total
-Time:        ~1.5 s, estimated 2 s   (environment-specific; varies per run — not reproducible)
 Ran all test suites matching /groupingToMatrix/i.
-(exit code 0)
 ```
 
-This confirms the four committed tests pass at HEAD `4550cfb`. The substantive markers above — the `PASS` line, `Test Suites: 1 passed`, `Tests: 4 passed`, `Snapshots: 1 passed`, and the exit code `0` — reproduce exactly on every run; only the `Time:` value is environment-specific and varies per run (observed `1.461 s`–`1.561 s` across five runs, always followed by jest's `, estimated 2 s` suffix), so it is flagged as approximate rather than asserted as an exact figure. Their assertions are cited directly in **Q1** and **Q2** below (they assert `''` gaps in `number`-typed columns by default, and `null` gaps under `SpecialValue.Null`).
+…with exit code `0` (confirmed via `echo $?`). This confirms the four committed tests pass at HEAD `4550cfb`. Only the `Time:` value varies from run to run — observed roughly `1.5 s`–`1.7 s` across repeated runs here (for example `1.509 s`, `1.53 s`, and `1.69 s`), always followed by jest's `, estimated 2 s` suffix — so it is never asserted as an exact figure. The tests' assertions are cited directly in **Q1** and **Q2** below (they assert `''` gaps in `number`-typed columns by default, and `null` gaps under `SpecialValue.Null`).
 
 ---
 
@@ -151,6 +200,7 @@ All line numbers below were verified against the source at HEAD `4550cfb`. Each 
 - The enum has **no `Zero`**: `export enum SpecialValue { True = 'true', False = 'false', Null = 'null', Empty = 'empty' }` at `packages/grafana-data/src/types/transformations.ts:113-118`.
 - The transform editor exposes **only** these four (no `Zero`, no free-text): `specialValueOptions` = `Null`/`True`/`False`/`Empty` at `public/app/features/transformers/editors/GroupingToMatrixTransformerEditor.tsx:61-66`, rendered by the "Empty Value" `<Select>` at `:100-102`.
 - The user-facing docs confirm the same four choices — "…you can select which value to display between: **Null**, **True**, **False**, or **Empty**" at `docs/sources/panels-visualizations/query-transform-data/transform-data/index.md:665` (section `### Grouping to matrix`, `:653`).
+- The fill logic above is the one that actually runs because `groupingToMatrix` is a **standard, built-in** transformer (not a plugin): it is imported at `packages/grafana-data/src/transformations/transformers.ts:13` and included in the `standardTransformers` registry array at `transformations/transformers.ts:56`.
 
 **Subtlety worth stating:** because the operator is `??` (nullish coalescing) at `groupingToMatrix.ts:117`, a _genuine_ `null` already present in the source is **also** replaced by the empty value — not only structurally-absent combinations.
 
@@ -179,6 +229,7 @@ All line numbers below were verified against the source at HEAD `4550cfb`. Each 
 - Reducer defaults: `const { nullValueMode = NullValueMode.Ignore } = field.config;` at `packages/grafana-data/src/transformations/fieldReducer.ts:198`; then `const ignoreNulls = nullValueMode === NullValueMode.Ignore;` and `const nullAsZero = nullValueMode === NullValueMode.AsZero;` at `fieldReducer.ts:200-201`. The `NullValueMode` values are `Null = 'null'`, `Ignore = 'connected'`, `AsZero = 'null as zero'` at `packages/grafana-data/src/types/data.ts:202-206`.
 - Accumulation in `doStandardCalcs` (`fieldReducer.ts:468`): `defaultCalcs.sum` starts at `0` (`fieldReducer.ts:445-446`). For each value, the null branch `if (currentValue == null) { if (ignoreNulls) continue; if (nullAsZero) currentValue = 0; }` runs at `fieldReducer.ts:489-496`, then `calcs.count++` at `:498`. The accumulation guard is `if (currentValue != null && !Number.isNaN(currentValue)) {` at `fieldReducer.ts:500`, and the sum is `calcs.sum += currentValue;` at `fieldReducer.ts:508`. **An empty string `''` is neither `null` nor `NaN`** (`Number.isNaN('')` is `false`), so it **passes** the guard and is added — but `number + '' → string` in JavaScript. The mean is `calcs.mean = calcs.sum! / calcs.nonNullCount;` at `fieldReducer.ts:568-569`.
 - The Table footer reaches exactly this code via `const fieldCalcValue = reduceField({ field, reducers: reducer })[calc];` at `packages/grafana-ui/src/components/Table/utils.ts:404` (`reduceField` is imported from `@grafana/data` at `utils.ts:21`; `getFooterValue` is imported at `utils.ts:37` and wired into each column at `utils.ts:151`; the supporting `getFooterValue` is defined at `packages/grafana-ui/src/components/Table/FooterRow.tsx:60`; `packages/grafana-ui/src/components/Table/reducer.ts` is table UI-state wiring).
+- The canonical downstream visualization that renders this matrix with a footer total is the built-in **Table** panel: `TablePanel(props)` (`public/app/plugins/panel/table/TablePanel.tsx:25`) renders `<Table …>` (`TablePanel.tsx:54`) and passes `footerOptions={options.footer}` (`TablePanel.tsx:65`); the panel is registered via `export const plugin = new PanelPlugin<Options, FieldConfig>(TablePanel)` (`public/app/plugins/panel/table/module.tsx:22`), whose footer **Calculation** custom editor (`module.tsx:130-136`) defaults the reducer to `defaultValue: [ReducerID.sum]` (`module.tsx:136`) — i.e. the very `sum` path traced above is what a default Table footer runs.
 
 **Observed proof (OUTPUT BLOCK 2), the crux — all four `sum` lines, with the arithmetic:**
 
@@ -245,10 +296,10 @@ These upstream reports corroborate the source-grounded findings above. They are 
 
 ## Coverage checklist
 
-- [x] **Q1 — emitted value:** `''` by default (never `0`); configurable to `null`/`true`/`false` — `groupingToMatrix.ts:117,26,71,186-188`; `transformations.ts:113-118`; editor `GroupingToMatrixTransformerEditor.tsx:61-66,100-102`; docs `index.md:665`; observed `values=[1,""]`.
+- [x] **Q1 — emitted value:** `''` by default (never `0`); configurable to `null`/`true`/`false` — `groupingToMatrix.ts:117,26,71,186-188`; `transformations.ts:113-118`; standard registration `transformers.ts:13,56`; editor `GroupingToMatrixTransformerEditor.tsx:61-66,100-102`; docs `index.md:665`; observed `values=[1,""]`.
 - [x] **Q2 — type:** `''` inside a `type=number` column (type/value mismatch) — `groupingToMatrix.ts:132-133`; `groupingToMatrix.test.ts:38-55,112,133-144,203`; observed `typeof=[number,string]`.
 - [x] **Q3 — render:** blank via `anyToNumber('') → NaN` — `anyToNumber.ts:13-14`; `displayProcessor.ts:96,144,177-186`; observed `text="" numeric=NaN`.
-- [x] **Q4 — totals:** string-concat `sum="1"` for `''`; `null` ignored; true `0` only with `AsZero` — `fieldReducer.ts:198-201,445-446,489-496,498,500,508,568-569`; `Table/utils.ts:404`; observed the four `sum`/`mean`/`count` lines.
+- [x] **Q4 — totals:** string-concat `sum="1"` for `''`; `null` ignored; true `0` only with `AsZero` — `fieldReducer.ts:198-201,445-446,489-496,498,500,508,568-569`; `Table/utils.ts:404`; downstream Table panel `TablePanel.tsx:25,54,65`, `module.tsx:22,130-136`; observed the four `sum`/`mean`/`count` lines.
 - [x] **Q5 — color:** base/lowest threshold via `scaleFunc(-Infinity)` — `displayProcessor.ts:189`; `scale.ts:29-39`; `thresholds.ts:5,7-22`; observed `color=#73BF69`.
 - [x] **Q6 — semantic shift:** four divergence points synthesized (fill, coercion, reducer guard, coloring).
 
