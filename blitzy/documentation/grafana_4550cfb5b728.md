@@ -355,7 +355,7 @@ grep 'Starting background service' /tmp/grafana-run/boot.log | sed -E 's/.*servi
 
 These map directly to the registry assembled by `ProvideBackgroundServiceRegistry` at **`pkg/registry/backgroundsvcs/background_services.go:L53-L118`**, which registers its arguments through the `NewBackgroundServiceRegistry(...)` call at **`pkg/registry/backgroundsvcs/background_services.go:L80`**. That call lists **36** services; the run observed **34** started, and the difference is exactly the disabled services skipped by `registry.IsDisabled` (see above). What the components are:
 
-- **`*api.HTTPServer`** — the HTTP server **is itself** one of the background services. The `HTTP Server Listen` line from R1 is emitted from _inside_ this service's goroutine. (In the boot log, `service=*api.HTTPServer` appears at line 2359 and its `HTTP Server Listen` at line 2404.)
+- **`*api.HTTPServer`** — the HTTP server **is itself** one of the background services. The `HTTP Server Listen` line from R1 is emitted from _inside_ this service's goroutine — so in the boot log the `service=*api.HTTPServer` startup line appears first and its `HTTP Server Listen` line follows a few dozen lines later. (The exact boot-log line offsets vary from run to run, because the debug-level ordering of the concurrently-started services is non-deterministic; across observed runs the gap was ~44–45 lines.)
 - **`*ngalert.AlertNG`** — the unified alerting engine.
 - **`*live.GrafanaLive`** — the live/streaming (WebSocket) subsystem.
 - **`*notifications.NotificationService`** — email/notification dispatch.
