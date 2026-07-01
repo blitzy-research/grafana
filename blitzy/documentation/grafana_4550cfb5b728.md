@@ -203,6 +203,8 @@ Running against the clean, out-of-repo data directory `/tmp/gf-clean/data` produ
 
 **Citations.** The default paths come from `conf/defaults.ini`: `data = data` (`L15`), `logs = data/log` (`L21`), `plugins = data/plugins` (`L24`). The database is SQLite (`type = sqlite3`, `L123`) with file name `path = grafana.db` (`L164`). The log mode is `mode = console file` at `conf/defaults.ini:L1071` (under the `[log]` header at `L1068`), which writes **simultaneously** to the console *and* to `data/log/grafana.log` — the file's first line is the same `msg="Starting Grafana"` line shown in [Section B](#section-b--initialization-ground-truth-q1).
 
+A note on the two sizes: the `grafana.db` size (`1,093,632` bytes) is **schema-deterministic** and reproduces exactly across clean runs. The `grafana.log` size, by contrast, is **run-specific** — the file keeps growing as the server logs (background services, update checks, and any timing-dependent lines such as the transient "Database locked" line in [Section G](#section-g--first-run-vs-subsequent-runs-q6)) — so the `206,676`-byte figure above is the value captured on this first run and is expected to vary somewhat from run to run (a re-run in the same environment produced `217,149` bytes).
+
 Note: although `data/plugins` is reported as `"Path Plugins"` in the startup log, that directory is **not created** when there are no external plugins to place in it.
 
 ### C.2 Contents of `grafana.db` (read observation-only)
