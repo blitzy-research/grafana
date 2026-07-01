@@ -52,12 +52,12 @@ PASS packages/grafana-data/src/transformations/transformers/groupingToMatrix.tes
 Test Suites: 1 passed, 1 total
 Tests:       4 passed, 4 total
 Snapshots:   1 passed, 1 total
-Time:        3.14 s
+Time:        ~1.5 s, estimated 2 s   (environment-specific; varies per run — not reproducible)
 Ran all test suites matching /groupingToMatrix/i.
 (exit code 0)
 ```
 
-This confirms the four committed tests pass at HEAD `4550cfb`. Their assertions are cited directly in **Q1** and **Q2** below (they assert `''` gaps in `number`-typed columns by default, and `null` gaps under `SpecialValue.Null`).
+This confirms the four committed tests pass at HEAD `4550cfb`. The substantive markers above — the `PASS` line, `Test Suites: 1 passed`, `Tests: 4 passed`, `Snapshots: 1 passed`, and the exit code `0` — reproduce exactly on every run; only the `Time:` value is environment-specific and varies per run (observed `1.461 s`–`1.561 s` across five runs, always followed by jest's `, estimated 2 s` suffix), so it is flagged as approximate rather than asserted as an exact figure. Their assertions are cited directly in **Q1** and **Q2** below (they assert `''` gaps in `number`-typed columns by default, and `null` gaps under `SpecialValue.Null`).
 
 ---
 
