@@ -11,7 +11,7 @@
 
 "Clean state" is defined precisely as: a **fresh, empty home/data directory**, **no `conf/custom.ini`**, and **no `GF_*` environment variables**. Under these conditions the effective configuration is exactly `conf/defaults.ini`.
 
-- The layered config is: `conf/defaults.ini` (baseline) → optional `conf/custom.ini` → `GF_*` env → CLI `cfg:` overrides. `conf/sample.ini` is a **fully‑commented** example (a template for a user's `custom.ini`); it is never read as config.
+- The layered config is: `conf/defaults.ini` (baseline) → optional `conf/custom.ini` → `GF_*` env → CLI `cfg:` overrides. `conf/sample.ini` is a **sample/override template** (the basis for a user's `custom.ini`) and is **never read as config**; note it is **not** literally fully commented — it contains uncommented section headers and at least one uncommented key, e.g. `[unified_alerting.reserved_labels]` [conf/sample.ini:L1379] with `disabled_labels =` [conf/sample.ini:L1382] *(command: `grep -cvE '^\s*[#;]|^\s*$' conf/sample.ini` → `101` uncommented non‑blank lines)*.
 - Confirmed there is **no** `custom.ini` in the repo `conf/` and **no** `GF_*` variables in the environment:
 
 ```console
@@ -23,7 +23,7 @@ none
 
 - Confirmed at runtime that the only config file loaded was `defaults.ini`:
 
-> `logger=settings … level=info msg="Config loaded from" file=/tmp/gf_clean_home/conf/defaults.ini`
+> `logger=settings t=2026-07-01T22:40:52.007973438Z level=info msg="Config loaded from" file=/tmp/gf_clean_home/conf/defaults.ini`
 > *(command: `grep 'Config loaded from' run1.log`)*
 
 To avoid touching the repository's own (git‑ignored) `data/` directory, the clean run used a temporary home directory `/tmp/gf_clean_home` containing **symlinks** to the repo's read‑only `conf/`, `public/`, and `plugins-bundled/` trees, plus a **fresh** `data/` that the server creates itself. The data path is resolved relative to the home path, so a fresh home yields a fresh database.
@@ -32,9 +32,10 @@ To avoid touching the repository's own (git‑ignored) `data/` directory, the cl
 
 | Item | Value | Evidence / citation |
 |---|---|---|
-| Branch (source) | `grafana_4550cfb5b728` (working branch differs) | `git rev-parse --abbrev-ref HEAD` |
-| Commit (short) | `4550cfb5b7` | `git rev-parse --short HEAD` |
-| Repo version | `11.5.0-pre` | `package.json` `"version"` |
+| Source commit under investigation | `4550cfb5b7` | `git log --oneline -1 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` → `4550cfb5b7 Upgrade scenes to v5.32.0 (#97944)` |
+| Source branch (name only) | `grafana_4550cfb5b728` | Derived from the source branch name; this is the identity the document answers for. The **delivery/working branch of this tree differs** — see next row. |
+| Delivery / working branch (this tree) | `blitzy-675536c4-a297-4fe3-88d1-6213344dc49c` @ `41bc342961` | `git rev-parse --abbrev-ref HEAD` → `blitzy-675536c4-a297-4fe3-88d1-6213344dc49c`; `git rev-parse --short HEAD` → `41bc342961` (these commands report the delivery branch/commit, **not** the source commit above) |
+| Repo version | `11.5.0-pre` | `grep '"version"' package.json` → `  "version": "11.5.0-pre",` |
 | Go | `go1.23.1 linux/amd64` | `go version` |
 | Node.js | `v22.12.0` | `node --version` |
 | Yarn | `4.5.3` | `yarn --version` |
@@ -44,24 +45,48 @@ To avoid touching the repository's own (git‑ignored) `data/` directory, the cl
 ### 0.3 Exact build & run commands (captured)
 
 ```console
-# 1) Generate the Go dependency-injection wiring (writes pkg/server/wire_gen.go)
+# 1) Install frontend dependencies (immutable: lockfile must not change)
+$ yarn install --immutable
+➤ YN0000: · Yarn 4.5.3
+➤ YN0000: ┌ Resolution step
+➤ YN0000: └ Completed in 0s 588ms
+➤ YN0000: ┌ Fetch step
+➤ YN0000: └ Completed in 0s 747ms
+➤ YN0000: ┌ Link step
+➤ YN0000: └ Completed in 0s 766ms
+➤ YN0000: · Done with warnings in 2s 527ms
+$ echo "exit=$?"
+exit=0
+$ git status --porcelain yarn.lock package.json   # (empty output = lockfile/manifest unchanged)
+
+# 2) Build the frontend (production webpack via Nx -> writes public/build)
+$ CI=true yarn build
+webpack 5.95.0 compiled with 2 warnings in 15005 ms
+ NX   Successfully ran target build for project grafana and 12 tasks it depends on
+Nx read the output from the cache instead of running the command for 11 out of 13 tasks.
+$ ls public/build | wc -l
+658
+$ ls public/build/*.js | wc -l
+325
+$ du -sh public/build
+156M	public/build
+
+# 3) Generate the Go dependency-injection wiring (writes pkg/server/wire_gen.go)
 $ make gen-go
 generate go files
 go run  ./pkg/build/wire/cmd/wire/main.go gen -tags "oss" ./pkg/server
-wire: github.com/grafana/grafana/pkg/server: wrote .../pkg/server/wire_gen.go
+wire: github.com/grafana/grafana/pkg/server: wrote /tmp/blitzy/grafana/blitzy-675536c4-a297-4fe3-88d1-6213344dc49c_05d19e/pkg/server/wire_gen.go
 
-# 2) Frontend build output already present (webpack)
-$ ls public/build | wc -l
-658
-
-# 3) Build the backend binary (Cgo REQUIRED for the sqlite3 driver)
-$ CGO_ENABLED=1 go build -o /tmp/grafana_bin ./pkg/cmd/grafana   # exit 0, ~23s
+# 4) Build the backend binary (Cgo REQUIRED for the sqlite3 driver)
+$ CGO_ENABLED=1 go build -o /tmp/grafana_bin ./pkg/cmd/grafana   # exit 0, ~22s
 $ ls -l /tmp/grafana_bin
 -rwxr-xr-x 1 root root 298085368 /tmp/grafana_bin
 
-# 4) Run from a fresh, empty home/data dir (no custom.ini, no GF_* env)
+# 5) Run from a fresh, empty home/data dir (no custom.ini, no GF_* env)
 $ /tmp/grafana_bin server --homepath=/tmp/gf_clean_home > run1.log 2>&1 &
 ```
+
+Both `yarn.lock` and `package.json` were left unchanged by the immutable install (the `git status --porcelain` above prints nothing), and both `public/build` and `pkg/server/wire_gen.go` are git‑ignored generated artifacts (`.gitignore:9:/public/build`, `.gitignore:194:**/wire_gen.go`), so the build produced **no tracked repository change**.
 
 ### 0.4 A required honesty note about the version string (`9.2.0`)
 
@@ -73,8 +98,27 @@ The binary was produced with a plain `go build`, which does **not** inject the r
 
 Observed banner:
 
-> `logger=settings … level=info msg="Starting Grafana" version=9.2.0 commit=NA branch=main compiled=2026-07-01T21:39:27Z`
+> `logger=settings t=2026-07-01T22:40:52.007691468Z level=info msg="Starting Grafana" version=9.2.0 commit=NA branch=main compiled=2026-07-01T22:40:52Z`
 > *(command: `grep 'Starting Grafana' run1.log`)*
+
+The same `version`/`commit` — and that the database came up healthy — is independently confirmed at runtime by the **clean‑state** health endpoint, which returned `HTTP/1.1 200 OK` with a JSON body reporting `database: ok`, `version: 9.2.0`, `commit: NA` *(command: `curl -sS -i http://localhost:3000/api/health`)*:
+
+```text
+HTTP/1.1 200 OK
+Cache-Control: no-store
+Content-Type: application/json; charset=UTF-8
+X-Content-Type-Options: nosniff
+X-Frame-Options: deny
+X-Xss-Protection: 1; mode=block
+Date: Wed, 01 Jul 2026 22:40:57 GMT
+Content-Length: 62
+
+{
+  "database": "ok",
+  "version": "9.2.0",
+  "commit": "NA"
+}
+```
 
 Everything else in this document (paths, migrations, users, plugins, headers, DB rows) is independent of this string. Where the version appears in observed output (`/api/health`, the plugin‑compatibility check), it is quoted as‑is and its origin explained. A release build (`make build` with ldflags) would print `11.5.0-pre`.
 
@@ -89,26 +133,38 @@ The unified binary's entry point is `func main()` [pkg/cmd/grafana/main.go:L23],
 The server object then runs a deterministic lifecycle in `pkg/server/server.go`:
 
 1. `func (s *Server) Init()` [pkg/server/server.go:L113]
-2. `s.writePIDFile()` [pkg/server/server.go:L122] (definition at [L205]) — a no‑op unless `--pidfile` is set
+2. `s.writePIDFile()` [pkg/server/server.go:L122] (definition at [pkg/server/server.go:L205]) — a no‑op unless `--pidfile` is set
 3. `s.roleRegistry.RegisterFixedRoles(s.context)` [pkg/server/server.go:L130] — registers RBAC fixed roles
-4. `return s.provisioningService.RunInitProvisioners(s.context)` [pkg/server/server.go:L134] — **sequential** provisioning (datasources → dashboards/plugins → alerting)
-5. `func (s *Server) Run()` [pkg/server/server.go:L139] — launches background services
+4. `return s.provisioningService.RunInitProvisioners(s.context)` [pkg/server/server.go:L134] — **sequential** provisioning in a fixed order: `ProvisionDatasources` [pkg/services/provisioning/provisioning.go:L170] → `ProvisionPlugins` [pkg/services/provisioning/provisioning.go:L176] → `ProvisionAlerting` [pkg/services/provisioning/provisioning.go:L182]. **Dashboards are NOT provisioned here** — `ProvisionDashboards` [pkg/services/provisioning/provisioning.go:L192] runs later inside the provisioning **background service** `Run()` [pkg/services/provisioning/provisioning.go:L191].
+5. `func (s *Server) Run()` [pkg/server/server.go:L139] — launches background services (including the provisioning service whose `Run()` performs dashboard provisioning)
 6. `s.notifySystemd("READY=1")` [pkg/server/server.go:L176]
 7. graceful `func (s *Server) Shutdown(ctx, reason)` [pkg/server/server.go:L185]
 
-The observed startup stream matches this order. Selected verbatim lines *(command: `grep -vE 'logger=(migrator|resource-migrator)' run1.log`)*:
+The observed startup stream matches this order. Verbatim early‑init lines *(command: `grep -E 'Config loaded from|msg=Target|Path Home|App mode|Connecting to DB|Creating SQLite database file' run1.log`)*:
 
-> `msg="Config loaded from" file=/tmp/gf_clean_home/conf/defaults.ini`
-> `msg=Target target=[all]`
-> `msg="Path Home" path=/tmp/gf_clean_home`
-> `msg="App mode production"`
-> `msg="Connecting to DB" dbtype=sqlite3`
-> `msg="Creating SQLite database file" path=/tmp/gf_clean_home/data/grafana.db`
-> `logger=provisioning.alerting … msg="starting to provision alerting"`
-> `logger=provisioning.alerting … msg="finished to provision alerting"`
-> `logger=provisioning.dashboard … msg="starting to provision dashboards"`
-> `logger=provisioning.dashboard … msg="finished to provision dashboards"`
-> `logger=http.server … msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=`
+```text
+logger=settings t=2026-07-01T22:40:52.007973438Z level=info msg="Config loaded from" file=/tmp/gf_clean_home/conf/defaults.ini
+logger=settings t=2026-07-01T22:40:52.007984323Z level=info msg=Target target=[all]
+logger=settings t=2026-07-01T22:40:52.007992799Z level=info msg="Path Home" path=/tmp/gf_clean_home
+logger=settings t=2026-07-01T22:40:52.008014674Z level=info msg="App mode production"
+logger=sqlstore t=2026-07-01T22:40:52.008398854Z level=info msg="Connecting to DB" dbtype=sqlite3
+logger=sqlstore t=2026-07-01T22:40:52.008409882Z level=info msg="Creating SQLite database file" path=/tmp/gf_clean_home/data/grafana.db
+```
+
+The only provisioning subsystems that emit info‑level `starting/finished to provision` lines on a clean run are **alerting** (the tail of `RunInitProvisioners`) and **dashboards** (from the provisioning background‑service `Run()`); **datasources** and **plugins** provision successfully but emit **no** info‑level start/finish line because nothing is configured to provision. The alerting lines therefore appear **before** the dashboard lines, and the dashboard lines appear only after `RunInitProvisioners` has returned and the background services have started — the timestamps confirm this ordering *(command: `grep -E 'starting to provision|finished to provision' run1.log`)*:
+
+```text
+logger=provisioning.alerting t=2026-07-01T22:40:54.280997125Z level=info msg="starting to provision alerting"
+logger=provisioning.alerting t=2026-07-01T22:40:54.28101427Z level=info msg="finished to provision alerting"
+logger=provisioning.dashboard t=2026-07-01T22:40:54.315038358Z level=info msg="starting to provision dashboards"
+logger=provisioning.dashboard t=2026-07-01T22:40:54.315067991Z level=info msg="finished to provision dashboards"
+```
+
+The server then reaches HTTP listen *(command: `grep 'HTTP Server Listen' run1.log`)*:
+
+```text
+logger=http.server t=2026-07-01T22:40:54.282988857Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=
+```
 
 `App mode production` confirms `app_mode = production` [conf/defaults.ini:L7]; the listen address confirms `http_port = 3000` [conf/defaults.ini:L41].
 
@@ -140,7 +196,7 @@ The predicate is `func IsDisabled(srv BackgroundService) bool` [pkg/registry/reg
 
 To make the otherwise‑silent loop visible, a **supplementary** run at `cfg:log.level=debug` was used (this is a diagnostic run, not the clean‑state baseline). At debug level the loop logs each **enabled** service it starts; disabled ones still produce no line:
 
-> `logger=server level=debug msg="Starting background service" service=*tracing.TracingService`
+> `logger=server t=2026-07-01T22:43:08.929039803Z level=debug msg="Starting background service" service=*tracing.TracingService`
 > *(command: `grep 'Starting background service' run_debug.log`)*
 
 ```console
@@ -153,35 +209,35 @@ So **34** background services were enabled and started on a clean install; every
 **(b) A service that explicitly reports itself disabled because a default property is unset.** Example (debug level):
 
 ```text
-logger=secrets.kvstore level=debug msg="secrets manager evaluator returned false" reason="remote secret management plugin disabled because the property `secrets.use_plugin` is not set to `true`"
+logger=secrets.kvstore t=2026-07-01T22:43:08.822441143Z level=debug msg="secrets manager evaluator returned false" reason="remote secret management plugin disabled because the property `secrets.use_plugin` is not set to `true`"
 ```
 > *(command: `grep 'remote secret management plugin disabled' run_debug.log`)*
 
 A related case is a service that **starts** but finds its optional feature absent:
 
-> `logger=rendering level=debug msg="No image renderer found/installed. For image rendering support please install the grafana-image-renderer plugin. …"`
+> `logger=rendering t=2026-07-01T22:43:08.929145317Z level=debug msg="No image renderer found/installed. For image rendering support please install the grafana-image-renderer plugin. Read more at https://grafana.com/docs/grafana/latest/administration/image_rendering/"`
 > *(command: `grep 'No image renderer' run_debug.log`)*
 
 **(c) "Skipped" messages that are visible at the default `info` level.** These are the ones a user actually sees on a normal clean start:
 
 - The migrator emits **3** such warnings on the first run for migrations it detects as already applied but not yet recorded *(command: `grep -c 'Skipping migration: Already executed' run1.log` → `3`)*:
 
-> `logger=migrator … level=warn msg="Skipping migration: Already executed, but not recorded in migration log" id="drop unique orgID index on alert_configuration if exists"`
+> `logger=migrator t=2026-07-01T22:40:53.405981184Z level=warn msg="Skipping migration: Already executed, but not recorded in migration log" id="drop unique orgID index on alert_configuration if exists"`
 > *(command: `grep 'Skipping migration' run1.log`)*
 
 - The **external plugin** and **image‑renderer** subsystems find nothing because their directory does not exist on a fresh install (there is no `data/plugins` yet):
 
-> `logger=plugin.sources … level=error msg="Failed to load external plugins" error="failed to open plugins path"`
-> `logger=renderer.manager … level=error msg="Failed to get renderer plugin sources" error="failed to open plugins path"`
+> `logger=plugin.sources t=2026-07-01T22:40:54.14212263Z level=error msg="Failed to load external plugins" error="failed to open plugins path"`
+> `logger=renderer.manager t=2026-07-01T22:40:54.14112757Z level=error msg="Failed to get renderer plugin sources" error="failed to open plugins path"`
 > *(command: `grep -E 'Failed to load external plugins|Failed to get renderer plugin sources' run1.log`)*
 
 **By contrast, enabled services announce success at `info`** — this is the other half of the user's observation:
 
-> `logger=live.push_http … msg="Live Push Gateway initialization"`
-> `logger=grafanaStorageLogger … msg="Storage starting"`
-> `logger=ngalert.multiorg.alertmanager … msg="Starting MultiOrg Alertmanager"`
-> `logger=app-registry … msg="app registry initialized"`
-> `logger=http.server … msg="HTTP Server Listen" address=[::]:3000 …`
+> `logger=live.push_http t=2026-07-01T22:40:54.178302748Z level=info msg="Live Push Gateway initialization"`
+> `logger=grafanaStorageLogger t=2026-07-01T22:40:54.281165125Z level=info msg="Storage starting"`
+> `logger=ngalert.multiorg.alertmanager t=2026-07-01T22:40:54.281495465Z level=info msg="Starting MultiOrg Alertmanager"`
+> `logger=app-registry t=2026-07-01T22:40:54.621394757Z level=info msg="app registry initialized"`
+> `logger=http.server t=2026-07-01T22:40:54.282988857Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=`
 > *(command: `grep -E 'Live Push Gateway|Storage starting|Starting MultiOrg Alertmanager|app registry initialized|HTTP Server Listen' run1.log`)*
 
 **Rationale.** The user "never configured anything," yet sees a mix of success and disabled/skip messages because the *defaults themselves* decide this. Enabled‑by‑default services (HTTP server, alerting, live, storage, token auth, etc.) run and log success; disabled‑by‑default subsystems (e.g., the remote secrets plugin, external plugins, the image renderer) either log that they are off or are skipped silently by `registry.IsDisabled`. Nothing here reflects user configuration — it reflects `conf/defaults.ini` plus compiled‑in feature‑flag defaults.
@@ -196,15 +252,15 @@ On the first start (empty database), Grafana **creates** a default admin account
 
 - Creation path: `func (ss *SQLStore) ensureMainOrgAndAdminUser(test bool)` [pkg/services/sqlstore/sqlstore.go:L190].
 - It first counts users with `SELECT COUNT(id) AS Count FROM "user"` [pkg/services/sqlstore/sqlstore.go:L200] and returns early if any exist (`if stats.Count > 0 { return nil }` [pkg/services/sqlstore/sqlstore.go:L204]).
-- If admin creation is not disabled (`if !ss.cfg.DisableInitAdminCreation {` [pkg/services/sqlstore/sqlstore.go:L210]) it creates the user with `Login: ss.cfg.AdminUser` [L214], `Email: ss.cfg.AdminEmail` [L215], `Password: user.Password(ss.cfg.AdminPassword)` [L216], `IsAdmin: true` [L217], then logs `Created default admin` [L222] and `Created default organization` [L230].
+- If admin creation is not disabled (`if !ss.cfg.DisableInitAdminCreation {` [pkg/services/sqlstore/sqlstore.go:L210]) it creates the user with `Login: ss.cfg.AdminUser` [pkg/services/sqlstore/sqlstore.go:L214], `Email: ss.cfg.AdminEmail` [pkg/services/sqlstore/sqlstore.go:L215], `Password: user.Password(ss.cfg.AdminPassword)` [pkg/services/sqlstore/sqlstore.go:L216], `IsAdmin: true` [pkg/services/sqlstore/sqlstore.go:L217], then logs `Created default admin` [pkg/services/sqlstore/sqlstore.go:L222] and `Created default organization` [pkg/services/sqlstore/sqlstore.go:L230].
 
 Three independent pieces of evidence prove the account was **created, not assumed**:
 
 **(1) The creation log lines** *(command: `grep -E 'Created default admin|Created default organization' run1.log`)*:
 
 ```text
-logger=sqlstore … level=info msg="Created default admin" user=admin
-logger=sqlstore … level=info msg="Created default organization"
+logger=sqlstore t=2026-07-01T22:40:54.078602062Z level=info msg="Created default admin" user=admin
+logger=sqlstore t=2026-07-01T22:40:54.078698516Z level=info msg="Created default organization"
 ```
 
 **(2) The actual DB row** *(command: `sqlite3 data/grafana.db 'SELECT id, login, email, is_admin FROM user;'`)*:
@@ -221,15 +277,18 @@ id  login  email            is_admin
 HTTP/1.1 200 OK
 Cache-Control: no-store
 Content-Type: application/json
-Set-Cookie: grafana_session=6d5643c1b89a6aab175144b4391cb233; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax
-Set-Cookie: grafana_session_expiry=1782942701; Path=/; Max-Age=2592000; SameSite=Lax
+Set-Cookie: grafana_session=<REDACTED-32-hex-session-token>; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax
+Set-Cookie: grafana_session_expiry=<REDACTED-epoch>; Path=/; Max-Age=2592000; SameSite=Lax
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
+Date: Wed, 01 Jul 2026 22:40:58 GMT
 Content-Length: 41
 
 {"message":"Logged in","redirectUrl":"/"}
 ```
+
+> Note on the redaction: only the two **dynamic values** are redacted — the 32‑hex `grafana_session` token and the `grafana_session_expiry` epoch. All header **names and attributes** are shown verbatim (`Path=/`, `Max-Age=2592000`, `HttpOnly`, `SameSite=Lax`). The values came from an **ephemeral local clean‑run instance** (`/tmp/gf_clean_home`) that has since been **stopped and its data directory deleted**, so the token is no longer valid.
 
 The session cookie is named `grafana_session` because `login_cookie_name = grafana_session` [conf/defaults.ini:L561]; it is issued `HttpOnly` with `SameSite=Lax` and `Max-Age=2592000` (30 days).
 
@@ -249,7 +308,7 @@ From `conf/defaults.ini` `[security]` [conf/defaults.ini:L323]:
 
 **Reported exactly as observed (a real security note):** the default `secret_key` is the shared, well‑known literal **`SW2YcwTIb9zpOOhoPsMm`** [conf/defaults.ini:L337]. It is identical across every default install and is used to sign/encrypt sensitive settings. On the clean run the secrets subsystem confirmed it is active as the envelope‑encryption provider:
 
-> `logger=secrets … level=info msg="Envelope encryption state" enabled=true currentprovider=secretKey.v1`
+> `logger=secrets t=2026-07-01T22:40:54.08097988Z level=info msg="Envelope encryption state" enabled=true currentprovider=secretKey.v1`
 > *(command: `grep 'Envelope encryption state' run1.log`)*
 
 This is **not** softened here: a production deployment that leaves `secret_key` at this default is using a publicly known key.
@@ -262,8 +321,8 @@ This is **not** softened here: a production deployment that leaves `secret_key` 
 | `[auth.anonymous] enabled` | `false` | [conf/defaults.ini:L648-L650] | Anonymous access **off** |
 | `[users] allow_sign_up` | `false` | [conf/defaults.ini:L483] | Self sign‑up **off** |
 | `[users] auto_assign_org` | `true` | [conf/defaults.ini:L489] | New users auto‑join an org |
-| `[users] auto_assign_org_id` | `1` | [conf/defaults.ini:L492] | …org id 1 |
-| `[users] auto_assign_org_role` | `Viewer` | [conf/defaults.ini:L495] | …as Viewer |
+| `[users] auto_assign_org_id` | `1` | [conf/defaults.ini:L492] | New users auto‑join org id 1 |
+| `[users] auto_assign_org_role` | `Viewer` | [conf/defaults.ini:L495] | New users join as Viewer |
 
 The runtime corroborates that anonymous access is off *(command: `curl -sS -u admin:admin http://localhost:3000/api/frontend/settings` → JSON field `anonymousEnabled`)*:
 
@@ -276,9 +335,9 @@ So the posture is **not** open/permissive: it created one real privileged accoun
 
 ### 2.4 Which auth clients are active, the login flow, brute‑force lockout, and RBAC (each addressed by name)
 
-- **Auth clients** (`pkg/services/authn/clients/`): the pluggable clients are **basic, session, jwt, oauth, ldap, proxy, api_key**. On a clean run only **basic** (username/password, from `[auth.basic] enabled = true`) and **session** (the `grafana_session` cookie issued above) are active; jwt/oauth/ldap/proxy require explicit configuration that is absent here, and api_key requires a created token.
-- **Login flow & redirect validation** (`pkg/api/login.go`): the login view is `func (hs *HTTPServer) LoginView(...)` [pkg/api/login.go:L92]; redirect targets are validated by `func (hs *HTTPServer) ValidateRedirectTo(redirectTo string)` [pkg/api/login.go:L47], which rejects absolute/invalid/forbidden targets via `errAbsoluteRedirectTo` [L42], `errInvalidRedirectTo` [L43], `errForbiddenRedirectTo` [L44]. The successful login above returned `redirectUrl":"/"`.
-- **Brute‑force lockout** (`pkg/services/loginattempt/loginattemptimpl/login_attempt.go`): attempts are counted in a rolling window `const loginAttemptsWindow = time.Minute * 5` [login_attempt.go:L14]; lockout triggers at `if count >= s.cfg.BruteForceLoginProtectionMaxAttempts` [login_attempt.go:L80]. The **real default threshold is 5** — `cfg.BruteForceLoginProtectionMaxAttempts = security.Key("brute_force_login_protection_max_attempts").MustInt64(5)` [pkg/setting/setting.go:L1512], matching `brute_force_login_protection_max_attempts = 5` [conf/defaults.ini:L355]. Protection is on by default: `disable_brute_force_login_protection = false` [conf/defaults.ini:L352] / `MustBool(false)` [pkg/setting/setting.go:L1511]; the guards are checked at [login_attempt.go:L34,L50,L66].
+- **Auth clients** (`pkg/services/authn/authnimpl/registration.go`): it is important to distinguish **registered clients** (wired up at startup) from **login methods usable with no extra configuration**. On a clean run the clients that are unconditionally or by‑default **registered** are: **render** `clients.ProvideRender` [pkg/services/authn/authnimpl/registration.go:L47], **api_key** `clients.ProvideAPIKey` [pkg/services/authn/authnimpl/registration.go:L48], **session** `clients.ProvideSession` (registered because `LoginCookieName != ""`) [pkg/services/authn/authnimpl/registration.go:L50-L51], the **Grafana password** client `clients.ProvideGrafana` (registered because `!cfg.DisableLogin`) [pkg/services/authn/authnimpl/registration.go:L65-L66], **basic** `clients.ProvideBasic` (because `cfg.BasicAuthEnabled`) [pkg/services/authn/authnimpl/registration.go:L74-L75], and **form** `clients.ProvideForm` (because `!cfg.DisableLoginForm`) [pkg/services/authn/authnimpl/registration.go:L78-L79]. Of these, the methods that let the **default admin log in with no additional setup** are **basic auth** and the **login form**, both backed by the **Grafana password** client, plus the **session** cookie that carries the authenticated session forward (the `grafana_session` cookie issued above). **api_key** and **render** are registered but require, respectively, a created API token and a render‑service context to be exercised. The remaining clients require configuration that is absent on a clean run: **LDAP** only when `cfg.LDAPAuthEnabled` (or the SSO‑settings LDAP flag) [pkg/services/authn/authnimpl/registration.go:L59], **proxy** only when `cfg.AuthProxy.Enabled` [pkg/services/authn/authnimpl/registration.go:L88], **JWT** only when `cfg.JWTAuth.Enabled` [pkg/services/authn/authnimpl/registration.go:L97], and **OAuth** one client **per configured provider** [pkg/services/authn/authnimpl/registration.go:L107].
+- **Login flow & redirect validation** (`pkg/api/login.go`): the login view is `func (hs *HTTPServer) LoginView(...)` [pkg/api/login.go:L92]; redirect targets are validated by `func (hs *HTTPServer) ValidateRedirectTo(redirectTo string)` [pkg/api/login.go:L47], which rejects absolute/invalid/forbidden targets via `errAbsoluteRedirectTo` [pkg/api/login.go:L42], `errInvalidRedirectTo` [pkg/api/login.go:L43], `errForbiddenRedirectTo` [pkg/api/login.go:L44]. The successful login above returned `redirectUrl":"/"`.
+- **Brute‑force lockout** (`pkg/services/loginattempt/loginattemptimpl/login_attempt.go`): attempts are counted in a rolling window `const loginAttemptsWindow = time.Minute * 5` [pkg/services/loginattempt/loginattemptimpl/login_attempt.go:L14]; lockout triggers at `if count >= s.cfg.BruteForceLoginProtectionMaxAttempts` [pkg/services/loginattempt/loginattemptimpl/login_attempt.go:L80]. The **real default threshold is 5** — `cfg.BruteForceLoginProtectionMaxAttempts = security.Key("brute_force_login_protection_max_attempts").MustInt64(5)` [pkg/setting/setting.go:L1512], matching `brute_force_login_protection_max_attempts = 5` [conf/defaults.ini:L355]. Protection is on by default: `disable_brute_force_login_protection = false` [conf/defaults.ini:L352] / `MustBool(false)` [pkg/setting/setting.go:L1511]; the guards are checked at [pkg/services/loginattempt/loginattemptimpl/login_attempt.go:L34,L50,L66].
 - **RBAC defaults** (`pkg/services/accesscontrol/**`): the fixed roles (including the Grafana Admin role) are registered during `Init()` via `s.roleRegistry.RegisterFixedRoles(s.context)` [pkg/server/server.go:L130]. The created admin has `is_admin = 1` (see the DB row in §2.1), i.e. the Grafana server administrator.
 
 
@@ -299,8 +358,8 @@ All runtime state is rooted under the `data` directory, resolved relative to the
 
 The database defaults come from `[database]` [conf/defaults.ini:L118]: `type = sqlite3` [conf/defaults.ini:L123] and `path = grafana.db` [conf/defaults.ini:L164], so the database file is `data/grafana.db`. This was echoed at startup:
 
-> `logger=sqlstore … msg="Connecting to DB" dbtype=sqlite3`
-> `logger=sqlstore … msg="Creating SQLite database file" path=/tmp/gf_clean_home/data/grafana.db`
+> `logger=sqlstore t=2026-07-01T22:40:52.008398854Z level=info msg="Connecting to DB" dbtype=sqlite3`
+> `logger=sqlstore t=2026-07-01T22:40:52.008409882Z level=info msg="Creating SQLite database file" path=/tmp/gf_clean_home/data/grafana.db`
 > *(command: `grep -E 'Connecting to DB|Creating SQLite database file' run1.log`)*
 
 ### 3.2 What actually gets written — the `data/` tree
@@ -320,7 +379,7 @@ data/png
 - **`data/grafana.db`** — the SQLite database (schema + rows). Its **real size on a clean first run** *(command: `ls -l data/grafana.db`)*:
 
 ```text
--rw-r----- 1 root root 1093632 Jul  1 21:39 data/grafana.db
+-rw-r----- 1 root root 1093632 Jul  1 22:40 data/grafana.db
 ```
 
 i.e. **1,093,632 bytes (≈1.1 MiB)** with the full schema created but almost no user data.
@@ -339,19 +398,19 @@ sessions
 
 ### 3.3 The schema and the `migration_log` table
 
-Schema evolution is driven by the migrator, whose log table name is set to `migration_log` (`mg.tableName = "migration_log"` [pkg/services/sqlstore/migrator/migrator.go:L97]). It emits `Starting DB migrations` [migrator.go:L247], one `Executing migration` line per step [migrator.go:L356], and a final `migrations completed` summary with `performed`/`skipped`/`duration` [migrator.go:L287].
+Schema evolution is driven by the migrator, whose log table name is set to `migration_log` (`mg.tableName = "migration_log"` [pkg/services/sqlstore/migrator/migrator.go:L97]). It emits `Starting DB migrations` [pkg/services/sqlstore/migrator/migrator.go:L247], one `Executing migration` line per step [pkg/services/sqlstore/migrator/migrator.go:L356], and a final `migrations completed` summary with `performed`/`skipped`/`duration` [pkg/services/sqlstore/migrator/migrator.go:L287].
 
 **Real magnitude on the first run** *(commands: `grep -c 'msg="Executing migration"' run1.log` and `grep 'migrations completed' run1.log`)*:
 
 ```text
 Executing migration count: 644
-logger=migrator … msg="migrations completed" performed=626 skipped=0 duration=2.134423675s
-logger=resource-migrator … msg="migrations completed" performed=18 skipped=0 duration=51.049527ms
+logger=migrator t=2026-07-01T22:40:54.073174608Z level=info msg="migrations completed" performed=626 skipped=0 duration=2.063478193s
+logger=resource-migrator t=2026-07-01T22:40:54.278019273Z level=info msg="migrations completed" performed=18 skipped=0 duration=50.764561ms
 ```
 
-So the default schema is built by **626** migrations (main migrator) plus **18** (the `resource-migrator`) — **644** executed steps, `skipped=0`, taking **2.134423675 s** (main) + **51.049527 ms** (resource). The very first migration is the one that creates the log table itself:
+So the default schema is built by **626** migrations (main migrator) plus **18** (the `resource-migrator`) — **644** executed steps, `skipped=0`, taking **2.063478193 s** (main) + **50.764561 ms** (resource). The very first migration is the one that creates the log table itself:
 
-> `logger=migrator … msg="Executing migration" id="create migration_log table"`
+> `logger=migrator t=2026-07-01T22:40:52.009717718Z level=info msg="Executing migration" id="create migration_log table"`
 > *(command: `grep -m1 'Executing migration' run1.log`)*
 
 The recorded count in the database matches the "performed" number *(command: `sqlite3 data/grafana.db 'SELECT COUNT(*) FROM migration_log;'`)*:
@@ -374,6 +433,12 @@ Consequently the provisioners start and immediately finish with nothing to do (s
 
 ```text
 HTTP/1.1 200 OK
+Cache-Control: no-store
+Content-Type: application/json
+X-Content-Type-Options: nosniff
+X-Frame-Options: deny
+X-Xss-Protection: 1; mode=block
+Date: Wed, 01 Jul 2026 22:40:58 GMT
 Content-Length: 2
 
 []
@@ -417,7 +482,7 @@ Backend data‑source query execution is provided by a compiled‑in factory map
 
 **All plugins loaded are `core`.** The store logs 54 loaded plugins, and `/api/plugins` returns 49 entries, **every one** with `signature: internal` (the marker for core):
 
-> `logger=plugin.store … msg="Plugins loaded" count=54 duration=33.403409ms`
+> `logger=plugin.store t=2026-07-01T22:40:54.167974608Z level=info msg="Plugins loaded" count=54 duration=25.882743ms`
 > *(command: `grep 'Plugins loaded' run1.log`)*
 
 ```console
@@ -430,9 +495,10 @@ Counter({'panel': 30, 'datasource': 19})
 Reconciling the counts (all real, no estimates):
 
 - **49 via `/api/plugins`** = 30 panel + 19 datasource, all `signature=internal`.
-- **54 loaded** (store log) = the **22** datasource frontend dirs + **32** panel frontend dirs on disk *(command: `find public/app/plugins/datasource -maxdepth 1 -mindepth 1 -type d | wc -l` → `22`; `…/panel…` → `32`; `22+32 = 54`)*. The **5** loaded but not listed by `/api/plugins` are exactly (verified by set‑difference of the API IDs vs the on‑disk dirs): the **3 builtin datasources** `dashboard`, `grafana`, `mixed` (surfaced instead in `/api/frontend/settings` as `-- Dashboard --`, `-- Grafana --`, `-- Mixed --`) and **2 internal panels** `debug` and `live`. So **32 panel dirs − 2 = 30** listed, and **22 datasource dirs − 3 = 19** listed → **30 + 19 = 49**.
+- **54 loaded** (store log) = the **22** datasource frontend dirs + **32** panel frontend dirs on disk *(commands: `find public/app/plugins/datasource -maxdepth 1 -mindepth 1 -type d | wc -l` → `22`; `find public/app/plugins/panel -maxdepth 1 -mindepth 1 -type d | wc -l` → `32`; so `22 + 32 = 54`)*.
+- The **5** loaded but **not** listed by `/api/plugins` are removed by two explicit filters in the API handler: (a) the **built‑in filter** `if pluginDef.BuiltIn { continue }` [pkg/api/plugins.go:L109-L111] drops the **3 built‑in datasources** `dashboard`, `grafana`, `mixed` (each has `builtIn: true` in its `plugin.json`; they are surfaced instead in `/api/frontend/settings` as `-- Dashboard --`, `-- Grafana --`, `-- Mixed --`); and (b) the **alpha filter** `if pluginDef.State == plugins.ReleaseStateAlpha && !hs.Cfg.PluginsEnableAlpha { continue }` [pkg/api/plugins.go:L105-L107] drops the **2 alpha panels** `debug` and `live` (each has `state: alpha`, and `PluginsEnableAlpha` is `false` by default — `enable_alpha = false` [conf/defaults.ini:L1741], read via `pluginsSection.Key("enable_alpha").MustBool(false)` [pkg/setting/setting_plugins.go:L39]). So **32 panel dirs − 2 alpha = 30** listed, and **22 datasource dirs − 3 built‑in = 19** listed → **30 + 19 = 49**.
 - Note the two datasource dirs `azuremonitor` and `cloud-monitoring` **are** in the API list, under their canonical plugin IDs `grafana-azure-monitor-datasource` and `stackdriver` respectively (so they are not part of the 5‑plugin gap).
-- The **18** compiled‑in backends (§4.3) are the query engines behind the backend‑capable datasource plugins; the 19 datasource plugins also include proxy/frontend‑handled ones (`alertmanager`, `jaeger`) that are not entries in the 18‑map, and the builtin `grafana` datasource is served as `-- Grafana --`.
+- **Reconciling the 19 API datasource plugins with the 18 compiled‑in backend map** (§4.3, `NewRegistry(map[...])` [pkg/plugins/backendplugin/coreplugin/registry.go:L102-L121]): a set‑difference of the two lists shows **17** IDs are in **both**. The one backend‑map entry that is **absent** from the API list is `grafana` [pkg/plugins/backendplugin/coreplugin/registry.go:L117] — because the built‑in filter [pkg/api/plugins.go:L109-L111] removes the built‑in `grafana` datasource from `/api/plugins` (it is served as `-- Grafana --` in `/api/frontend/settings`). The two API datasource IDs that are **not** in the 18‑map are `alertmanager` and `jaeger` — proxy/frontend‑handled datasource plugins that have no entry in the compiled‑in backend factory map. Hence `17 (in both) + 2 (alertmanager, jaeger, API‑only) = 19` API datasource plugins, and `17 (in both) + 1 (grafana, backend‑map‑only, filtered) = 18` backend‑map entries *(command: set‑difference of the `/api/plugins` datasource IDs vs the 18 map keys)*.
 
 The 19 datasource plugin IDs and 30 panel plugin IDs returned by the API *(command: `curl -sS -u admin:admin http://localhost:3000/api/plugins`)*:
 
@@ -480,7 +546,7 @@ The installer refuses to install or uninstall core/bundled plugins:
 
 An **observed** consequence of the `9.2.0` version string (§0.4): the background installer tried to preinstall an app and the compatibility check rejected it — reported here exactly as seen:
 
-> `logger=plugin.backgroundinstaller … level=error msg="Failed to install plugin" pluginId=grafana-lokiexplore-app version= error="[plugin.grafanaVersionNotCompatible] grafana-lokiexplore-app is not compatible with your Grafana version: 9.2.0"`
+> `logger=plugin.backgroundinstaller t=2026-07-01T22:40:54.440740069Z level=error msg="Failed to install plugin" pluginId=grafana-lokiexplore-app version= error="[plugin.grafanaVersionNotCompatible] grafana-lokiexplore-app is not compatible with your Grafana version: 9.2.0"`
 > *(command: `grep 'Failed to install plugin' run1.log`)*
 
 This is a side effect of building without version ldflags; a correctly‑versioned release build would evaluate compatibility against `11.5.0-pre`. It does not affect the core‑plugin inventory above.
@@ -497,7 +563,7 @@ The backend's dependency‑injection graph is **generated**, not hand‑written.
 ```text
 generate go files
 go run  ./pkg/build/wire/cmd/wire/main.go gen -tags "oss" ./pkg/server
-wire: github.com/grafana/grafana/pkg/server: wrote .../pkg/server/wire_gen.go
+wire: github.com/grafana/grafana/pkg/server: wrote /tmp/blitzy/grafana/blitzy-675536c4-a297-4fe3-88d1-6213344dc49c_05d19e/pkg/server/wire_gen.go
 ```
 
 Proof it is generated/untracked *(commands: `head -5 pkg/server/wire_gen.go`, `git check-ignore -v pkg/server/wire_gen.go`, `git ls-files pkg/server/wire_gen.go`)*:
@@ -518,18 +584,35 @@ Proof it is generated/untracked *(commands: `head -5 pkg/server/wire_gen.go`, `g
 var CueSchemaFS embed.FS
 ```
 
-So the UI is served from the on‑disk webpack output `public/build` (**658** entries / **325** `.js` on this build; also git‑ignored via `.gitignore:9:/public/build`). When `public/build` is missing, `validateStaticRootPath` [pkg/setting/setting.go:L1034-L1042] logs a **non‑fatal** error (message at [pkg/setting/setting.go:L1040]) and returns `nil`. Observed by running once from a home whose `public/` had no `build/` subdir *(command: `/tmp/grafana_bin server --homepath=/tmp/gf_nobuild_home`)*:
+So the UI is served from the on‑disk webpack output `public/build` (**658** entries / **325** `.js` on this build; also git‑ignored via `.gitignore:9:/public/build`). When `public/build` is missing, `validateStaticRootPath` [pkg/setting/setting.go:L1034-L1042] logs a **non‑fatal** error (message at [pkg/setting/setting.go:L1040]) and returns `nil`. Observed by running once from a home whose `public/` had no `build/` subdir *(command: `/tmp/grafana_bin server --homepath=/tmp/gf_nobuild_home`)*. The `error`‑level line is emitted at the very start of settings resolution *(command: `grep 'Failed to detect generated javascript' nobuild.log`)*:
 
 ```text
-logger=settings … level=error msg="Failed to detect generated javascript files in public/build"
-…
-logger=http.server … level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=
+logger=settings t=2026-07-01T22:42:30.238088306Z level=error msg="Failed to detect generated javascript files in public/build"
 ```
 
-The `error`‑level line appears at the very start, yet the server **still reaches HTTP listening** and answers requests *(command: `curl -s -o /dev/null -w 'HTTP %{http_code}\n' http://localhost:3000/api/health`)*:
+Yet roughly two seconds later — after the normal init sequence — the same run **still reaches HTTP listening** *(command: `grep 'HTTP Server Listen' nobuild.log`)*:
 
 ```text
-HTTP 200
+logger=http.server t=2026-07-01T22:42:32.15571547Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=
+```
+
+and answers requests with a full `HTTP/1.1 200 OK`, proving the missing frontend build is non‑fatal to the backend *(command: `curl -sS -i http://localhost:3000/api/health`)*:
+
+```text
+HTTP/1.1 200 OK
+Cache-Control: no-store
+Content-Type: application/json; charset=UTF-8
+X-Content-Type-Options: nosniff
+X-Frame-Options: deny
+X-Xss-Protection: 1; mode=block
+Date: Wed, 01 Jul 2026 22:42:35 GMT
+Content-Length: 62
+
+{
+  "database": "ok",
+  "version": "9.2.0",
+  "commit": "NA"
+}
 ```
 
 ### 5.3 Is "running directly" equivalent to "building first"? — No, not fully
@@ -549,13 +632,13 @@ Two mechanisms make the first run differ from every later run against the same `
 
 ### 6.1 Admin/org creation gate (created once)
 
-`ensureMainOrgAndAdminUser` returns early when any user already exists: `if stats.Count > 0 { return nil }` [pkg/services/sqlstore/sqlstore.go:L204-L206]. So `Created default admin` [sqlstore.go:L222] and `Created default organization` [sqlstore.go:L230] appear on run 1 and are **absent** on restart.
+`ensureMainOrgAndAdminUser` returns early when any user already exists: `if stats.Count > 0 { return nil }` [pkg/services/sqlstore/sqlstore.go:L204-L206]. So `Created default admin` [pkg/services/sqlstore/sqlstore.go:L222] and `Created default organization` [pkg/services/sqlstore/sqlstore.go:L230] appear on run 1 and are **absent** on restart.
 
 **Run 1** *(command: `grep -E 'Created default admin|Created default organization' run1.log`)*:
 
 ```text
-logger=sqlstore … level=info msg="Created default admin" user=admin
-logger=sqlstore … level=info msg="Created default organization"
+logger=sqlstore t=2026-07-01T22:40:54.078602062Z level=info msg="Created default admin" user=admin
+logger=sqlstore t=2026-07-01T22:40:54.078698516Z level=info msg="Created default organization"
 ```
 
 **Run 2 (same `data/`)** *(command: `grep -E 'Created default admin|Created default organization' run2.log || echo ABSENT`)*:
@@ -568,20 +651,28 @@ The DB confirms the gate: after restart the user count is still 1 *(command: `sq
 
 ### 6.2 Migration idempotency via `migration_log`
 
-Applied migrations are recorded in `migration_log`; on restart the migrator finds them already recorded and skips them, so the `migrations completed` summary [migrator.go:L287] flips from all‑performed to all‑skipped. Paired evidence *(command: `grep 'migrations completed' run1.log run2.log`)*:
+Applied migrations are recorded in `migration_log`; on restart the migrator finds them already recorded and skips them, so the `migrations completed` summary [pkg/services/sqlstore/migrator/migrator.go:L287] flips from all‑performed to all‑skipped. Paired evidence *(command: `grep 'migrations completed' run1.log run2.log`)*:
 
 ```text
-RUN1  logger=migrator          … msg="migrations completed" performed=626 skipped=0 duration=2.134423675s
-RUN1  logger=resource-migrator … msg="migrations completed" performed=18  skipped=0 duration=51.049527ms
-RUN2  logger=migrator          … msg="migrations completed" performed=0   skipped=626 duration=544.497µs
-RUN2  logger=resource-migrator … msg="migrations completed" performed=0   skipped=18  duration=45.459µs
+run1.log:logger=migrator t=2026-07-01T22:40:54.073174608Z level=info msg="migrations completed" performed=626 skipped=0 duration=2.063478193s
+run1.log:logger=resource-migrator t=2026-07-01T22:40:54.278019273Z level=info msg="migrations completed" performed=18 skipped=0 duration=50.764561ms
+run2.log:logger=migrator t=2026-07-01T22:41:01.186494675Z level=info msg="migrations completed" performed=0 skipped=626 duration=686.608µs
+run2.log:logger=resource-migrator t=2026-07-01T22:41:01.326001091Z level=info msg="migrations completed" performed=0 skipped=18 duration=33.025µs
 ```
 
-On run 2 there are **zero** `Executing migration` lines *(command: `grep -c 'msg="Executing migration"' run2.log`)* → `0`, and the whole main‑migrator pass drops from **2.134423675 s** to **544.497 µs**. The recorded `migration_log` count is unchanged at **626** *(command: `sqlite3 data/grafana.db 'SELECT COUNT(*) FROM migration_log;'`)*.
+On run 2 there are **zero** `Executing migration` lines *(command: `grep -c 'msg="Executing migration"' run2.log`)* → `0`, and the whole main‑migrator pass drops from **2.063478193 s** to **686.608 µs**. The recorded `migration_log` count is unchanged at **626** *(command: `sqlite3 data/grafana.db 'SELECT COUNT(*) FROM migration_log;'`)*.
 
 ### 6.3 Net effect on the log volume
 
-The divergence is visible even in raw size: run 1 produced **1349** log lines; the restart produced **57** *(command: `wc -l run1.log run2.log`)*. This is the concrete, persistent difference the user observed: the first run builds the schema and seeds the admin/org; every later run finds that state already in `data/` and short‑circuits both.
+The divergence is visible even in raw size: run 1 produced **1354** log lines; the restart produced **61** *(command: `wc -l run1.log run2.log`)*:
+
+```text
+  1354 run1.log
+    61 run2.log
+  1415 total
+```
+
+This is the concrete, persistent difference the user observed: the first run builds the schema and seeds the admin/org; every later run finds that state already in `data/` and short‑circuits both.
 
 
 ---
@@ -592,59 +683,59 @@ Every named item and every "e.g./such as/including/like" example from the questi
 
 | # | Named item / question part | Section | One‑line evidence |
 |---|---|---|---|
-| 1 | Cold‑start bootstrap sequence | §1.1 | `Init` [server.go:L113] → `RegisterFixedRoles` [L130] → `RunInitProvisioners` [L134] → `Run` [L139]; observed `HTTP Server Listen address=[::]:3000` |
-| 2 | Why services log "disabled"/"skipped" vs success | §1.3 | `if registry.IsDisabled(svc) { continue }` [server.go:L150-L152] (silent); 34 enabled started (debug) |
-| 3 | `registry.IsDisabled` / `CanBeDisabled` | §1.3a | `func IsDisabled(...)` [registry.go:L53]; `CanBeDisabled` [registry.go:L18-L20] |
-| 4 | Concrete disabled service message | §1.3b | `secrets.kvstore … "remote secret management plugin disabled …"` |
-| 5 | Image renderer absent | §1.3b | `rendering … "No image renderer found/installed …"` |
-| 6 | Migrator "Skipping migration" | §1.3c | `migrator … warn … "Skipping migration: Already executed …"` |
-| 7 | `--homepath` default | §1.1 | "defaults to working directory" [flags.go:L35-L36] |
-| 8 | Entry point `main()` / `ServerCommand` | §1.1 | [main.go:L23], [main.go:L47] |
-| 9 | `notifySystemd("READY=1")` | §1.2 | [server.go:L176]; `(no systemd notify line …)` when not under systemd |
-| 10 | `Shutdown` lifecycle | §6/§1.1 | `msg="Shutdown started" reason="System signal: terminated"` [server.go:L185] |
+| 1 | Cold‑start bootstrap sequence | §1.1 | `Init` [pkg/server/server.go:L113] → `RegisterFixedRoles` [pkg/server/server.go:L130] → `RunInitProvisioners` [pkg/server/server.go:L134] → `Run` [pkg/server/server.go:L139]; observed `HTTP Server Listen address=[::]:3000` |
+| 2 | Why services log "disabled"/"skipped" vs success | §1.3 | `if registry.IsDisabled(svc) { continue }` [pkg/server/server.go:L150-L152] (silent); 34 enabled started (debug) |
+| 3 | `registry.IsDisabled` / `CanBeDisabled` | §1.3a | `func IsDisabled(...)` [pkg/registry/registry.go:L53]; `CanBeDisabled` [pkg/registry/registry.go:L18-L20] |
+| 4 | Concrete disabled service message | §1.3b | `msg="secrets manager evaluator returned false"` — reason "remote secret management plugin disabled because the property secrets.use_plugin is not set to true" (full verbatim line, with backticks, in §1.3b) |
+| 5 | Image renderer absent | §1.3b | `msg="No image renderer found/installed. For image rendering support please install the grafana-image-renderer plugin. Read more at https://grafana.com/docs/grafana/latest/administration/image_rendering/"` |
+| 6 | Migrator "Skipping migration" | §1.3c | `msg="Skipping migration: Already executed, but not recorded in migration log"` (level=warn; full verbatim line in §1.3c) |
+| 7 | `--homepath` default | §1.1 | "defaults to working directory" [pkg/cmd/grafana-server/commands/flags.go:L35-L36] |
+| 8 | Entry point `main()` / `ServerCommand` | §1.1 | [pkg/cmd/grafana/main.go:L23], [pkg/cmd/grafana/main.go:L47] |
+| 9 | `notifySystemd("READY=1")` | §1.2 | [pkg/server/server.go:L176]; no `READY=1` notification line observed (process not started under systemd) |
+| 10 | `Shutdown` lifecycle | §6/§1.1 | `msg="Shutdown started" reason="System signal: terminated"` [pkg/server/server.go:L185] |
 | 11 | Login with never‑set creds | §2.1 | `HTTP/1.1 200 OK` + `{"message":"Logged in","redirectUrl":"/"}` |
-| 12 | Account **created** (not assumed) | §2.1 | `Created default admin" user=admin`; DB row `1 admin admin@localhost 1` |
-| 13 | `ensureMainOrgAndAdminUser` + gate | §2.1/§6.1 | [sqlstore.go:L190]; `if stats.Count > 0 { return nil }` [L204-L206] |
+| 12 | Account **created** (not assumed) | §2.1 | `msg="Created default admin" user=admin`; DB row `1 admin admin@localhost 1` |
+| 13 | `ensureMainOrgAndAdminUser` + gate | §2.1/§6.1 | [pkg/services/sqlstore/sqlstore.go:L190]; `if stats.Count > 0 { return nil }` [pkg/services/sqlstore/sqlstore.go:L204-L206] |
 | 14 | `admin_user`/`admin_password`/`admin_email` | §2.2 | `admin`/`admin`/`admin@localhost` [defaults.ini:L328,L331,L334] |
 | 15 | `secret_key` (shared default) | §2.2 | `secret_key = SW2YcwTIb9zpOOhoPsMm` [defaults.ini:L337]; `Envelope encryption state enabled=true` |
 | 16 | `disable_initial_admin_creation` | §2.2 | `false` [defaults.ini:L325]; `MustBool(false)` [setting.go:L1580] |
 | 17 | Basic auth ON | §2.3 | `[auth.basic] enabled = true` [defaults.ini:L874-L875]; `curl -u admin:admin` works |
 | 18 | Anonymous OFF | §2.3 | `[auth.anonymous] enabled = false` [defaults.ini:L648-L650]; `anonymousEnabled: False` |
-| 19 | `allow_sign_up` / auto‑assign org | §2.3 | `false` [L483]; `auto_assign_org=true` [L489], id `1` [L492], role `Viewer` [L495] |
-| 20 | Session cookie | §2.1 | `Set-Cookie: grafana_session=…; HttpOnly; SameSite=Lax`; name from [defaults.ini:L561] |
-| 21 | Auth clients (basic/session/jwt/oauth/ldap/proxy/api_key) | §2.4 | only basic + session active on clean run |
+| 19 | `allow_sign_up` / auto‑assign org | §2.3 | `allow_sign_up = false` [conf/defaults.ini:L483]; `auto_assign_org = true` [conf/defaults.ini:L489], id `1` [conf/defaults.ini:L492], role `Viewer` [conf/defaults.ini:L495] |
+| 20 | Session cookie | §2.1 | `Set-Cookie: grafana_session=<REDACTED>; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax`; name from [defaults.ini:L561] |
+| 21 | Auth clients (basic/session/jwt/oauth/ldap/proxy/api_key) | §2.4 | registered by default: render/api_key/session/Grafana‑password/basic/form [registration.go:L47-L79]; usable for default admin with no extra config: basic + form (+ Grafana‑password) + session; jwt/ldap/proxy/oauth require config |
 | 22 | Login flow / redirect validation | §2.4 | `LoginView` [login.go:L92]; `ValidateRedirectTo` [login.go:L47] |
-| 23 | Brute‑force lockout (max attempts) | §2.4 | window `time.Minute*5` [login_attempt.go:L14]; threshold **5** [setting.go:L1512 / defaults.ini:L355]; gate [login_attempt.go:L80] |
-| 24 | RBAC fixed roles | §2.4 | `RegisterFixedRoles` [server.go:L130]; admin `is_admin=1` |
-| 25 | `[paths]` data/logs/plugins/provisioning | §3.1 | `data` [L15], `data/log` [L21], `data/plugins` [L24], `conf/provisioning` [L27] |
-| 26 | `[database]` sqlite3 / grafana.db | §3.1 | `type=sqlite3` [L123], `path=grafana.db` [L164]; `Creating SQLite database file …/data/grafana.db` |
+| 23 | Brute‑force lockout (max attempts) | §2.4 | window `time.Minute*5` [pkg/services/loginattempt/loginattemptimpl/login_attempt.go:L14]; threshold **5** [pkg/setting/setting.go:L1512 / conf/defaults.ini:L355]; gate `count >= s.cfg.BruteForceLoginProtectionMaxAttempts` [pkg/services/loginattempt/loginattemptimpl/login_attempt.go:L80] |
+| 24 | RBAC fixed roles | §2.4 | `RegisterFixedRoles` [pkg/server/server.go:L130]; admin `is_admin=1` |
+| 25 | `[paths]` data/logs/plugins/provisioning | §3.1 | `data = data` [conf/defaults.ini:L15], `logs = data/log` [conf/defaults.ini:L21], `plugins = data/plugins` [conf/defaults.ini:L24], `provisioning = conf/provisioning` [conf/defaults.ini:L27] |
+| 26 | `[database]` sqlite3 / grafana.db | §3.1 | `type = sqlite3` [conf/defaults.ini:L123], `path = grafana.db` [conf/defaults.ini:L164]; `msg="Creating SQLite database file" path=/tmp/gf_clean_home/data/grafana.db` |
 | 27 | `data/` tree contents | §3.2 | `data/csv`, `data/grafana.db`, `data/log/grafana.log`, `data/pdf`, `data/png` |
 | 28 | `grafana.db` size (magnitude) | §3.2 | `1093632` bytes (≈1.1 MiB) |
 | 29 | Sessions in DB | §3.2 | `user_auth_token` count `1` |
-| 30 | `migration_log` table | §3.3 | `mg.tableName = "migration_log"` [migrator.go:L97]; COUNT `626` |
-| 31 | Migration count / duration (magnitude) | §3.3/§6.2 | `performed=626 skipped=0 duration=2.134423675s` (+18 resource); 644 executed |
-| 32 | `Starting DB migrations` / `Executing migration` | §3.3 | [migrator.go:L247], [migrator.go:L356] |
+| 30 | `migration_log` table | §3.3 | `mg.tableName = "migration_log"` [pkg/services/sqlstore/migrator/migrator.go:L97]; COUNT `626` |
+| 31 | Migration count / duration (magnitude) | §3.3/§6.2 | `performed=626 skipped=0 duration=2.063478193s` (+18 resource); 644 executed |
+| 32 | `Starting DB migrations` / `Executing migration` | §3.3 | [pkg/services/sqlstore/migrator/migrator.go:L247], [pkg/services/sqlstore/migrator/migrator.go:L356] |
 | 33 | Provisioning inert (`apiVersion: 1`) | §3.4 | `datasources/sample.yaml` = `apiVersion: 1`; `/api/datasources` → `[]` |
 | 34 | `/api/datasources` empty | §3.4 | `HTTP/1.1 200 OK` `Content-Length: 2` `[]` |
-| 35 | Plugin classes core/bundled/external/cdn | §4.1 | [plugins.go:L509-L512]; `IsCorePlugin` [L494-L495] |
-| 36 | Source registration (core/bundled/external) | §4.2 | [sources.go:L26], [L27], [L35]; `corePluginPaths` [L64-L66] |
-| 37 | 18 compiled‑in backend data sources | §4.3 | `ProvideCoreRegistry` [coreplugin/registry.go:L95]; map [L102-L121] (18 named) |
+| 35 | Plugin classes core/bundled/external/cdn | §4.1 | [pkg/plugins/plugins.go:L509-L512]; `IsCorePlugin` [pkg/plugins/plugins.go:L494-L495] |
+| 36 | Source registration (core/bundled/external) | §4.2 | [sources.go:L26], [sources.go:L27], [sources.go:L35]; `corePluginPaths` [sources.go:L64-L66] |
+| 37 | 18 compiled‑in backend data sources | §4.3 | `ProvideCoreRegistry` [coreplugin/registry.go:L95]; map [coreplugin/registry.go:L102-L121] (18 named) |
 | 38 | `/api/plugins` count & all core | §4.4 | `count= 49`, `Counter({'internal': 49})`, `panel:30 datasource:19` |
 | 39 | 54 loaded vs 49 listed reconciliation | §4.4 | `Plugins loaded count=54`; 22 ds dirs − 3 builtins = 19 |
 | 40 | Builtin datasources (Dashboard/Grafana/Mixed) | §4.4 | `datasources: ['-- Dashboard --','-- Grafana --','-- Mixed --']` |
 | 41 | Why plugins appear un‑installed (core) | §4.5 | all `signature=internal`; `plugins-bundled/external.json` = `{"plugins": []}` |
 | 42 | No bundled / no external / no CDN | §4.5 | empty `external.json`; external path `failed to open plugins path` |
 | 43 | `ErrInstallCorePlugin` / `ErrUninstallCorePlugin` | §4.6 | [installer.go:L99], [installer.go:L198] |
-| 44 | Generated `wire_gen.go` | §5.1 | `wire: … wrote …/pkg/server/wire_gen.go`; `.gitignore:194:**/wire_gen.go` |
+| 44 | Generated `wire_gen.go` | §5.1 | `make gen-go` writes `pkg/server/wire_gen.go` [Makefile:L167] (full verbatim wire output shown in §5.1); git‑ignored `.gitignore:194:**/wire_gen.go` |
 | 45 | Frontend not embedded (`embed.go`) | §5.2 | `//go:embed cue.mod/module.cue` only |
 | 46 | `public/build` + missing‑build error | §5.2 | `Failed to detect generated javascript files in public/build` [setting.go:L1040]; non‑fatal → `HTTP 200` |
 | 47 | Run directly vs build first | §5.3 | backend needs `wire_gen.go`; UI needs `public/build` → not fully equivalent |
-| 48 | Makefile targets / `WIRE_TAGS` | §5.1/§5.3 | `WIRE_TAGS="oss"` [L5]; `gen-go` [L167]; `build` [L229]; `run-go` app_mode=development [L238] |
+| 48 | Makefile targets / `WIRE_TAGS` | §5.1/§5.3 | `WIRE_TAGS="oss"` [Makefile:L5]; `gen-go` [Makefile:L167]; `build` [Makefile:L229]; `run-go` app_mode=development [Makefile:L238] |
 | 49 | Developer‑guide flow (Cgo/yarn/make run/3000) | §5.3 | [developer-guide.md:L12,L71,L79,L119,L123,L135] |
 | 50 | First‑run vs subsequent gate | §6.1 | `Created default admin` present run1, `ABSENT` run2 |
 | 51 | Migration idempotency | §6.2 | run1 `performed=626 skipped=0`; run2 `performed=0 skipped=626` |
 | 52 | `app_mode` / `http_port` | §1.1 | `App mode production` [defaults.ini:L7]; `[::]:3000` [defaults.ini:L41] |
-| 53 | Version string `9.2.0` (observed vs `11.5.0-pre`) | §0.4 | banner `version=9.2.0 commit=NA branch=main`; `var version="9.2.0"` [main.go:L17] |
+| 53 | Version string `9.2.0` (observed vs `11.5.0-pre`) | §0.4 | banner `version=9.2.0 commit=NA branch=main`; `var version="9.2.0"` [pkg/cmd/grafana/main.go:L17] |
 
 ### Verdict
 
