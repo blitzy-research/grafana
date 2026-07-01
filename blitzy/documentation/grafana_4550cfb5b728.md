@@ -206,11 +206,13 @@ The relevant JavaScript coercion is relational: `'' >= 0` evaluates to `true`.
 Threshold steps `[-Infinity → red, 0 → green, 50 → blue]`:
 
 ```
-OBS-E_THRESHOLD input="" -> step.value=0 color=green  ( ''>=0 is true )
-OBS-E_THRESHOLD input=0 -> step.value=0 color=green  ( ''>=0 is true )
-OBS-E_THRESHOLD input=-5 -> step.value=-Infinity color=red  ( ''>=0 is true )
-OBS-E_THRESHOLD input=30 -> step.value=0 color=green  ( ''>=0 is true )
+OBS-E_THRESHOLD input="" -> step.value=0 color=green
+OBS-E_THRESHOLD input=0 -> step.value=0 color=green
+OBS-E_THRESHOLD input=-5 -> step.value=-Infinity color=red
+OBS-E_THRESHOLD input=30 -> step.value=0 color=green
 ```
+
+(The reason `''` lands on the `0` step is the relational coercion `'' >= 0 === true`, confirmed independently in the pure-JavaScript proofs of Q4 — see `OBS-G` below. That coercion is not printed on the threshold lines themselves; it is stated here in prose so the block above remains the exact, unaltered runner output.)
 
 Reading these lines:
 
@@ -339,11 +341,11 @@ On screen, the absent `''` cells render **blank** (`text=""`), while the present
 Observed (verbatim), from Q3.2 / Q3.3:
 
 ```
-OBS-E_THRESHOLD input="" -> step.value=0 color=green  ( ''>=0 is true )
+OBS-E_THRESHOLD input="" -> step.value=0 color=green
 OBS-F_SCALE input="" -> percent=0 threshold.value=0 color=#73BF69
 ```
 
-For the same `''` cells, thresholds and color scales treat the value as **zero**: the `0 → green` step is activated and the color is `#73BF69` (green) — identical to a genuine `0`.
+For the same `''` cells, thresholds and color scales treat the value as **zero**: the `0 → green` step is activated and the color is `#73BF69` (green) — identical to a genuine `0`. (Both outcomes trace to `''` coercing to `0` under `>=` and `-`; the underlying JavaScript coercion is proven separately in Q4's `OBS-G` lines.)
 
 ### Step 5 — contrast with the `Null` fill option (closest to "missing means zero")
 
