@@ -210,7 +210,7 @@ type healthResponse struct {
 }
 ```
 
-It is produced by the handler `apiHealthHandler` at **`pkg/api/http_server.go:L710`**, registered as middleware via `m.Use(hs.apiHealthHandler)` at **`pkg/api/http_server.go:L634`**. The handler initializes `Database: "ok"`, then fills `Version`/`Commit` (gated by `if !hs.Cfg.Anonymous.HideVersion` at **`:L718`**, from `hs.Cfg.BuildVersion`/`hs.Cfg.BuildCommit` at **`:L719-L720`**), and finally serializes with `json.MarshalIndent(data, "", "  ")` at **`pkg/api/http_server.go:L736`** — the `"  "` indent is exactly why the body is pretty-printed with two-space indentation and why `Content-Length` is `62`.
+It is produced by the handler `apiHealthHandler` at **`pkg/api/http_server.go:L710`**, registered as middleware via `m.Use(hs.apiHealthHandler)` at **`pkg/api/http_server.go:L634`**. The handler initializes `Database: "ok"`, then fills `Version`/`Commit` (gated by `if !hs.Cfg.Anonymous.HideVersion` at **`:L719`**, from `hs.Cfg.BuildVersion`/`hs.Cfg.BuildCommit` at **`:L720-L721`**), and finally serializes with `json.MarshalIndent(data, "", "  ")` at **`pkg/api/http_server.go:L736`** — the `"  "` indent is exactly why the body is pretty-printed with two-space indentation and why `Content-Length` is `62`.
 
 ### What the `database` field is really telling you
 
