@@ -45,7 +45,14 @@ Accordingly, the investigation **modified no existing repository file**. It ran 
 ### A.2 Toolchain (installed in the investigation environment only — not a repository change)
 
 - **Go `1.23.1`** — the pinned backend toolchain. The `go` directive is at `go.mod:L3` (`go 1.23.1`). Note that `go.mod:L1` is `module github.com/grafana/grafana`, *not* the version directive.
-- **GCC `13.3.0`** (`build-essential`) — required because the default datastore is SQLite via the CGO driver `github.com/mattn/go-sqlite3`. `contribute/developer-guide.md:L135` states: "The Grafana backend includes SQLite, a database which requires GCC to compile." The CGO dependency is forced concretely by the reference to `sqlite3.ErrConstraintUnique` at `pkg/services/sqlstore/migrator/sqlite_dialect.go:L154`.
+- **GCC (`build-essential`)** — required because the default datastore is SQLite via the CGO driver `github.com/mattn/go-sqlite3`. The exact compiler version is **environment-dependent** — any GCC / `build-essential` satisfies the requirement. The toolchain actually observed in this investigation environment was:
+
+  ```
+  $ gcc --version
+  gcc (Ubuntu 15.2.0-4ubuntu4) 15.2.0
+  ```
+
+  `contribute/developer-guide.md:L135` states: "The Grafana backend includes SQLite, a database which requires GCC to compile." The CGO dependency is forced concretely by the reference to `sqlite3.ErrConstraintUnique` at `pkg/services/sqlstore/migrator/sqlite_dialect.go:L154`.
 - **Node `v22.11.0`** — pinned by `.nvmrc`. The **frontend is out of scope**; it was neither built nor served. (Its absence is itself observable — see the static-asset ERROR in [Section B](#section-b--initialization-ground-truth-q1) and [Section F](#section-f--build-and-generated-files-dependency-q5).)
 
 ### A.3 Exact build and run sequence
@@ -163,7 +170,7 @@ logger=plugin.backgroundinstaller level=error msg="Failed to install plugin" plu
 - **`msg="Creating SQLite database file" path=.../grafana.db`** — `pkg/services/sqlstore/sqlstore.go:L265`. This line appears **only because the database file does not yet exist** (this is the first run). On subsequent runs it is absent — see [Section G](#section-g--first-run-vs-subsequent-runs-q6).
 - **`msg="Locking database"` / `"Starting DB migrations"` / `"migrations completed" performed=626 skipped=0` / `"Unlocking database"`** — in `pkg/services/sqlstore/migrator/migrator.go` at `L216` / `L247` / `L287` / `L229` respectively. On a clean database all **626** migrations are *performed* (`skipped=0`) in `duration=1.594404517s`.
 - **`msg="Created default admin" user=admin` + `msg="Created default organization"`** — from `ensureMainOrgAndAdminUser` in `pkg/services/sqlstore/sqlstore.go` (starts at `L190`). This seeding is what makes the "unexplained" login possible; it is dissected in [Section D](#section-d--security-posture-q3).
-- **`provisioning.alerting` / `provisioning.dashboard` "starting/finished to provision" pairs`** — from `pkg/services/provisioning/provisioning.go` (`RunInitProvisioners` at `L169`). They **finish instantly having created nothing** because the only provisioning inputs are the `conf/provisioning/**/sample.yaml` files, which contain solely `apiVersion: 1` with otherwise fully commented-out bodies. This is precisely why several subsystems *log activity yet create no data*.
+- **`provisioning.alerting` / `provisioning.dashboard` "starting/finished to provision" pairs`** — from `pkg/services/provisioning/provisioning.go` (`RunInitProvisioners` at `L169`, which invokes `ProvisionDatasources` at `L170`, `ProvisionPlugins` at `L176`, and `ProvisionAlerting` at `L182`). They **finish instantly having created nothing** because the provisioning inputs for these paths — `conf/provisioning/{datasources,plugins,alerting,dashboards}/sample.yaml` — each begin with an active `apiVersion: 1` (at `L2`) followed by an otherwise fully commented-out body, so there is nothing to apply. (The one remaining sample, `conf/provisioning/access-control/sample.yaml`, is **fully commented** — including its `# apiVersion: 2` line at `L3` — so it declares no active configuration at all.) This is precisely why several subsystems *log activity yet create no data*.
 - **`msg="HTTP Server Listen" address=[::]:3000 protocol=http`** — `pkg/api/http_server.go:L434`. Port `3000` comes from `conf/defaults.ini:L41` (`http_port = 3000`) and `protocol=http` from `L32` (`protocol = http`).
 
 ### B.3 Why subsystems log "disabled"/"skipped"/ERROR yet the server still starts
@@ -203,7 +210,8 @@ Note: although `data/plugins` is reported as `"Path Plugins"` in the startup log
 The live server holds a write lock on `grafana.db` and the `sqlite3` CLI is not present, so the database was inspected by **copying** the file and opening the copy with Python's `sqlite3` module — an observation-only technique that does not touch the live database. The copy contained **76 tables**. The seeded rows on first run were:
 
 ```
-migration_log : 626 rows      (one per applied migration; equals performed=626)
+migration_log          : 626 rows   (one per applied main migration;          equals migrator performed=626)
+resource_migration_log :  18 rows   (one per applied resource-store migration; equals resource-migrator performed=18)
 user          : 1 row  -> (id=1, login='admin', email='admin@localhost', is_admin=1, org_id=1)
 org           : 1 row  -> (id=1, name='Main Org.')
 org_user      : 1 row  -> (org_id=1, user_id=1, role='Admin')
@@ -218,11 +226,12 @@ team          : 0 rows
 
 ### C.3 Why subsequent runs differ — the persistent state that matters
 
-The state that makes later runs behave differently is exactly three things, all captured above:
+The state that makes later runs behave differently is exactly four things, all captured above:
 
 1. **The `grafana.db` file exists** — so the `"Creating SQLite database file"` line (from `pkg/services/sqlstore/sqlstore.go:L265`) does not recur.
-2. **All 626 migrations are recorded** in `migration_log` — so migrations flip from `performed=626 skipped=0` to `performed=0 skipped=626`.
-3. **The admin user and Main Org. are seeded** — so `ensureMainOrgAndAdminUser` (`pkg/services/sqlstore/sqlstore.go:L190`) has nothing to create and the `"Created default admin"` / `"Created default organization"` lines do not recur.
+2. **All 626 main migrations are recorded** in `migration_log` — so the main migrator flips from `performed=626 skipped=0` to `performed=0 skipped=626`.
+3. **All 18 resource-store migrations are recorded** in the *separate* `resource_migration_log` table — so the `resource-migrator` flips from `performed=18 skipped=0` to `performed=0 skipped=18`. The two migrators keep **distinct** log tables: the main migrator uses `migration_log` and the scoped resource migrator uses `resource_migration_log` (`pkg/services/sqlstore/migrator/migrator.go:L97` vs. `L100`).
+4. **The admin user and Main Org. are seeded** — so `ensureMainOrgAndAdminUser` (`pkg/services/sqlstore/sqlstore.go:L190`) has nothing to create and the `"Created default admin"` / `"Created default organization"` lines do not recur.
 
 These persist across stop/restart because they live in `grafana.db` on disk, which is why the first-run-vs-subsequent-run divergence in [Section G](#section-g--first-run-vs-subsequent-runs-q6) is entirely explained by this section.
 
@@ -352,7 +361,12 @@ Plugin sources are resolved by `pkg/plugins/manager/sources/sources.go` in `func
 
 ### E.4 Reconciling the numbers honestly (54 loaded vs. 49 exposed)
 
-The runtime log reports **`count=54`** plugins loaded (= 22 datasource + 32 panel core directories on disk), while **`/api/plugins` exposes 49** (30 panel + 19 datasource, 0 app). The difference is internal/hidden plugins — for example the built-in `mixed` / `dashboard` / `grafana` datasources — that are loaded but not surfaced through the API. Both numbers are reported exactly as observed rather than reconciled to a single figure.
+The runtime log reports **`count=54`** plugins loaded (= 22 datasource + 32 panel core directories on disk), while **`/api/plugins` exposes 49** (30 panel + 19 datasource, 0 app). The **5-plugin difference is fully accounted for by two filters** in the `GET /api/plugins` handler in `pkg/api/plugins.go`:
+
+- **3 built-in datasources are filtered out** by `if pluginDef.BuiltIn { continue }` at `pkg/api/plugins.go:L110`. These are exactly the three datasources whose `plugin.json` sets `"builtIn": true` — **`dashboard`, `grafana`, `mixed`** — so 22 datasource directories become 19 exposed.
+- **2 alpha-state panels are filtered out** by `if pluginDef.State == plugins.ReleaseStateAlpha && !hs.Cfg.PluginsEnableAlpha { continue }` at `pkg/api/plugins.go:L105`. These are the two panels whose `plugin.json` sets `"state": "alpha"` — **`debug`** (`public/app/plugins/panel/debug/plugin.json:L6`) and **`live`** (`public/app/plugins/panel/live/plugin.json:L8`) — filtered because `PluginsEnableAlpha` is `false` by default, so 32 panel directories become 30 exposed.
+
+That reconciles the numbers exactly: `54 − 3 (built-in datasources) − 2 (alpha panels) = 49`. Both figures are reported exactly as observed, and every one of the five non-exposed plugins is now accounted for.
 
 ### E.5 Why plugins you never installed appear
 
@@ -385,11 +399,9 @@ The target URL is `grafanaStableVersionURL = "https://grafana.com/api/grafana/ve
 
 **Q5 asks:** *There appear to be generated files the runtime depends on. Is running the server "directly" equivalent to building first? Are there artifacts that must exist before certain code paths work correctly?*
 
-### F.1 Short answer
+### F.1 The observed compile failure before generation (the evidence)
 
-**No — running "directly" is not equivalent to a working build.** A clean checkout will not even compile until the Wire dependency-injection code is generated, and it needs CGO for SQLite. There are two distinct "generated files" dependencies: **Wire code at compile time**, and **frontend assets at UI runtime**.
-
-### F.2 The observed compile failure before generation (lead with the evidence)
+A clean checkout does **not** compile. Building it directly — before generating any code — fails immediately:
 
 ```
 $ CGO_ENABLED=1 go build -tags oss -o /tmp/grafana-bin ./pkg/cmd/grafana
@@ -397,14 +409,31 @@ $ CGO_ENABLED=1 go build -tags oss -o /tmp/grafana-bin ./pkg/cmd/grafana
 pkg/server/service.go:31:15: undefined: Initialize
 ```
 
-Then generation succeeds:
+Generating the Wire dependency-injection code then succeeds:
 
 ```
 $ go run ./pkg/build/wire/cmd/wire/main.go gen -tags oss ./pkg/server
 wire: github.com/grafana/grafana/pkg/server: wrote /.../pkg/server/wire_gen.go
 ```
 
-After generation, the build succeeds — approximately **39 seconds**, producing a binary of roughly **298 MB**.
+After generation, the *same* build command succeeds. Measured on this run (with a warm Go module and build cache):
+
+```
+$ time CGO_ENABLED=1 go build -tags oss -o /tmp/grafana-bin ./pkg/cmd/grafana
+real	0m21.670s
+user	0m27.062s
+sys	0m13.476s
+$ ls -lh /tmp/grafana-bin
+-rwxr-xr-x 1 root root 285M /tmp/grafana-bin
+$ stat -c '%s bytes' /tmp/grafana-bin
+298085016 bytes
+```
+
+(`ls -lh` reports `285M` in MiB; the exact size `298,085,016` bytes ≈ **298 MB** in decimal. The build duration depends on cache warmth — a cold first build is substantially slower.)
+
+### F.2 Short answer
+
+**No — running "directly" is not equivalent to a working build.** As the evidence above shows, a clean checkout will not even compile until the Wire dependency-injection code is generated, and it needs CGO for SQLite. There are two distinct "generated files" dependencies: **Wire code at compile time**, and **frontend assets at UI runtime** (detailed in F.5).
 
 ### F.3 Why the Wire code is required (and why it is missing from a clean checkout)
 
@@ -463,7 +492,7 @@ logger=http.server msg="HTTP Server Listen" address=[::]:3000 protocol=http
 
 The divergence is **entirely due to the persistent state described in [Section C](#section-c--persistent-state-q2)**:
 
-- **Migrations flip from `performed=626 skipped=0` to `performed=0 skipped=626`** (and the `resource-migrator` from `18` performed to `0` performed / `18` skipped) because the `migration_log` table already records every migration; the migrator reads that log and skips already-applied migrations. This is the completion log line at `pkg/services/sqlstore/migrator/migrator.go:L287`.
+- **The main migrator flips from `performed=626 skipped=0` to `performed=0 skipped=626`** because the `migration_log` table already records every applied migration; the migrator reads that log and skips already-applied migrations. **Separately, the `resource-migrator` flips from `performed=18 skipped=0` to `performed=0 skipped=18`** because it is a *scoped* migrator that keeps its own log in a **distinct** table, `resource_migration_log` — **not** `migration_log`. The scoped migrator sets its table to `scope + "_migration_log"` and its logger to `scope + "-migrator"` at `pkg/services/sqlstore/migrator/migrator.go:L100-L101`, with `scope = "resource"` supplied by `NewScopedMigrator(engine, cfg, "resource")` at `pkg/storage/unified/sql/db/migrations/migrator.go:L15`. Both migrators emit the same completion log line at `pkg/services/sqlstore/migrator/migrator.go:L287`.
 - **The `"Creating SQLite database file"` line does not recur** because the file `/tmp/gf-clean/data/grafana.db` already exists (the create path in `pkg/services/sqlstore/sqlstore.go:L265` runs only when the file is absent).
 - **Admin/org seeding does not repeat** because the rows already exist and `ensureMainOrgAndAdminUser` (`pkg/services/sqlstore/sqlstore.go:L190`) is idempotent — verified by re-reading the copied database after run 2: `user` = 1 row and `org` = 1 row, unchanged.
 - **Plugin loading and HTTP listen are stateless and therefore identical** across both runs (`count=54`, `address=[::]:3000`).
@@ -483,10 +512,10 @@ All six sub-questions are explicitly answered, each in its own section, and each
 | Sub-question | Section | Key observed evidence |
 |--------------|---------|-----------------------|
 | **Q1** — Initialization ground truth | [Section B](#section-b--initialization-ground-truth-q1) | Full first-run startup log; 56 feature toggles; 36 non-fatal background services; `HTTP Server Listen address=[::]:3000` |
-| **Q2** — Persistent state | [Section C](#section-c--persistent-state-q2) | `grafana.db` (1,093,632 bytes), 76 tables, 626 `migration_log` rows, seeded `user`/`org`/`org_user` |
+| **Q2** — Persistent state | [Section C](#section-c--persistent-state-q2) | `grafana.db` (1,093,632 bytes), 76 tables, 626 `migration_log` + 18 `resource_migration_log` rows, seeded `user`/`org`/`org_user` |
 | **Q3** — Security posture | [Section D](#section-d--security-posture-q3) | `200` health, `401` anonymous, `POST /login` `200` + `grafana_session` cookie, `isGrafanaAdmin:true`; anon off / basic on |
 | **Q4** — Plugin & data-source bootstrap | [Section E](#section-e--plugin-and-data-source-bootstrap-q4) | `Plugins loaded count=54`; `/api/plugins` = 49; 18 compiled-in backends; preinstall `[plugin.grafanaVersionNotCompatible]` |
 | **Q5** — Build / generated-files dependency | [Section F](#section-f--build-and-generated-files-dependency-q5) | `pkg/server/service.go:31:15: undefined: Initialize`; gitignored `wire_gen.go`; CGO for SQLite |
-| **Q6** — First run vs. subsequent runs | [Section G](#section-g--first-run-vs-subsequent-runs-q6) | Migrations `performed=626 skipped=0` → `performed=0 skipped=626`; no re-seed; `1.594404517s` → `580.623µs` |
+| **Q6** — First run vs. subsequent runs | [Section G](#section-g--first-run-vs-subsequent-runs-q6) | Main migrations `performed=626 skipped=0` → `performed=0 skipped=626` (and `resource-migrator` `18` → `skipped=18`); no re-seed; `1.594404517s` → `580.623µs` |
 
 Section A documents the read-only build/run method. Every value quoted above is reproduced exactly as captured, with its `file:line` source; where a value could not be verified from these runs (the "Database locked" line), that is stated explicitly rather than asserted.
