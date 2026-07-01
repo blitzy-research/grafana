@@ -200,7 +200,7 @@ All line numbers below were verified against the source at HEAD `4550cfb`. Each 
 - The enum has **no `Zero`**: `export enum SpecialValue { True = 'true', False = 'false', Null = 'null', Empty = 'empty' }` at `packages/grafana-data/src/types/transformations.ts:113-118`.
 - The transform editor exposes **only** these four (no `Zero`, no free-text): `specialValueOptions` = `Null`/`True`/`False`/`Empty` at `public/app/features/transformers/editors/GroupingToMatrixTransformerEditor.tsx:61-66`, rendered by the "Empty Value" `<Select>` at `:100-102`.
 - The user-facing docs confirm the same four choices — "…you can select which value to display between: **Null**, **True**, **False**, or **Empty**" at `docs/sources/panels-visualizations/query-transform-data/transform-data/index.md:665` (section `### Grouping to matrix`, `:653`).
-- The fill logic above is the one that actually runs because `groupingToMatrix` is a **standard, built-in** transformer (not a plugin): it is imported at `packages/grafana-data/src/transformations/transformers.ts:13` and included in the `standardTransformers` registry array at `transformations/transformers.ts:56`.
+- The fill logic above is the one that actually runs because `groupingToMatrix` is a **standard, built-in** transformer (not a plugin): it is imported at `packages/grafana-data/src/transformations/transformers.ts:13` and included in the `standardTransformers` registry object at `transformations/transformers.ts:56`.
 
 **Subtlety worth stating:** because the operator is `??` (nullish coalescing) at `groupingToMatrix.ts:117`, a _genuine_ `null` already present in the source is **also** replaced by the empty value — not only structurally-absent combinations.
 
