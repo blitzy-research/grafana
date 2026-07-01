@@ -499,9 +499,18 @@ The divergence is **entirely due to the persistent state described in [Section C
 
 Also note the dramatic duration drop for the main migration step, from `1.594404517s` on the first run to `580.623µs` on the second — because migration work is replaced by a cheap "already applied" check.
 
-### G.3 Honesty note: the "Database locked" line was not observed
+### G.3 A transient "Database locked" line can appear on the write-heavy clean run
 
-The log line `"Database locked, sleeping then retrying"` exists in the source at `pkg/services/sqlstore/transactions.go:L74`, but it was **not observed** in these runs (0 occurrences). These were clean, single-process runs; that line requires **concurrent write contention** on the SQLite file (multiple writers), which did not occur here. It is mentioned only to be explicit that it was *not* triggered — it is **not** presented as observed output from this investigation.
+A clean first run **can** emit a benign SQLite write-contention line. It is **timing-dependent** — it did not appear in every capture, but it was observed **twice** in one clean, single-process first run:
+
+```
+logger=sqlstore.transactions t=2026-07-01T06:42:23.756796554Z level=info msg="Database locked, sleeping then retrying" error="database is locked" retry=0 code="database is locked"
+logger=sqlstore.transactions t=2026-07-01T06:42:25.968834244Z level=info msg="Database locked, sleeping then retrying" error="database is locked" retry=0 code="database is locked"
+```
+
+The line is emitted at `pkg/services/sqlstore/transactions.go:L74`. The enclosing logic at `pkg/services/sqlstore/transactions.go:L68` retries the transaction whenever SQLite returns `sqlite3.ErrLocked`/`sqlite3.ErrBusy`, up to `TransactionRetries` attempts — default `5`, set at `pkg/services/sqlstore/database_config.go:L121` (the source comment "then we can retry 5 times" is at `pkg/services/sqlstore/transactions.go:L66`). The cause is structural: the default datastore is a **single SQLite file** (see [Section C](#section-c--persistent-state-q2)), and the clean first run issues a burst of **concurrent writes** — migrations, admin/org seeding, and background services all writing as they start — so one writer can briefly hold the file while another attempts to write. The second writer sleeps 10 ms and retries.
+
+It is **benign and non-fatal**. In the run above, the first occurrence appears *immediately after* `HTTP Server Listen` (logged one line earlier), and that same run still completed all `626` migrations, seeded the default admin and organization, and loaded `54` plugins; a live clean run also served `GET /api/health` with `200` and body `{"database":"ok","version":"9.2.0","commit":"NA"}` (see [Section D](#section-d--security-posture-q3)). It also appears during shutdown — one of the two lines above was emitted as the server was terminating. It is therefore reported here as **observed, transient, and expected** — quoted from the run in which it occurred — not as a guaranteed startup line and not as an error. Its count varied from run to run: three clean runs in this investigation produced `0`, `1`, and `2` of these lines respectively, which is exactly why it is described as timing-dependent.
 
 ---
 
@@ -518,4 +527,4 @@ All six sub-questions are explicitly answered, each in its own section, and each
 | **Q5** — Build / generated-files dependency | [Section F](#section-f--build-and-generated-files-dependency-q5) | `pkg/server/service.go:31:15: undefined: Initialize`; gitignored `wire_gen.go`; CGO for SQLite |
 | **Q6** — First run vs. subsequent runs | [Section G](#section-g--first-run-vs-subsequent-runs-q6) | Main migrations `performed=626 skipped=0` → `performed=0 skipped=626` (and `resource-migrator` `18` → `skipped=18`); no re-seed; `1.594404517s` → `580.623µs` |
 
-Section A documents the read-only build/run method. Every value quoted above is reproduced exactly as captured, with its `file:line` source; where a value could not be verified from these runs (the "Database locked" line), that is stated explicitly rather than asserted.
+Section A documents the read-only build/run method. Every value quoted above is reproduced exactly as captured, with its `file:line` source. Where a value is **timing-dependent** rather than deterministic — such as the transient "Database locked, sleeping then retrying" contention line covered in [Section G](#section-g--first-run-vs-subsequent-runs-q6) — it is called out explicitly and quoted from the run in which it was observed, rather than presented as a guaranteed startup line.
