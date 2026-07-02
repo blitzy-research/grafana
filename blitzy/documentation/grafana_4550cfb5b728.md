@@ -36,7 +36,7 @@ So the strict 60-second idle window is **[T, T+60s] = [2026-07-01T23:16:39.85360
 
 ### Sub-answer 1a — Within a STRICT ≥60-second idle window (report honestly)
 
-**Claim: within the strict 60-second window no log entry *recurs* — every line in the window is a one-time startup or first-fire entry.** Producing command (timestamp-filter the captured console log to the window `[T, T+60s]`):
+**Claim: within the strict 60-second window, no *periodic / timer-driven background* Info entry recurs — every line is a one-time startup or first-fire entry, with the sole exception of an identical `resource-server` warning that is emitted three times as a one-time startup burst (a repeated startup warning, not a periodic background entry).** Producing command (timestamp-filter the captured console log to the window `[T, T+60s]`):
 
 ```
 $ awk -v lo="2026-07-01T23:16:39.853607253Z" -v hi="2026-07-01T23:17:39.853607253Z" \
@@ -66,7 +66,7 @@ logger=app-registry t=2026-07-01T23:16:40.086875976Z level=info msg="app registr
 logger=infra.usagestats t=2026-07-01T23:17:10.854219023Z level=info msg="Usage stats are ready to report"
 ```
 
-Every one of these 17 lines is a distinct **one-time** event: the HTTP listen line, the alerting scheduler/ticker start, the **first** fire of each of the two update-checkers, six API-server `GroupVersion` registrations, three (distinct) resource-server warnings, `app registry initialized`, and a single `Usage stats are ready to report` readiness line at T+31.0s. **None of these repeats within the window.** To prove the periodic services do not recur inside the window, count their occurrences in `[T, T+60s]`:
+All 17 of these lines are **startup-phase** entries, and — critically for this question — **none is a periodic / timer-driven recurring background entry** (the sense of "recurring" that matters for an idle server). Fourteen of them appear exactly once: the HTTP listen line, the alerting state-cache initialization, the scheduler and ticker start lines, the **first** fire of each of the two update-checkers, six API-server `GroupVersion` registrations, `app registry initialized`, and a single `Usage stats are ready to report` readiness line at T+31.0s. The remaining three — the `logger=resource-server ... msg="failed to register storage metrics"` lines — are **byte-for-byte identical** (differing only in their timestamp) and constitute a one-time **startup warning burst**: all three are emitted within ~0.0002s of one another at ≈T+0.21s during storage initialization, and the message never appears again anywhere in the run. That burst is therefore a *repeated startup warning*, **not** a periodic/recurring background entry. In short, **no background service logs on a timer more than once within the window.** To prove the periodic services do not recur inside the window, count their occurrences in `[T, T+60s]`:
 
 ```
 $ for lg in cleanup plugins.update.checker grafana.update.checker; do
@@ -79,7 +79,7 @@ logger=plugins.update.checker  count_in_window=1
 logger=grafana.update.checker  count_in_window=1
 ```
 
-That is: `cleanup` has **not fired at all** yet (its first `Completed cleanup jobs` is at T+600s, see 1b); each update-checker shows exactly its **single startup fire** — neither has recurred. So within a strict 60-second idle window **no entry recurs**; the shortest recurrence cadence is 10 minutes (1b). This is reported exactly as observed.
+That is: `cleanup` has **not fired at all** yet (its first `Completed cleanup jobs` is at T+600s, see 1b); each update-checker shows exactly its **single startup fire** — neither has recurred. So within a strict 60-second idle window **no periodic / timer-driven background entry recurs** (the only repetition present is the one-time `resource-server` startup warning burst noted above, which is not a background-service tick); the shortest background-service recurrence cadence is 10 minutes (1b). This is reported exactly as observed.
 
 **Zero inbound HTTP requests during the window (proof).** Count request-completion log lines (emitted at Info by `pkg/middleware/loggermw/logger.go:L84` when `router_logging=true`) inside `[T, T+60s]`:
 
@@ -339,7 +339,7 @@ Rationale: opening the edit view computes the form's default values directly fro
 
 Confirmation that each named item is answered and where:
 
-- **Q1 — recurring log entries (idle ≥60s):** answered — strict-60s window shows no recurrence (1a); true recurrence is two 10-min entries: `cleanup` `"Completed cleanup jobs"` and `plugins.update.checker` `"Update check succeeded"` (1b); non-recurring one-time lines disambiguated (1c). Responsible code cited (`pkg/services/cleanup/cleanup.go:L80,L128`; `pkg/services/updatechecker/plugins.go:L78,L123`; `pkg/server/server.go:L139-L180`).
+- **Q1 — recurring log entries (idle ≥60s):** answered — strict-60s window shows no periodic / timer-driven background recurrence (1a; the only repeated line is a one-time `resource-server` startup warning burst, not a background-service tick); true recurrence is two 10-min entries: `cleanup` `"Completed cleanup jobs"` and `plugins.update.checker` `"Update check succeeded"` (1b); non-recurring one-time lines disambiguated (1c). Responsible code cited (`pkg/services/cleanup/cleanup.go:L80,L128`; `pkg/services/updatechecker/plugins.go:L78,L123`; `pkg/server/server.go:L139-L180`).
 - **Q2 — "schema version up to date":** answered — two-run technique; `"Starting DB migrations"` (`pkg/services/sqlstore/migrator/migrator.go:L247`) and `"migrations completed" performed=0 skipped=626` on the second start (`pkg/services/sqlstore/migrator/migrator.go:L287`).
 - **Q3 — the exact `version` string:** answered — `11.5.0-pre` from `curl -si http://localhost:3000/api/health` (with `commit=4550cfb5b7`); provenance explained and the fallback `9.2.0` proven; responsible code cited (`pkg/api/http_server.go:L719-L721`, `pkg/cmd/grafana/main.go:L17`, `pkg/build/cmd.go:L247`, `pkg/setting/setting.go:L1076`).
 - **Q4 — picker resolves to the panel's datasource + which code is responsible:** answered — jest `PASS` of `'should load data source'`; responsible: `PanelDataQueriesTab.loadDataSource()` reading `this.queryRunner.state.datasource` (`public/app/features/dashboard-scene/panel-edit/PanelDataPane/PanelDataQueriesTab.tsx:L63,L71,L101-L106`).
