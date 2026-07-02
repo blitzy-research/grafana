@@ -496,9 +496,9 @@ Reconciling the counts (all real, no estimates):
 
 - **49 via `/api/plugins`** = 30 panel + 19 datasource, all `signature=internal`.
 - **54 loaded** (store log) = the **22** datasource frontend dirs + **32** panel frontend dirs on disk *(commands: `find public/app/plugins/datasource -maxdepth 1 -mindepth 1 -type d | wc -l` → `22`; `find public/app/plugins/panel -maxdepth 1 -mindepth 1 -type d | wc -l` → `32`; so `22 + 32 = 54`)*.
-- The **5** loaded but **not** listed by `/api/plugins` are removed by two explicit filters in the API handler: (a) the **built‑in filter** `if pluginDef.BuiltIn { continue }` [pkg/api/plugins.go:L109-L111] drops the **3 built‑in datasources** `dashboard`, `grafana`, `mixed` (each has `builtIn: true` in its `plugin.json`; they are surfaced instead in `/api/frontend/settings` as `-- Dashboard --`, `-- Grafana --`, `-- Mixed --`); and (b) the **alpha filter** `if pluginDef.State == plugins.ReleaseStateAlpha && !hs.Cfg.PluginsEnableAlpha { continue }` [pkg/api/plugins.go:L105-L107] drops the **2 alpha panels** `debug` and `live` (each has `state: alpha`, and `PluginsEnableAlpha` is `false` by default — `enable_alpha = false` [conf/defaults.ini:L1741], read via `pluginsSection.Key("enable_alpha").MustBool(false)` [pkg/setting/setting_plugins.go:L39]). So **32 panel dirs − 2 alpha = 30** listed, and **22 datasource dirs − 3 built‑in = 19** listed → **30 + 19 = 49**.
+- The **5** loaded but **not** listed by `/api/plugins` are removed by two explicit filters in the API handler: (a) the **built‑in filter** `if pluginDef.BuiltIn { continue }` [pkg/api/plugins.go:L110-L111] drops the **3 built‑in datasources** `dashboard`, `grafana`, `mixed` (each has `builtIn: true` in its `plugin.json`; they are surfaced instead in `/api/frontend/settings` as `-- Dashboard --`, `-- Grafana --`, `-- Mixed --`); and (b) the **alpha filter** `if pluginDef.State == plugins.ReleaseStateAlpha && !hs.Cfg.PluginsEnableAlpha { continue }` [pkg/api/plugins.go:L105-L107] drops the **2 alpha panels** `debug` and `live` (each has `state: alpha`, and `PluginsEnableAlpha` is `false` by default — `enable_alpha = false` [conf/defaults.ini:L1741], read via `pluginsSection.Key("enable_alpha").MustBool(false)` [pkg/setting/setting_plugins.go:L39]). So **32 panel dirs − 2 alpha = 30** listed, and **22 datasource dirs − 3 built‑in = 19** listed → **30 + 19 = 49**.
 - Note the two datasource dirs `azuremonitor` and `cloud-monitoring` **are** in the API list, under their canonical plugin IDs `grafana-azure-monitor-datasource` and `stackdriver` respectively (so they are not part of the 5‑plugin gap).
-- **Reconciling the 19 API datasource plugins with the 18 compiled‑in backend map** (§4.3, `NewRegistry(map[...])` [pkg/plugins/backendplugin/coreplugin/registry.go:L102-L121]): a set‑difference of the two lists shows **17** IDs are in **both**. The one backend‑map entry that is **absent** from the API list is `grafana` [pkg/plugins/backendplugin/coreplugin/registry.go:L117] — because the built‑in filter [pkg/api/plugins.go:L109-L111] removes the built‑in `grafana` datasource from `/api/plugins` (it is served as `-- Grafana --` in `/api/frontend/settings`). The two API datasource IDs that are **not** in the 18‑map are `alertmanager` and `jaeger` — proxy/frontend‑handled datasource plugins that have no entry in the compiled‑in backend factory map. Hence `17 (in both) + 2 (alertmanager, jaeger, API‑only) = 19` API datasource plugins, and `17 (in both) + 1 (grafana, backend‑map‑only, filtered) = 18` backend‑map entries *(command: set‑difference of the `/api/plugins` datasource IDs vs the 18 map keys)*.
+- **Reconciling the 19 API datasource plugins with the 18 compiled‑in backend map** (§4.3, `NewRegistry(map[...])` [pkg/plugins/backendplugin/coreplugin/registry.go:L102-L121]): a set‑difference of the two lists shows **17** IDs are in **both**. The one backend‑map entry that is **absent** from the API list is `grafana` [pkg/plugins/backendplugin/coreplugin/registry.go:L117] — because the built‑in filter [pkg/api/plugins.go:L110-L111] removes the built‑in `grafana` datasource from `/api/plugins` (it is served as `-- Grafana --` in `/api/frontend/settings`). The two API datasource IDs that are **not** in the 18‑map are `alertmanager` and `jaeger` — proxy/frontend‑handled datasource plugins that have no entry in the compiled‑in backend factory map. Hence `17 (in both) + 2 (alertmanager, jaeger, API‑only) = 19` API datasource plugins, and `17 (in both) + 1 (grafana, backend‑map‑only, filtered) = 18` backend‑map entries *(command: set‑difference of the `/api/plugins` datasource IDs vs the 18 map keys)*.
 
 The 19 datasource plugin IDs and 30 panel plugin IDs returned by the API *(command: `curl -sS -u admin:admin http://localhost:3000/api/plugins`)*:
 
@@ -569,10 +569,16 @@ wire: github.com/grafana/grafana/pkg/server: wrote /tmp/blitzy/grafana/blitzy-67
 Proof it is generated/untracked *(commands: `head -5 pkg/server/wire_gen.go`, `git check-ignore -v pkg/server/wire_gen.go`, `git ls-files pkg/server/wire_gen.go`)*:
 
 ```text
+$ head -5 pkg/server/wire_gen.go
 // Code generated by Wire. DO NOT EDIT.
+
+//go:generate go run -mod=mod github.com/google/wire/cmd/wire gen -tags "oss"
 //go:build !wireinject
-.gitignore:194:**/wire_gen.go   pkg/server/wire_gen.go
-(git ls-files → empty: not tracked)
+// +build !wireinject
+$ git check-ignore -v pkg/server/wire_gen.go
+.gitignore:194:**/wire_gen.go	pkg/server/wire_gen.go
+$ git ls-files pkg/server/wire_gen.go
+(empty output — not tracked)
 ```
 
 ### 5.2 Frontend assets are NOT embedded — the runtime depends on `public/build`
@@ -671,6 +677,8 @@ The divergence is visible even in raw size: run 1 produced **1354** log lines; t
     61 run2.log
   1415 total
 ```
+
+> **On the exact counts:** these totals are timing‑dependent *representative magnitudes*, not fixed constants. The first‑run count varies by a few lines run‑to‑run (observed range ≈**1351–1356**) depending on the concurrent background‑service startup ordering and on whether the graceful‑shutdown lines have been flushed when the count is taken; the restart count varies by ±1 (e.g. **62**). The stable, reproducible signal is the ≈**22×** reduction on restart — not the exact line totals.
 
 This is the concrete, persistent difference the user observed: the first run builds the schema and seeds the admin/org; every later run finds that state already in `data/` and short‑circuits both.
 
