@@ -34,7 +34,7 @@ To avoid touching the repository's own (git‑ignored) `data/` directory, the cl
 |---|---|---|
 | Source commit under investigation | `4550cfb5b7` | `git log --oneline -1 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` → `4550cfb5b7 Upgrade scenes to v5.32.0 (#97944)` |
 | Source branch (name only) | `grafana_4550cfb5b728` | Derived from the source branch name; this is the identity the document answers for. The **delivery/working branch of this tree differs** — see next row. |
-| Delivery / working branch (this tree) | `blitzy-675536c4-a297-4fe3-88d1-6213344dc49c` @ `41bc342961` | `git rev-parse --abbrev-ref HEAD` → `blitzy-675536c4-a297-4fe3-88d1-6213344dc49c`; `git rev-parse --short HEAD` → `41bc342961` (these commands report the delivery branch/commit, **not** the source commit above) |
+| Delivery / working branch (this tree) | `blitzy-675536c4-a297-4fe3-88d1-6213344dc49c` (working tree; the delivery HEAD advances with each commit that lands a review fix, so no fixed short hash is pinned here) | `git rev-parse --abbrev-ref HEAD` → `blitzy-675536c4-a297-4fe3-88d1-6213344dc49c` (reproduces; reports the mutable delivery branch name, **not** the fixed source commit above — the delivery commit itself is intentionally not pinned, because a document cannot cite the hash of the commit that revises it) |
 | Repo version | `11.5.0-pre` | `grep '"version"' package.json` → `  "version": "11.5.0-pre",` |
 | Go | `go1.23.1 linux/amd64` | `go version` |
 | Node.js | `v22.12.0` | `node --version` |
@@ -128,7 +128,7 @@ Everything else in this document (paths, migrations, users, plugins, headers, DB
 
 ### 1.1 Entry point → lifecycle
 
-The unified binary's entry point is `func main()` [pkg/cmd/grafana/main.go:L23], which registers the server subcommand `commands.ServerCommand(...)` [pkg/cmd/grafana/main.go:L47]. The `--homepath` flag "defaults to working directory" [pkg/cmd/grafana-server/commands/flags.go:L35-L36] and is threaded into config via `setting.NewCfgFromArgs{HomePath: HomePath}` [pkg/cmd/grafana-server/commands/cli.go:L96-L98].
+The unified binary's entry point is `func main()` [pkg/cmd/grafana/main.go:L23], which registers the server subcommand `commands.ServerCommand(...)` [pkg/cmd/grafana/main.go:L47]. The `--homepath` flag "defaults to working directory" [pkg/cmd/grafana-server/commands/flags.go:L35-L36] and is threaded into config via `setting.NewCfgFromArgs(setting.CommandLineArgs{HomePath: HomePath})` [pkg/cmd/grafana-server/commands/cli.go:L96-L98].
 
 The server object then runs a deterministic lifecycle in `pkg/server/server.go`:
 
