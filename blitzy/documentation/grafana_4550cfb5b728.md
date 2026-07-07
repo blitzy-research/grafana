@@ -25,6 +25,17 @@
 | **Environment** | Canonical Docker container `andrewparkscaleai/coding-agent:grafana__grafana__4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`. **Network was reachable** in this run (see the honest note in Requirement 1). |
 | **Non-interactive execution** | Jest run with `--ci --watchAll=false` (plus `--verbose` for per-test names); the server was backgrounded and stopped with `kill` after each capture. |
 
+**Build note (read-only fidelity).** The canonical build target above is `make build`, which produces
+the ldflags-stamped `version=11.5.0-pre` reported throughout Requirement 3. One subtlety matters for
+reproducers who must keep the tracked tree byte-for-byte unchanged: literal `make build` → `build-go`
+runs `update-workspace` (`Makefile:187`), i.e. `scripts/go-workspace/update-workspace.sh`, which invokes
+`go mod tidy` (`:11-12`) and `go work sync` (`:20-21`) and would rewrite the tracked `go.mod`/`go.sum`.
+The **identical** stamped binary is produced read-only-safely by the compile-only step `go run build.go build`
+(equivalently `make build-go-fast` — `build-go` minus `update-workspace`, `Makefile:191`); it leaves
+`go.mod`/`go.sum` untouched and still reports `version=11.5.0-pre`. Either path answers Requirement 3
+identically; this investigation used the read-only-safe compile step so that **no tracked file was
+modified** (verified: post-build `git status` shows only this deliverable).
+
 **How to read each answer.** Every requirement below follows the same five-part structure:
 **(1)** a direct answer to the question and every named sub-part, **(2)** the exact command(s) that
 produced the evidence, **(3)** the actual, complete, unedited output (in fenced code blocks),
@@ -335,8 +346,15 @@ logger=migrator t=2026-07-06T23:51:43.197265806Z level=info msg="Executing migra
 logger=migrator t=2026-07-06T23:51:43.197426793Z level=info msg="Migration successfully executed" id="add unique index user.login" duration=161.361µs
 ```
 
-The complete run contains **626** such `Executing migration` / `Migration successfully executed`
-pairs (see Appendix A). Tail (the final lines of the run, verbatim), ending with the closing line:
+The complete run contains **626** `Executing migration` lines (see Appendix A). Of these, **623** are
+each paired with a matching `Migration successfully executed` line; the remaining **3** are instead
+followed by a `level=warn msg="Skipping migration: Already executed, but not recorded in migration log"`
+line, emitted by the condition-not-fulfilled branch of `exec()`
+(`pkg/services/sqlstore/migrator/migrator.go:371`), which `return nil`s without error and so still counts
+toward `performed=626`. (The three conditionally-skipped ids are `drop unique orgID index on
+alert_configuration if exists`, `drop index UQE_dashboard_public_config_uid - v1`, and
+`drop index IDX_dashboard_public_config_org_id_dashboard_uid - v1`; see the `level=warn` lines in
+Appendix A.) Tail (the final lines of the run, verbatim), ending with the closing line:
 
 ```text
 logger=migrator t=2026-07-06T23:51:44.866388604Z level=info msg="Executing migration" id="remove scope from alert.notifications.receivers:create"
@@ -1167,8 +1185,11 @@ This is the **complete, unedited** `migrator` log from the fresh-DB first run ca
 §2.2/§2.3(b) — every line emitted by `logger=migrator`, in order, from `"Locking database"`
 through the closing `"migrations completed" performed=626 skipped=0` and `"Unlocking database"`.
 It is reproduced in full here so that the abbreviated head/tail excerpt in §2.3(b) is backed by
-the complete evidence (no truncation). Total lines: **1256** (comprising 626
-`Executing migration` + 626 `Migration successfully executed` pairs, plus the four framing lines).
+the complete evidence (no truncation). Total lines: **1256** = 626 `Executing migration` + 623
+`Migration successfully executed` + 3 `Skipping migration: Already executed, but not recorded in
+migration log` (the condition-not-fulfilled path of `exec()`,
+`pkg/services/sqlstore/migrator/migrator.go:371`, still counted toward `performed`) + 4 framing lines
+(`Locking database` / `Starting DB migrations` / `migrations completed` / `Unlocking database`).
 
 Command that produced it (from §2.2):
 
