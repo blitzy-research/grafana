@@ -1,7 +1,7 @@
 # Grouping to matrix: what value is emitted for a missing row/column intersection, and how it propagates downstream
 
 **Repository:** `grafana/grafana`
-**Pinned commit (HEAD):** `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`
+**Pinned baseline commit (under investigation):** `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` — this is the code state the document describes. The answer document is committed as a descendant of this baseline (see §10), so the current `git rev-parse HEAD` returns that child commit, not the baseline.
 **Investigation type:** read-only, run-first codebase Q&A. The only file added to the repository is this document. No existing source, test, configuration, or documentation file was modified.
 
 ---
@@ -34,7 +34,7 @@ The operator's usual intent — "a missing cell means `0`" — is **unreachable 
 
 ## 2. Environment and exact commands
 
-- **Commit (HEAD):** `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` (verified with `git rev-parse HEAD`).
+- **Pinned baseline commit (under investigation):** `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` — this is the code state the document describes, **not** the current `HEAD`. The answer document is committed as a **descendant** of this baseline (see §10), so `git rev-parse HEAD` returns that child commit rather than the baseline; the baseline is verified to be an **ancestor** of `HEAD` with `git merge-base --is-ancestor 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff HEAD` (exit `0`), and the sole delta from the baseline is this answer document (`git diff --name-status 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` → a single `A	blitzy/documentation/grafana_4550cfb5b728.md`).
 - **Node.js:** `v22.12.0` (the repo's `.nvmrc` pins `v22.11.0`; the canonical image ships `v22.12.0`, which satisfies `engines.node` `">= 22"`).
 - **Package manager:** `yarn@4.5.3` (via Corepack).
 - **Test harness:** Jest `29.7.0` with the root `jest.config.js` (jsdom env, `ts-jest`, `process.env.TZ = 'Pacific/Easter'`).
@@ -398,9 +398,9 @@ Notes:
 
 **Context only (no fix introduced or assumed).** This gap is a known, tracked limitation, and the corruption a reported real-world symptom — but the code at the pinned commit is the source of truth:
 
-- grafana/grafana **#97632** — "Transformations: Grouping to matrix doesn't support 0 for undefined combinations" — reports that cells are empty rather than `0` and that this disrupts downstream visualizations (e.g., Bar Chart grouping), with the reporter expecting the cells to hold `0`. This corroborates O3.
-- A Grafana community report ("Transform Grouping To Matrix issue") describes that, with blank columns, footer addition behaves as string concatenation rather than numeric addition — corroborating the `"060"`/`"82"` totals observed in §5.2.
-- grafana/grafana **#97642** — "Transformations: GroupToMatrix add 0 as special value" (commit `c901b76a8a`) — is the upstream change that adds a zero option. It is **not** an ancestor of HEAD `4550cfb5`: `git merge-base --is-ancestor c901b76a8a HEAD` returns non-zero (NO), and the commit is reachable only from `main`/`origin/main`. Therefore, **at this commit the empty-string behavior is canonical and no zero option exists.** This document explains the behavior at `4550cfb5`; it does not backport or assume the fix.
+- grafana/grafana **#97632** — "Transformations: Grouping to matrix doesn't support 0 for undefined combinations" (https://github.com/grafana/grafana/issues/97632) — reports that cells are empty rather than `0` and that this disrupts downstream visualizations (e.g., Bar Chart grouping), with the reporter expecting the cells to hold `0`. This corroborates O3. It is an **external reference** (issue tracker) included as context; the underlying fact it corroborates — that a missing intersection emits `''` and never `0` — is independently established by the local runtime output in §3–§4 and O3 (§7), which are the authoritative evidence.
+- A Grafana community report ("Transform Grouping To Matrix issue", https://community.grafana.com/t/transform-grouping-to-matrix-issue/74645) describes that, with blank columns, footer addition behaves as string concatenation rather than numeric addition. This is an **external reference** (community forum) included as context; the string-concatenation symptom itself is independently reproduced by the local runtime output in §5.2 (the `"82"`/`"060"` totals), which is the authoritative evidence.
+- grafana/grafana **#97642** — "Transformations: GroupToMatrix add 0 as special value" (https://github.com/grafana/grafana/pull/97642; merged as commit `c901b76a8a`) — is the upstream change that adds a zero option. **This is directly corroborable in the local checkout:** `git log -1 --format='%H %s' c901b76a8a` prints `c901b76a8a14802806fcea7c87206b74400f1fd1 Transformations: GroupToMatrix add 0 as special value (#97642)`, and `git show c901b76a8a` adds `Zero = 'zero'` to `packages/grafana-data/src/types/transformations.ts`. It is **not** an ancestor of the pinned baseline `4550cfb5` **nor** of the current `HEAD`: `git merge-base --is-ancestor c901b76a8a 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` and `git merge-base --is-ancestor c901b76a8a HEAD` both return non-zero (NO), and the commit is reachable only from `main`/`origin/main`. Therefore, **at the pinned baseline the empty-string behavior is canonical and no zero option exists.** This document explains the behavior at `4550cfb5`; it does not backport or assume the fix.
 
 ---
 
@@ -427,7 +427,7 @@ The four-option, no-zero set is consistent across the editor UI, the in-app help
 ## 10. Integrity confirmation
 
 - The transform was exercised through the **real** `transformDataFrame` entry point with the registered `groupingToMatrixTransformer`; every downstream value came from the real exported functions (`reduceField`, `getDisplayProcessor`, `getActiveThreshold`, `getScaleCalculator`). No bypassing interface, fallback, or synthetic stand-in produced any reported value. The raw `'' >= 0` / `null >= 0` results in §5.3 are direct JavaScript evaluations demonstrating the coercion that `getActiveThreshold` relies on at `thresholds.ts:L15`, and they were also confirmed via the real `getActiveThreshold` calls shown in the same block.
-- Reported magnitudes were confirmed **stable across two runs** (§5.2).
+- Reported magnitudes were confirmed **stable across three runs** (§5.2; see also **Appendix D** — three byte-identical runs).
 - The unrelated `remotes/origin/blitzy-7e848cb5-...` branch was **not** read or copied; this answer was derived independently from the code at `4550cfb5` and the observed runtime output.
 - All temporary observation scripts were removed (the observation spec `blitzy_adhoc_test_grouping_obs.test.ts` was deleted from the repo tree; the `/tmp/blitzy_obs_run*.txt` output files live outside the repository). This answer document is then **committed** on top of the baseline. In the **final delivered state**, the working tree is clean and the answer document is the **only** delta from the baseline commit `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`:
 
