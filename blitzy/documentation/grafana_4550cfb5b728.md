@@ -202,6 +202,24 @@ run to run and is not fixed near 60 s** (see the dedicated distribution capture 
 > INFO lines in each log are the one-time startup sequence (banner, migrator, HTTP listen,
 > provisioning, background-service registration). One-time, network-dependent startup extras may also
 > appear once (e.g. a `grafana-lokiexplore-app` plugin install); these do **not** recur.
+>
+> For full transparency, the only non-`info` lines at startup are a small, fixed set of one-time
+> `warn` entries: the server emits exactly **three** identical
+> `logger=resource-server level=warn msg="failed to register storage metrics" error="duplicate metrics collector registration attempted"`
+> lines, all in the same startup instant (~0.1 ms apart, ~0.6 s after the `Starting Grafana` banner).
+> Like the one-time INFO sequence they fire **once** and do **not** recur, so they are correctly
+> excluded from the recurring-log answer above; they are noted here only for completeness. No
+> `level=error` lines appear while the network is reachable, and a sensitive-data scan of the idle
+> output found none — the only near-match is the one-time
+> `logger=secrets … msg="Envelope encryption state" enabled=true currentprovider=secretKey.v1` line,
+> which reports encryption *state* plus a provider *identifier*, never any key material, password, or
+> token. Observed directly in a dedicated idle run (verbatim):
+> ```text
+> logger=settings        t=2026-07-07T05:08:38.516373136Z level=info msg="Starting Grafana" version=11.5.0-pre …
+> logger=resource-server t=2026-07-07T05:08:39.161661092Z level=warn msg="failed to register storage metrics" error="duplicate metrics collector registration attempted"
+> logger=resource-server t=2026-07-07T05:08:39.161744788Z level=warn msg="failed to register storage metrics" error="duplicate metrics collector registration attempted"
+> logger=resource-server t=2026-07-07T05:08:39.161778183Z level=warn msg="failed to register storage metrics" error="duplicate metrics collector registration attempted"
+> ```
 
 **Usage-stats readiness-line timing — observed distribution (8 idle runs).** Because the readiness
 line's first fire is armed with a pseudo-random `[30, 120)` s delay (§1.1, §1.4), its arrival time is
@@ -742,8 +760,11 @@ banner (`setting.go:940`). That is why all three independent sources agree on `1
 ### 4.1 Direct answer
 
 **Yes.** During the transition into the panel editor, the datasource picker **automatically resolves
-to and displays the datasource already defined on the panel's queries.** When the panel-data tab
-scene *activates*, it reads the datasource carried on the panel's query runner
+to the datasource already defined on the panel's queries** and — by the state-driven picker
+architecture — **displays it.** (The *resolution* is proven directly by test; the *display* is
+**inferred**, because the cited test asserts the picker's *state* rather than the rendered DOM — see
+§4.5.) When the panel-data tab scene *activates*, it reads the datasource carried on the panel's query
+runner
 (`this.queryRunner.state.datasource`), resolves it to a concrete `DataSourceApi` + instance settings,
 and commits them to its own state — which is what the picker renders.
 
@@ -821,7 +842,7 @@ Ran all test suites matching /public\/app\/features\/dashboard-scene\/panel-edit
 ```
 
 The decisive assertions inside `should load data source` — the complete `it` block, verbatim
-(test file `:362-367`):
+(test file `:361-366`):
 
 ```ts
 it('should load data source', async () => {
@@ -847,7 +868,9 @@ auto-resolution.
 - `:101` `datasource = await getDataSourceSrv().get(datasourceToLoad);` (the branch taken when a query datasource exists)
 - `:102` `dsSettings = getDataSourceSrv().getInstanceSettings(datasourceToLoad);`
 - `:106` `this.setState({ datasource, dsSettings });` — commits it to the picker's state
-- `:111-112` fallback to `config.defaultDatasource` in the `catch` (the edge case)
+- `:111-112` fallback to `config.defaultDatasource` inside the `catch` — a **separate safety path**
+  taken only if resolution *throws*; it is **not** the branch the `should load default datasource…`
+  test exercises (that test drives the `else` branch — see §4.5)
 
 The complete `loadDataSource` method, verbatim with no elision (`:63-127`):
 
@@ -932,13 +955,21 @@ value is present (the panel's query carries it), the `else` branch resolves it t
 `DataSourceApi` via `getDataSourceSrv().get(...)` (`:101`) and its instance settings via
 `getInstanceSettings(...)` (`:102`), then commits both with `this.setState({ datasource, dsSettings })`
 (`:106`). The picker UI is driven by that `state.datasource`/`state.dsSettings`, so it displays the
-query's datasource. The test drives this **real activation entry point** (no bypass or synthetic
-stand-in) and asserts `state.datasource === ds1Mock` and `state.dsSettings === instance1SettingsMock`
-— runtime proof that the picker auto-resolves to and displays the datasource defined in the panel
-queries. (If no datasource is on the query, `:71` is falsy and the code instead uses the dashboard's
-last-used datasource; if resolution throws, the `catch` falls back to `config.defaultDatasource` at
-`:111-112` — the edge case that the `should load default datasource if the datasource passed is not
-found` test covers.)
+query's datasource **(inferred — the cited test asserts the resolved *state*; the rendered picker
+display is not directly DOM-asserted, but follows from the state-driven picker architecture)**. The
+test drives this **real activation entry point** (no bypass or synthetic stand-in) and asserts
+`state.datasource === ds1Mock` and `state.dsSettings === instance1SettingsMock` — runtime proof that
+the picker auto-resolves to the datasource defined in the panel queries (and, by that state-driven
+architecture, displays it — inferred). (If no datasource is on the query, `:71` is falsy and the code instead uses the dashboard's
+last-used datasource. The `should load default datasource if the datasource passed is not found` test
+does **not** exercise the `catch`: its panel query carries an *unknown* datasource (`{ uid: 'abc' }`,
+which is still truthy), so control takes the same `else` branch, where the mocked
+`getDataSourceSrv().get(...)`/`getInstanceSettings(...)` resolve that unknown uid to the mock service's
+own default (`defaultDsMock`/`instance1SettingsMock`). The test asserts `state.datasource === defaultDsMock`
+— the *mock service's* not-found fallback, **not** the code's `catch` (which would instead resolve
+`config.defaultDatasource === 'gdev-testdata'` → `ds1Mock`). The real `catch` fallback to
+`config.defaultDatasource` at `:111-112` is a **separate safety path** that runs only if resolution
+throws; it is **not** covered by the cited tests **(inferred — no test drives the throw path)**.)
 
 ---
 
@@ -1159,7 +1190,7 @@ or synthetic stand-in.
   - `:49` `return <AlertRuleForm existing={ruleWithLocation} />;`
 - `public/app/features/alerting/unified/components/rule-editor/alert-rule-form/AlertRuleForm.tsx`
   - `:103-105` `const defaultValues: RuleFormValues = useMemo(() => { if (existing) { return formValuesFromExistingRule(existing); } … }`
-  - `:126-128` `const formAPI = useForm<RuleFormValues>({ mode: 'onSubmit', defaultValues, shouldFocusError: true });`
+  - `:126-130` `const formAPI = useForm<RuleFormValues>({ mode: 'onSubmit', defaultValues, shouldFocusError: true });`
 - `public/app/features/alerting/unified/utils/rule-form.ts`
   - `:916` `export function formValuesFromExistingRule(rule: RuleWithLocation<RulerRuleDTO>) { return ignoreHiddenQueries(rulerRuleToFormValues(rule)); }`
   - `:365` `export function rulerRuleToFormValues(ruleWithLocation: RuleWithLocation): RuleFormValues`
@@ -1221,7 +1252,7 @@ Opening the edit view renders `ExistingRuleEditor`, which fetches the existing r
 `<AlertRuleForm existing={ruleWithLocation} />` (`ExistingRuleEditor.tsx:49`). `AlertRuleForm`
 computes `defaultValues = formValuesFromExistingRule(existing)` inside a `useMemo`
 (`AlertRuleForm.tsx:103-105`) and passes that object to `useForm({ defaultValues })`
-(`:126-128`), which seeds the entire form — including the query editor — with those values.
+(`:126-130`), which seeds the entire form — including the query editor — with those values.
 `formValuesFromExistingRule` (`rule-form.ts:916`) delegates to `rulerRuleToFormValues`
 (`:365`), which for a Grafana-managed rule copies the backend rule's `grafana_alert.data` into
 `queries` (`:402`) and `grafana_alert.condition` into `condition` (`:403`). The backend rule
