@@ -77,19 +77,32 @@ log entries recur, both on a **10-minute cadence**:
 Two additional background emitters fire **once** near startup and do **not** recur inside a
 ~20-minute window: `logger=grafana.update.checker … "Update check succeeded"` (its ticker is 24 h)
 and `logger=infra.usagestats … "Usage stats are ready to report"`. The usage-stats line is a
-one-shot readiness callback whose first fire is **clamped to ≥ 1 minute** after startup at
-[pkg/services/usagestats/service/service.go:L70-L76]; this clamp was observed directly — the line
-appeared at **t ≈ 64 s** (Idle Run 1) and **t ≈ 67 s** (Idle Run 2) after the process started, i.e.
-just past the 1-minute floor and **never within the first 60 seconds** (see §1.3).
+one-shot readiness callback whose first (and only) fire is driven by the **stats collector**, not by
+the usage-stats reporter's send ticker. The collector's `Run` loop arms a ticker whose first interval
+is a **pseudo-random delay in `[30, 120)` seconds** —
+`nextSendInterval := time.Duration(rand.Intn(maxDelay-minDelay)+minDelay) * time.Second` with
+`minDelay = 30` / `maxDelay = 120` at
+[pkg/infra/usagestats/statscollector/service.go:L28-L29,L108,L110] — and on that first tick it calls
+`updateTotalStats` → `SetReadyToReport`, which logs the line at
+[pkg/infra/usagestats/service/service.go:L116-L117]. Because the delay is randomized per process
+start (`math/rand`, auto-seeded), the arrival time **varies from run to run and can fall below
+60 seconds**; it is **not** clamped to ≥ 1 minute. This was confirmed directly: across **8 dedicated
+idle runs** the line appeared at **35.780 s, 46.187 s, 47.802 s, 78.685 s, 81.684 s, 88.688 s,
+101.774 s, and 119.746 s** after the `Starting Grafana` banner — spanning the full `[30, 120)` window
+(min ≈ the 30 s floor, max ≈ the 120 s ceiling) with **3 of 8 arrivals under 60 s** (see §1.3 for the
+raw lines). (The ≥ 1-minute clamp at [pkg/infra/usagestats/service/service.go:L70-L76] governs the
+*separate* ~24 h `sendReportTicker` — when stats are **sent** — not when this readiness line is
+logged.)
 
 **Why "at least 60 seconds" shows little/nothing:** most background tickers are 10 min / 1 h / 24 h,
 the alerting scheduler's per-tick logging is `Debug` (silent at the default `info` level), and the
 usage-stats reporter's first *send* on a fresh database is ~24 h away. So a strict 60-second window
-captures only the **two startup update-check lines** (emitted ~1 s after the HTTP listener opens);
-even the one-shot "Usage stats are ready to report" arrives *just after* the 60-second mark
-(t ≈ 64–67 s, per the ≥ 1-minute clamp noted above) — and **no line has recurred yet**. To observe
-genuine recurrence you must run well past 60 s; this investigation ran **≈20 minutes per run, twice**,
-to capture two full cleanup cycles each time.
+captures only the **two startup update-check lines** (emitted ~1 s after the HTTP listener opens); the
+one-shot "Usage stats are ready to report" line may or may not have appeared yet within 60 s — its
+randomized `[30, 120)` s first-tick delay straddles the 60-second boundary (observed as low as
+**35.780 s** and as high as **119.746 s**; see §1.3) — but in every case **no line has *recurred*
+yet** within the first 60 s. To observe genuine recurrence you must run well past 60 s; this
+investigation ran **≈20 minutes per run, twice**, to capture two full cleanup cycles each time.
 
 **Honest note on network / update checks.** The AAP anticipated an *offline* container in which the
 update checkers would fail. In this run the environment **had network reachability**, so both update
@@ -171,8 +184,10 @@ Idle Run 2
 
 Across both runs the `cleanup` and `plugins.update.checker` inter-arrival deltas all fall within
 **599.97 s – 600.03 s** → the **10-minute cadence is stable across ≥2 runs** (to sub-second
-precision). The one-shot `infra.usagestats` "ready to report" line appears once per run at
-**t ≈ 64 s** (Run 1) / **t ≈ 67 s** (Run 2) after start — just past the ≥ 1-minute clamp (§1.1) — and
+precision). The one-shot `infra.usagestats` "ready to report" line appears once per run — at
+**t ≈ 64 s** (Run 1) and **t ≈ 67 s** (Run 2) after start in these two runs — driven by the stats
+collector's randomized `[30, 120)` s first-tick delay (§1.1, §1.4), so its arrival time **varies from
+run to run and is not fixed near 60 s** (see the dedicated distribution capture immediately below);
 `grafana.update.checker` fires once per run at startup (24 h ticker); neither recurs in the
 ~20-minute window.
 
@@ -187,6 +202,61 @@ precision). The one-shot `infra.usagestats` "ready to report" line appears once 
 > INFO lines in each log are the one-time startup sequence (banner, migrator, HTTP listen,
 > provisioning, background-service registration). One-time, network-dependent startup extras may also
 > appear once (e.g. a `grafana-lokiexplore-app` plugin install); these do **not** recur.
+
+**Usage-stats readiness-line timing — observed distribution (8 idle runs).** Because the readiness
+line's first fire is armed with a pseudo-random `[30, 120)` s delay (§1.1, §1.4), its arrival time is
+**not** a fixed value and is **not** clamped to ≥ 1 minute. To characterize it rather than assert a
+single number, the canonical binary was run idle **8 times** (each pure-idle, `Request Completed=0`),
+and the offset of the `infra.usagestats … "Usage stats are ready to report"` line from that process's
+`Starting Grafana` banner was measured each time. Command (one instance; repeated with distinct
+`GF_SERVER_HTTP_PORT` / `GF_PATHS_DATA` so several run concurrently without colliding):
+
+```bash
+# Start one idle instance fully detached, wait past the 120 s ceiling, then stop by exact PID:
+GF_SERVER_HTTP_PORT=3001 GF_PATHS_DATA=/tmp/gf_data_run \
+  setsid nohup ./bin/linux-amd64/grafana server --homepath "$REPO" \
+  > /tmp/blitzy_adhoc_us_run.log 2>&1 < /dev/null &
+PID=$!; sleep 130; kill "$PID"
+# offset = (t of "Usage stats are ready to report") − (t of "Starting Grafana")
+```
+
+Observed offsets (sorted), all within the code's `[30, 120)` s window:
+
+```text
+run #   offset (s)   <60 s?
+  5      35.780        yes      <- near the 30 s floor
+  1      46.187        yes
+  8      47.802        yes
+  2      78.685         no
+  4      81.684         no
+  3      88.688         no
+  7     101.774         no
+  6     119.746         no      <- near the 120 s ceiling
+                       ------
+min = 35.780 s,  max = 119.746 s,  3 of 8 runs (37.5%) arrived UNDER 60 s
+```
+
+Representative raw lines (verbatim) — the fastest run (run 5, 35.780 s < 60 s), a second sub-60 s run
+(run 8, 47.802 s), and the slowest run (run 6, 119.746 s):
+
+```text
+# run 5  (offset 35.780 s)
+logger=settings        t=2026-07-07T04:03:43.581025743Z level=info msg="Starting Grafana" version=11.5.0-pre commit=965ae116dd branch=blitzy-ca27568d-d7be-496e-b5cd-6897dc7e85b0 compiled=2026-07-07T01:48:10Z
+logger=infra.usagestats t=2026-07-07T04:04:19.361481663Z level=info msg="Usage stats are ready to report"
+# run 8  (offset 47.802 s)
+logger=settings        t=2026-07-07T04:03:43.558691033Z level=info msg="Starting Grafana" version=11.5.0-pre commit=965ae116dd branch=blitzy-ca27568d-d7be-496e-b5cd-6897dc7e85b0 compiled=2026-07-07T01:48:10Z
+logger=infra.usagestats t=2026-07-07T04:04:31.360314188Z level=info msg="Usage stats are ready to report"
+# run 6  (offset 119.746 s)
+logger=settings        t=2026-07-07T04:03:43.582866948Z level=info msg="Starting Grafana" version=11.5.0-pre commit=965ae116dd branch=blitzy-ca27568d-d7be-496e-b5cd-6897dc7e85b0 compiled=2026-07-07T01:48:10Z
+logger=infra.usagestats t=2026-07-07T04:05:43.329310093Z level=info msg="Usage stats are ready to report"
+```
+
+Running several instances concurrently (they share the same `Starting Grafana` wall-clock second but
+draw independent random delays) yields different offsets each time, confirming the timing is
+**genuinely randomized per process start** (`math/rand`, auto-seeded), not a stable ≈64–67 s value.
+The two ≈64 s / ≈67 s figures reported for Idle Run 1 / Run 2 above are simply two more samples from
+this same `[30, 120)` s distribution.
+
 
 ### 1.4 Responsible code (`file:line`, re-verified at HEAD `4550cfb5…`)
 
@@ -222,9 +292,14 @@ The two **once-only** background emitters:
   - `:38` `logger := log.New("grafana.update.checker")`; `:60` `Run`; runs at startup then
     `:63` `ticker := time.NewTicker(time.Hour * 24)`
   - `:89` `ctxLogger.Info("Update check succeeded", …)`; `:86` `ctxLogger.Error("Update check failed", …)` on error
-- **Usage-stats reporter** — `pkg/infra/usagestats/service/service.go`
-  - `:45` `log.New("infra.usagestats")`; `:56` `Run`; `:76` `sendReportTicker := time.NewTicker(nextSendInterval)`
-  - `:117` `uss.log.Info("Usage stats are ready to report")` (the one-shot `SetReadyToReport` callback)
+- **Usage-stats readiness line** — logged by `pkg/infra/usagestats/service/service.go`
+  - `:45` `log.New("infra.usagestats")`
+  - `:116-117` `func (uss *UsageStats) SetReadyToReport(...) { uss.log.Info("Usage stats are ready to report") … }` — the one-shot line
+  - **Timing driver** (what decides *when* that line fires) — `pkg/infra/usagestats/statscollector/service.go`
+    - `:28-29` `minDelay = 30` / `maxDelay = 120`
+    - `:108` `nextSendInterval := time.Duration(rand.Intn(maxDelay-minDelay)+minDelay) * time.Second` — a random `[30, 120)` s delay (`math/rand`)
+    - `:110` `updateStatsTicker := time.NewTicker(nextSendInterval)`; `:116` first tick → `s.updateTotalStats(ctx)`; `:339` `s.usageStats.SetReadyToReport(ctx)`
+  - **Not** the send ticker: `service.go:70-76` clamps the *separate* ~24 h `sendReportTicker` (`:76`) to a ≥ 1-minute minimum — that decides when stats are **sent**, and is unrelated to this readiness line's timing
 
 Other background tickers that run silently in a ~20-min idle window (no INFO at default level, verified):
 `pkg/services/loginattempt/loginattemptimpl/login_attempt.go:38` (10 min), 
