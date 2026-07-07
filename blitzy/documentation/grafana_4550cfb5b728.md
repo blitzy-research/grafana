@@ -683,6 +683,22 @@ logger=settings t=2026-07-06T23:51:43.18976568Z level=info msg="Starting Grafana
 
 (`buildstamp: 1734099722` decodes to `2024-12-13T14:22:02Z`, matching the banner's `compiled=` field.)
 
+> **Reproducibility note — the `version` answer is invariant; the VCS-stamped fields track the build
+> commit.** The `version` string (`11.5.0-pre`) is the answer to this requirement and is **invariant**:
+> it is sourced from `package.json:6` and does not depend on which commit is built. The
+> `commit` / `commitShort` / `versionString` / `buildstamp` fields, by contrast, are **VCS- and
+> build-time-stamped** and therefore reflect *whichever commit the binary was built at*. The values
+> shown above (`commit=4550cfb5b7`, `buildstamp=1734099722` → `2024-12-13T14:22:02Z`) are the
+> **canonical** values for a build at the pinned investigation HEAD
+> `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` — the `buildstamp` is exactly that source commit's own
+> date, which is why the banner's `compiled=` field matches it. Because this branch carries only
+> **documentation-only** commits on top of that pinned source HEAD (none of which touch any Grafana
+> source), rebuilding at the **branch tip** instead stamps the tip's short SHA together with a
+> *build-time* `buildstamp`. Verified in this environment, a branch-tip rebuild returned
+> `{"database":"ok","version":"11.5.0-pre","commit":"cb465dab12"}` from `GET /api/health` — the same
+> invariant `version`, only a different VCS stamp. In every case the reported **version string is
+> `11.5.0-pre`**.
+
 ### 3.4 Responsible code (`file:line`, re-verified at HEAD `4550cfb5…`)
 
 **`/api/health`** — `pkg/api/http_server.go`:
