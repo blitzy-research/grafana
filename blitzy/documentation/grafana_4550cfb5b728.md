@@ -541,7 +541,7 @@ Content-Length: 523
 
 Three things to note: (1) **there is no `X-Cache` header** — central to A5; (2) `cache-control: no-store` ensures browsers/proxies do not cache the `/api/ds/query` response; (3) for this small result the streaming writer's output was short enough to be sent with an explicit `Content-Length` rather than `Transfer-Encoding: chunked` — this is the **observed** behavior for the captured frame.
 
-**Verbatim response body — complete and byte-faithful.** The panel used `maxDataPoints: 5` over a five-minute absolute range at 60 s resolution, so the frame contains **exactly five points** and the entire body fits in **527 bytes** — it is reproduced here in full, with **no truncation**. Artifact: `/tmp/gf_obs/panel_run1_response_body.network-response` (527 bytes, `md5 db6bb5e7328a660118f39009ea08a57c`).
+**Verbatim response body — complete and byte-faithful.** The panel used `maxDataPoints: 5` over a five-minute absolute range at 60 s resolution, so the frame contains **exactly five points** and the entire body fits in **527 bytes** — it is reproduced here in full, with **no truncation**. Artifact: `/tmp/gf_obs/panel_run1_response_body.network-response` (527 bytes, `md5 db6bb5e7328a660118f39009ea08a57c`). (Note: the `Content-Length: 523` in header capture (b) belongs to a _different_ run — the `curl` corroboration artifact `curl_hdr_1.txt`, see A5 — not to this 527-byte panel body. The few-byte spread across the captured `random_walk` bodies (`size=521` in the A6 completion-log line, `523` here in header (b), and `527` for this panel body) is expected: `random_walk` emits variable-length float string representations, so each run's serialized body length differs slightly.)
 
 Raw bytes exactly as received on the wire:
 
@@ -609,9 +609,9 @@ export function toDataQueryResponse(res, queries?) {
   const rsp: DataQueryResponse = { data: [], state: LoadingState.Done };
   const results = (res.data as BackendDataSourceResponse)?.results;  // queryResponse.ts:77
   const cached = isCachedResponse(res);                              // queryResponse.ts:80
-  for (const refId of Object.keys(results)) {                        // queryResponse.ts:84
+  for (const refId of Object.keys(results)) {                        // queryResponse.ts:83
     const dr = results[refId];
-    // dr.refId = refId                                              // queryResponse.ts:90
+    // dr.refId = refId                                              // queryResponse.ts:88
     // if dr.error -> push a DataQueryError                         // queryResponse.ts:92-107
     for (const js of dr.frames ?? []) {                             // queryResponse.ts:113-114
       const df = dataFrameFromJSON(js);                             // queryResponse.ts:118
@@ -622,7 +622,7 @@ export function toDataQueryResponse(res, queries?) {
 }
 ```
 
-`toDataQueryResponse` [queryResponse.ts:60] reads `res.data.results` [queryResponse.ts:77], iterates each `refId` [queryResponse.ts:84], maps any per-`refId` error to a `DataQueryError` [queryResponse.ts:92-107] (via helper `toDataQueryError` [packages/grafana-runtime/src/utils/toDataQueryError.ts]), and converts every JSON frame into a `DataFrame` with `dataFrameFromJSON` [queryResponse.ts:118]. The resulting `DataFrame[]` is what the panel renders (the green `A-series` line observed in-browser in stage 8 of A1).
+`toDataQueryResponse` [queryResponse.ts:60] reads `res.data.results` [queryResponse.ts:77], iterates each `refId` [queryResponse.ts:83], maps any per-`refId` error to a `DataQueryError` [queryResponse.ts:92-107] (via helper `toDataQueryError` [packages/grafana-runtime/src/utils/toDataQueryError.ts]), and converts every JSON frame into a `DataFrame` with `dataFrameFromJSON` [queryResponse.ts:118]. The resulting `DataFrame[]` is what the panel renders (the green `A-series` line observed in-browser in stage 8 of A1).
 
 The `cached` flag is set from `isCachedResponse(res)` [queryResponse.ts:80], which is defined as:
 
@@ -791,7 +791,7 @@ logParams, logger := l.prepareLogParams(ctx, duration)
 logger.LogFunc(ctx.Logger)("Request Completed", logParams...)
 ```
 
-`prepareLogParams` [pkg/middleware/loggermw/logger.go:90] assembles the fields (`method`, `path`, `status`, `remote_addr`, `time_ms`, `duration`, `size`, `referer` [logger.go:109-111,120], plus `handler` [logger.go:127] and `status_source` [logger.go:133]) and returns them together with the log level.
+`prepareLogParams` [pkg/middleware/loggermw/logger.go:90] assembles the fields (`method`, `path`, `status`, `remote_addr`, `time_ms`, `duration`, `size`, `referer` [logger.go:109-111,118], plus `handler` [logger.go:129] and `status_source` [logger.go:133]) and returns them together with the log level.
 
 **Verbatim captured line** for the successful `POST /api/ds/query` (captured with `router_logging=true`, see below). Command:
 
