@@ -360,6 +360,19 @@ user         : [(1, 'admin', 'admin@localhost', 1)]
 - No `Created default admin` line on run 2 because of the `stats.Count > 0` early return
   (`pkg/services/sqlstore/sqlstore.go:190`).
 
+> **Run-to-run distribution note (magnitude is stable in its *deterministic* part; the total jitters ±1–2
+> lines).** Repeating the identical clean start multiple times, the **decisive counts are perfectly stable**
+> across runs — run 1 always shows `performed=626 skipped=0` with exactly **644** `Executing migration` lines,
+> and run 2 always shows `performed=0 skipped=626` with **0** — which is what makes run 1's log more than 20×
+> larger than run 2's. The **grand total** line count, however, is not bit-stable: across repeated runs the
+> run-1 total was observed at **1355–1357** and the run-2 total at **62–63**. The wobble comes entirely from
+> the asynchronous, post-`HTTP Server Listen` region (the update-checker, `grafana-apiserver` GroupVersion
+> registrations, `resource-server` metric-collector warnings, the background plugin-install attempt, and the
+> shutdown sequence) plus the number of `/api/*` probes issued during the run (each request emits its own log
+> lines) — none of which is part of the first-run/second-run *state* difference. The `1357 → 62` figures
+> quoted above are therefore a representative, reproduced sample of that small band, not a fixed constant; the
+> stable, causal signal is the 644-vs-0 migration execution.
+
 **State transitions (before → during → after), observed:**
 
 | Phase | `data/` | `migration_log` | `user` |
@@ -854,7 +867,10 @@ diff <(sed 's/t=[^ ]* //' /tmp/run1.log) <(sed 's/t=[^ ]* //' /tmp/run2.log)   #
 HTTP port `3000`; migrations `performed=626 skipped=0` (run 1) / `performed=0 skipped=626` (run 2);
 resource-migrator `18`; plugins loaded `54`; `/api/plugins` entries `49` (30 panel + 19 datasource, all
 `signature=internal`); `data_source` rows `0`; feature toggles reported `=true`: `56`; log lines
-`1357` (run 1) vs `62` (run 2); SQLite file `data/grafana.db` (`1,093,632` bytes after run 1).
+`1357` (run 1) vs `62` (run 2) — a representative sample of the observed `1355–1357` / `62–63` band, since
+the total jitters ±1–2 lines in the async region (see the run-to-run distribution note in Q2b), while the
+deterministic `644`-vs-`0` migration count does not; SQLite file `data/grafana.db` (`1,093,632` bytes after
+run 1).
 
 *All values above were produced by the commands shown next to each claim and were confirmed stable across
 the two runs where applicable. Statements labeled **(inferred)** were reasoned from code rather than
