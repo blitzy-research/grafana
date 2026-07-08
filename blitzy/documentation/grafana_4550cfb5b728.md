@@ -6,7 +6,14 @@ run in its **default canonical configuration**, the **real, complete, unedited o
 captured, and only then were the answers written and grounded in that output. Each claim
 shows the exact command that produced it, the captured output in a fenced block, a
 `file:line` citation naming the function/method/struct that performs the behavior, and the
-rationale.
+rationale. Two kinds of item cannot be produced by simply probing the default running server
+and are therefore **explicitly labeled** where they appear: a code path that is unreachable
+through the normal runtime entry point under the default configuration (the serve-switch
+`panic` that a bogus `protocol` would hit — unreachable because unknown protocols fall back to
+`http` — which is instead reproduced with a small, clearly-labeled standalone Go harness), and
+a purely client-rendered screen (the forced change-password *view*, labeled as inferred from
+code, while every backend HTTP call it makes — `POST /login`, `PUT /api/user/password` — was
+really executed and captured). Every reachable runtime path is backed by real captured output.
 
 > **Repository revision:** HEAD `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` ("Upgrade scenes
 > to v5.32.0"). All `file:line` anchors below were verified against the working tree at this
@@ -128,19 +135,68 @@ $ ./bin/linux-amd64/grafana server --homepath="$PWD" \
 The startup banner confirms the stamped build metadata at boot:
 
 ```
-logger=settings t=2026-07-08T04:18:27.525729837Z level=info msg="Starting Grafana" version=11.5.0-pre commit=4550cfb5b7 branch=blitzy-9bd4d785-f42c-4324-90e2-ee47d660145a compiled=2024-12-13T14:22:02Z
+logger=settings t=2026-07-08T05:38:11.359335589Z level=info msg="Starting Grafana" version=11.5.0-pre commit=4550cfb5b7 branch=blitzy-9bd4d785-f42c-4324-90e2-ee47d660145a compiled=2024-12-13T14:22:02Z
 ```
 
-**Stability across ≥2 runs (confirmed).** Grafana was started twice from the same build. The
-`HTTP Server Listen` line (ignoring the timestamp) and the `/api/health` JSON body were
-**identical** across both runs, and both reported `version=11.5.0-pre commit=4550cfb5b7`:
+**Stability across ≥2 runs (confirmed).** For an explicit stability check, Grafana was started
+**twice** from the same build in the default canonical config, each on port 3000 with a fresh
+data directory. Each run reached the `HTTP Server Listen` line in **~2.5 s**, was kept up for
+**~7.6 s**, and had `/api/health` polled **5×** at ~1 s intervals (all HTTP 200). Exact command
+(per run, `rN` = `r1` then `r2`):
+
+```console
+$ ./bin/linux-amd64/grafana server --homepath="$PWD" \
+    cfg:paths.data=/tmp/grafana-data-rN cfg:paths.logs=/tmp/grafana-logs-rN cfg:paths.plugins=/tmp/grafana-plugins-rN
+$ curl -s -i http://localhost:3000/api/health      # repeated 5× per run
+```
+
+**Run #1** — `HTTP Server Listen` line and the complete `/api/health` body:
 
 ```
-# Run #1
-logger=http.server t=2026-07-08T04:18:53.933892147Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=
-# Run #2
-logger=http.server t=2026-07-08T04:22:20.431994284Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=
+logger=http.server t=2026-07-08T05:38:13.708029037Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=
 ```
+```
+HTTP/1.1 200 OK
+Cache-Control: no-store
+Content-Type: application/json; charset=UTF-8
+X-Content-Type-Options: nosniff
+X-Frame-Options: deny
+X-Xss-Protection: 1; mode=block
+Date: Wed, 08 Jul 2026 05:38:13 GMT
+Content-Length: 75
+
+{
+  "database": "ok",
+  "version": "11.5.0-pre",
+  "commit": "4550cfb5b7"
+}
+```
+
+**Run #2** — `HTTP Server Listen` line and the complete `/api/health` body:
+
+```
+logger=http.server t=2026-07-08T05:38:21.160139155Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=
+```
+```
+HTTP/1.1 200 OK
+Cache-Control: no-store
+Content-Type: application/json; charset=UTF-8
+X-Content-Type-Options: nosniff
+X-Frame-Options: deny
+X-Xss-Protection: 1; mode=block
+Date: Wed, 08 Jul 2026 05:38:21 GMT
+Content-Length: 75
+
+{
+  "database": "ok",
+  "version": "11.5.0-pre",
+  "commit": "4550cfb5b7"
+}
+```
+
+Across both runs the listen address (`[::]:3000`), protocol (`http`), the HTTP status (200),
+the `Content-Length` (**75**), and the JSON body were **byte-identical** — only the timestamps
+and the `Date` header differ — and both reported `version=11.5.0-pre commit=4550cfb5b7`.
 
 ---
 
@@ -240,18 +296,22 @@ log line, and the blocking accept loop starts **after** it. The relevant window 
 
 **[A] HTTPS.** Run with `cfg:server.protocol=https` plus a self-signed cert (on a distinct
 port `3443` to avoid clashing with the default instance). **Note the config key is `cert_key`,
-not `key_file`** [conf/defaults.ini]. Two INFO lines are emitted — a TLS-settings line from
-`configureTLS()` [pkg/api/http_server.go:L905] and the listen line now showing
-`protocol=https`:
+not `key_file`** [conf/defaults.ini:L65-L67]. Two INFO lines are emitted — a TLS-settings line
+emitted inside `configureTLS()` by the `hs.log.Info("HTTP Server TLS settings", ...)` call
+[pkg/api/http_server.go:L918-L919] and the listen line now showing `protocol=https`. The
+self-signed cert/key are written under `/tmp` (outside the repo) and removed afterward:
 
 ```console
-$ openssl req -x509 -newkey rsa:2048 -nodes -keyout tls.key -out tls.crt -days 1 -subj "/CN=localhost"
-$ ./bin/linux-amd64/grafana server --homepath="$PWD" cfg:server.protocol=https \
-    cfg:server.http_port=3443 cfg:server.cert_file=$PWD/tls.crt cfg:server.cert_key=$PWD/tls.key ...
+$ openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout /tmp/grafana-obs/tls.key -out /tmp/grafana-obs/tls.crt -days 1 -subj "/CN=localhost"
+$ ./bin/linux-amd64/grafana server --homepath="$PWD" \
+    cfg:server.protocol=https cfg:server.http_port=3443 \
+    cfg:server.cert_file=/tmp/grafana-obs/tls.crt cfg:server.cert_key=/tmp/grafana-obs/tls.key \
+    cfg:paths.data=/tmp/grafana-data-tls cfg:paths.logs=/tmp/grafana-logs-tls cfg:paths.plugins=/tmp/grafana-plugins-tls
 ```
 ```
-logger=http.server t=2026-07-08T05:03:09.403767778Z level=info msg="HTTP Server TLS settings" scheme=https MinTLSVersion=TLS1.2 configuredciphers=TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,TLS_RSA_WITH_AES_128_GCM_SHA256,TLS_RSA_WITH_AES_256_GCM_SHA384,TLS_RSA_WITH_AES_128_CBC_SHA,TLS_RSA_WITH_AES_256_CBC_SHA
-logger=http.server t=2026-07-08T05:03:09.404421137Z level=info msg="HTTP Server Listen" address=[::]:3443 protocol=https subUrl= socket=
+logger=http.server t=2026-07-08T05:56:35.828902582Z level=info msg="HTTP Server TLS settings" scheme=https MinTLSVersion=TLS1.2 configuredciphers=TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,TLS_RSA_WITH_AES_128_GCM_SHA256,TLS_RSA_WITH_AES_256_GCM_SHA384,TLS_RSA_WITH_AES_128_CBC_SHA,TLS_RSA_WITH_AES_256_CBC_SHA
+logger=http.server t=2026-07-08T05:56:35.829072216Z level=info msg="HTTP Server Listen" address=[::]:3443 protocol=https subUrl= socket=
 ```
 
 The listen line now reports `protocol=https`. Verifying the live TLS endpoint (the summary
@@ -278,18 +338,29 @@ $ curl -sk https://localhost:3443/api/health
 (`subject == issuer` confirms the self-signed cert; `Verify return code: 18` is the expected
 self-signed result.) This path goes through `configureTLS()` (invoked from the TLS switch
 inside `Run()` at [pkg/api/http_server.go:L412-L414]) and then `ServeTLS`. If `cert_key` is
-omitted, startup fails fast with the error from `tlsCertificates()`:
+omitted (only `cert_file` set), startup fails fast with the error from `tlsCertificates()`:
 
+```console
+$ ./bin/linux-amd64/grafana server --homepath="$PWD" cfg:server.protocol=https cfg:server.http_port=3444 \
+    cfg:server.cert_file=/tmp/grafana-obs/tls.crt \
+    cfg:paths.data=/tmp/grafana-data-nokey cfg:paths.logs=/tmp/grafana-logs-nokey cfg:paths.plugins=/tmp/grafana-plugins-nokey
+```
 ```
 Error: ✗ *api.HTTPServer run error: cert_key cannot be empty when using HTTPS
 ```
 
 (that message is produced at [pkg/api/http_server.go:L826]).
 
-**[B] Unix socket.** Run with `cfg:server.protocol=socket cfg:server.socket=/tmp/grafana-obs/grafana.sock`:
+**[B] Unix socket.** Run with `cfg:server.protocol=socket` and a socket path under `/tmp`
+(outside the repo):
 
+```console
+$ ./bin/linux-amd64/grafana server --homepath="$PWD" \
+    cfg:server.protocol=socket cfg:server.socket=/tmp/grafana-obs/grafana.sock \
+    cfg:paths.data=/tmp/grafana-data-sock cfg:paths.logs=/tmp/grafana-logs-sock cfg:paths.plugins=/tmp/grafana-plugins-sock
 ```
-logger=http.server t=2026-07-08T04:27:38.130327685Z level=info msg="HTTP Server Listen" address=/tmp/grafana-obs/grafana.sock protocol=socket subUrl= socket=/tmp/grafana-obs/grafana.sock
+```
+logger=http.server t=2026-07-08T05:57:10.5275062Z level=info msg="HTTP Server Listen" address=/tmp/grafana-obs/grafana.sock protocol=socket subUrl= socket=/tmp/grafana-obs/grafana.sock
 ```
 
 Here `address` is the **socket path** (not host:port), `protocol=socket`, and the `socket`
@@ -299,7 +370,7 @@ field is **populated**. The socket file exists with mode `0660` (group-writable)
 
 ```console
 $ ls -l /tmp/grafana-obs/grafana.sock
-srw-rw---- 1 root root 0 Jul  8 04:27 /tmp/grafana-obs/grafana.sock
+srw-rw---- 1 root root 0 Jul  8 05:57 /tmp/grafana-obs/grafana.sock
 
 $ curl -s --unix-socket /tmp/grafana-obs/grafana.sock http://localhost/api/health
 {
@@ -316,16 +387,18 @@ unknown protocol does **not** trigger the `default:` panic in the serve switch. 
 falls back to `http`**:
 
 ```console
-$ ./bin/linux-amd64/grafana server --homepath="$PWD" cfg:server.protocol=bogus ...
+$ ./bin/linux-amd64/grafana server --homepath="$PWD" cfg:server.protocol=bogus \
+    cfg:paths.data=/tmp/grafana-data-bogus cfg:paths.logs=/tmp/grafana-logs-bogus cfg:paths.plugins=/tmp/grafana-plugins-bogus
 ```
 ```
-logger=settings t=2026-07-08T04:27:59.486351566Z level=info msg="Config overridden from command line" arg="server.protocol=bogus"
-logger=http.server t=2026-07-08T04:28:01.488135618Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=
+logger=settings t=2026-07-08T05:57:11.056012338Z level=info msg="Config overridden from command line" arg="server.protocol=bogus"
+logger=http.server t=2026-07-08T05:57:13.299657926Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=
 ```
 
-**Root cause:** config parsing initializes `cfg.Protocol = HTTPScheme` and only *overrides*
-it for the three recognized strings `"https"`, `"h2"`, `"socket"` — there is no `else`/error
-branch, so any unknown value remains `http` [pkg/setting/setting.go, `readServerSettings`].
+**Root cause:** `readServerSettings` initializes `cfg.Protocol = HTTPScheme`
+[pkg/setting/setting.go:L1830] and only *overrides* it for the three recognized strings
+`"https"`, `"h2"`, `"socket"` [pkg/setting/setting.go:L1837,L1843,L1849] — there is no
+`else`/error branch, so any unknown value remains `http` [pkg/setting/setting.go:L1830-L1849].
 Consequently the serve-switch `default:` panic `Unhandled protocol %q`
 [pkg/api/http_server.go:L468] and the `getListener()` `default:` error `invalid protocol %q`
 [pkg/api/http_server.go:L508-L509] are **defensive/unreachable via configuration**.
@@ -339,10 +412,10 @@ $ go run /tmp/grafana-obs/switch_harness.go   # replicates pkg/api/http_server.g
 panic: Unhandled protocol "bogus"
 
 goroutine 1 [running]:
-main.serveSwitch({0x4b0168?, 0xc0000061c0?})
-	/tmp/grafana-obs/switch_harness.go:24 +0x148
+main.serveSwitch(0x8d3d98?, {0x6d4e1b?, 0xc0000061c0?})
+	/tmp/grafana-obs/switch_harness.go:29 +0xe8
 main.main()
-	/tmp/grafana-obs/switch_harness.go:29 +0x1f
+	/tmp/grafana-obs/switch_harness.go:34 +0x2b
 exit status 2
 ```
 
@@ -372,23 +445,30 @@ moves the admin account **out of its default-credential state**.
 ### Step 1 — Backend auth succeeds first (`POST /login`)
 
 ```console
-$ curl -s -i -c q2_jar.txt -H "Content-Type: application/json" \
+$ curl -s -i -c /tmp/grafana-obs/q2_jar.txt -H "Content-Type: application/json" \
     -d '{"user":"admin","password":"admin"}' http://localhost:3000/login
 ```
 ```
 HTTP/1.1 200 OK
 Cache-Control: no-store
 Content-Type: application/json
-Set-Cookie: grafana_session=cc0b498ac0d4c9cf33258671b1d165d3; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax
-Set-Cookie: grafana_session_expiry=1783486705; Path=/; Max-Age=2592000; SameSite=Lax
+Set-Cookie: grafana_session=<redacted-local-session>; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax
+Set-Cookie: grafana_session_expiry=<redacted>; Path=/; Max-Age=2592000; SameSite=Lax
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Wed, 08 Jul 2026 04:48:30 GMT
+Date: Wed, 08 Jul 2026 06:02:28 GMT
 Content-Length: 41
 
 {"message":"Logged in","redirectUrl":"/"}
 ```
+
+> **Redaction note:** the two `Set-Cookie` values above (`grafana_session`,
+> `grafana_session_expiry`) are locally-generated, disposable session tokens from a throwaway
+> local instance; their values are **redacted** here while the header names and all attributes
+> (`Path`, `Max-Age`, `HttpOnly`, `SameSite`) are preserved verbatim. The cookie jar was
+> written to `/tmp/grafana-obs/q2_jar.txt` (outside the repo) and removed afterward. The same
+> redaction applies to every `Set-Cookie` shown below.
 
 The backend authenticates `admin`/`admin`, issues the `grafana_session` cookie, and returns a
 `redirectUrl` — regardless of the fact that this is the default password. The handler is
@@ -496,7 +576,7 @@ changePassword = (password: string) => {
 Driving that exact call with the authenticated session cookie:
 
 ```console
-$ curl -s -i -b q2_jar.txt -X PUT -H "Content-Type: application/json" \
+$ curl -s -i -b /tmp/grafana-obs/q2_jar.txt -X PUT -H "Content-Type: application/json" \
     -d '{"oldPassword":"admin","newPassword":"NewStrongPass123!","confirmNew":"NewStrongPass123!"}' \
     http://localhost:3000/api/user/password
 ```
@@ -507,7 +587,7 @@ Content-Type: application/json
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Wed, 08 Jul 2026 04:48:30 GMT
+Date: Wed, 08 Jul 2026 06:02:28 GMT
 Content-Length: 35
 
 {"message":"User password changed"}
@@ -527,7 +607,7 @@ Content-Type: application/json
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Wed, 08 Jul 2026 04:48:30 GMT
+Date: Wed, 08 Jul 2026 06:02:28 GMT
 Content-Length: 94
 
 {"statusCode":401,"messageId":"password-auth.failed","message":"Invalid username or password"}
@@ -539,12 +619,12 @@ $ curl -s -i -H "Content-Type: application/json" -d '{"user":"admin","password":
 HTTP/1.1 200 OK
 Cache-Control: no-store
 Content-Type: application/json
-Set-Cookie: grafana_session=56a022b5d38567b6540ccca5e350466c; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax
-Set-Cookie: grafana_session_expiry=1783486705; Path=/; Max-Age=2592000; SameSite=Lax
+Set-Cookie: grafana_session=<redacted-local-session>; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax
+Set-Cookie: grafana_session_expiry=<redacted>; Path=/; Max-Age=2592000; SameSite=Lax
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Wed, 08 Jul 2026 04:48:30 GMT
+Date: Wed, 08 Jul 2026 06:02:28 GMT
 Content-Length: 41
 
 {"message":"Logged in","redirectUrl":"/"}
@@ -554,8 +634,8 @@ The failed old-password attempt is visible in the backend log, confirming it rea
 authentication layer (`authn.service`, client `auth.client.form`):
 
 ```
-logger=authn.service t=2026-07-08T04:48:30.360004827Z level=info msg="Failed to authenticate request" client=auth.client.form error="[password-auth.failed] failed to authenticate identity: [password-auth.invalid] invalid password"
-logger=context userId=0 orgId=0 uname= t=2026-07-08T04:48:30.360117448Z level=info msg="Request Completed" method=POST path=/login status=401 remote_addr=127.0.0.1 time_ms=8 duration=8.64535ms size=94 referer= handler=/login status_source=server errorReason=Unauthorized errorMessageID=password-auth.failed error="failed to authenticate identity: [password-auth.invalid] invalid password"
+logger=authn.service t=2026-07-08T06:02:28.680378166Z level=info msg="Failed to authenticate request" client=auth.client.form error="[password-auth.failed] failed to authenticate identity: [password-auth.invalid] invalid password"
+logger=context userId=0 orgId=0 uname= t=2026-07-08T06:02:28.680471049Z level=info msg="Request Completed" method=POST path=/login status=401 remote_addr=127.0.0.1 time_ms=8 duration=8.14861ms size=94 referer= handler=/login status_source=server errorReason=Unauthorized errorMessageID=password-auth.failed error="failed to authenticate identity: [password-auth.invalid] invalid password"
 ```
 
 ### Step 3 — Skip branch: nothing is finalized
@@ -574,12 +654,12 @@ $ curl -s -i -H "Content-Type: application/json" -d '{"user":"admin","password":
 HTTP/1.1 200 OK
 Cache-Control: no-store
 Content-Type: application/json
-Set-Cookie: grafana_session=4838eea82931b609aff181a3bf16ac6d; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax
-Set-Cookie: grafana_session_expiry=1783486744; Path=/; Max-Age=2592000; SameSite=Lax
+Set-Cookie: grafana_session=<redacted-local-session>; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax
+Set-Cookie: grafana_session_expiry=<redacted>; Path=/; Max-Age=2592000; SameSite=Lax
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Wed, 08 Jul 2026 04:49:09 GMT
+Date: Wed, 08 Jul 2026 06:02:44 GMT
 Content-Length: 41
 
 {"message":"Logged in","redirectUrl":"/"}
@@ -596,12 +676,12 @@ $ curl -s -i -H "Content-Type: application/json" -d '{"user":"admin","password":
 HTTP/1.1 200 OK
 Cache-Control: no-store
 Content-Type: application/json
-Set-Cookie: grafana_session=0116f161dfee3a51dcfc2c01ba2948f7; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax
-Set-Cookie: grafana_session_expiry=1783486744; Path=/; Max-Age=2592000; SameSite=Lax
+Set-Cookie: grafana_session=<redacted-local-session>; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax
+Set-Cookie: grafana_session_expiry=<redacted>; Path=/; Max-Age=2592000; SameSite=Lax
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Wed, 08 Jul 2026 04:49:09 GMT
+Date: Wed, 08 Jul 2026 06:02:44 GMT
 Content-Length: 41
 
 {"message":"Logged in","redirectUrl":"/"}
@@ -812,12 +892,72 @@ func (hs *HTTPServer) healthzHandler(ctx *web.Context) {
 
 **Induction method:** the sqlite EXCLUSIVE-lock approach did **not** work — `SELECT 1` reads
 no table pages, so sqlite needs no shared lock and the probe still succeeds (default
-`wal = false`). So Grafana was pointed at a Docker `postgres:16-alpine` store (boot confirmed
-`dbtype=postgres`), then the container was killed (`docker kill`) to make the DB unreachable.
-During the outage:
+`wal = false`). So Grafana was pointed at a throwaway Docker `postgres:16-alpine` store, then
+the container was killed (`docker kill`) to make the DB unreachable. All setup and teardown
+commands are shown below; everything runs under `/tmp` on a throwaway port 3010 and is removed
+afterward.
+
+**Setup — start a throwaway postgres and confirm it is ready:**
 
 ```console
-$ curl -s -i http://localhost:3000/api/health
+$ docker run -d --name grafana-pg-obs \
+    -e POSTGRES_USER=grafana -e POSTGRES_PASSWORD=grafanapw -e POSTGRES_DB=grafana \
+    -p 5432:5432 postgres:16-alpine
+```
+```
+8a6655f87253cfadf64c859e4e2bcd4aceddbd0212db3abe755520bbfce12b3b
+postgres ready after 2s
+```
+
+**Start Grafana pointed at that postgres** (fresh `/tmp` data dirs, port 3010):
+
+```console
+$ ./bin/linux-amd64/grafana server --homepath="$PWD" \
+    cfg:database.type=postgres \
+    cfg:database.host=127.0.0.1:5432 \
+    cfg:database.name=grafana cfg:database.user=grafana cfg:database.password=grafanapw \
+    cfg:database.ssl_mode=disable \
+    cfg:server.http_port=3010 \
+    cfg:paths.data=/tmp/grafana-data-q3pg cfg:paths.logs=/tmp/grafana-logs-q3pg cfg:paths.plugins=/tmp/grafana-plugins-q3pg
+```
+
+The boot log confirms Grafana is genuinely using postgres (not the sqlite default), then the
+same `HTTP Server Listen` line as before:
+
+```
+logger=sqlstore t=2026-07-08T06:08:15.394704488Z level=info msg="Connecting to DB" dbtype=postgres
+logger=http.server t=2026-07-08T06:08:17.365952107Z level=info msg="HTTP Server Listen" address=[::]:3010 protocol=http subUrl= socket=
+```
+
+**Baseline probe (postgres up)** — healthy 200, `database: "ok"`:
+
+```console
+$ curl -s -i http://localhost:3010/api/health
+```
+```
+HTTP/1.1 200 OK
+Cache-Control: no-store
+Content-Type: application/json; charset=UTF-8
+X-Content-Type-Options: nosniff
+X-Frame-Options: deny
+X-Xss-Protection: 1; mode=block
+Date: Wed, 08 Jul 2026 06:08:18 GMT
+Content-Length: 75
+
+{
+  "database": "ok",
+  "version": "11.5.0-pre",
+  "commit": "4550cfb5b7"
+}
+```
+
+**Induce the outage** by killing the DB container — `docker kill grafana-pg-obs` (the exact
+kill and the 5-second transition it triggers are captured by the poll loop in the next
+subsection). Once the cache has expired, every steady-state probe returns 503 with
+`database: "failing"`:
+
+```console
+$ curl -s -i http://localhost:3010/api/health
 ```
 ```
 HTTP/1.1 503 Service Unavailable
@@ -826,7 +966,7 @@ Content-Type: application/json; charset=UTF-8
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Wed, 08 Jul 2026 04:38:12 GMT
+Date: Wed, 08 Jul 2026 06:08:31 GMT
 Content-Length: 80
 
 {
@@ -840,34 +980,60 @@ Only `database` flips to `"failing"` and the status becomes 503; `version`/`comm
 present (HideVersion is false). This is the `if !hs.databaseHealthy(...)` branch
 [pkg/api/http_server.go:L727-L730].
 
+> **Teardown / hygiene:** the throwaway container was removed with `docker rm -f
+> grafana-pg-obs` and the `/tmp/grafana-{data,logs,plugins}-q3pg` dirs were deleted; nothing is
+> written inside the repository.
+
 ### The 5-second cache staleness window (demonstrated live)
 
 With a warm healthy cache, killing the DB does **not** change `/api/health` until the 5 s TTL
-expires — the cached `true` is served (note the tiny ~0.012 s latency = no DB round-trip),
-then the result flips to 503 after the window:
+expires: the cached `true` continues to be served, then the result flips to 503 once the
+window elapses and the next probe re-runs `SELECT 1` against the now-dead store. The exact
+poll loop that produced the table below (one warm probe, `docker kill`, then a rapid poll
+every ~0.8 s against the same port-3010 instance):
 
+```console
+$ START=$(date +%s.%N)
+$ curl -s -i http://localhost:3010/api/health | head -1     # warm the cache (t=+0.0s)
+$ docker kill grafana-pg-obs
+$ for i in $(seq 1 15); do
+    sleep 0.8
+    ELAPSED=$(awk -v a="$START" -v b="$(date +%s.%N)" 'BEGIN{printf "%.1f", b-a}')
+    CODE=$(curl -s -o /tmp/gq3body -w '%{http_code}' http://localhost:3010/api/health)
+    LAT=$(curl -s -o /dev/null -w '%{time_total}' http://localhost:3010/api/health)
+    DBV=$(grep -o '"database": *"[a-z]*"' /tmp/gq3body | head -1)
+    printf 't=+ %5ss  HTTP=%s  %s   latency=%ss\n' "$ELAPSED" "$CODE" "$DBV" "$LAT"
+  done
 ```
-=== CLEAN 5s CACHE TTL (warm cache -> kill pg -> rapid poll; cached=fast, recheck=slow) ===
-t=+  0.0s  HTTP=200  "database": "ok"        latency=0.012s
+```
+t=+  0.0s  HTTP=200  "database": "ok"   latency=0.000363s
 --- pg killed; polling every ~0.8s ---
-t=+  2.0s  HTTP=200  "database": "ok"        latency=0.013s
-t=+  2.9s  HTTP=200  "database": "ok"        latency=0.012s
-t=+  3.7s  HTTP=200  "database": "ok"        latency=0.013s
-t=+  4.5s  HTTP=200  "database": "ok"        latency=0.013s
-t=+  5.3s  HTTP=503  "database": "failing"   latency=0.012s
-t=+  6.2s  HTTP=503  "database": "failing"   latency=0.012s
-t=+  7.0s  HTTP=503  "database": "failing"   latency=0.014s
-t=+  7.8s  HTTP=503  "database": "failing"   latency=0.012s
-t=+  8.7s  HTTP=503  "database": "failing"   latency=0.028s
-t=+  9.5s  HTTP=503  "database": "failing"   latency=0.013s
-t=+ 10.3s  HTTP=503  "database": "failing"   latency=0.013s
-t=+ 11.2s  HTTP=503  "database": "failing"   latency=0.024s
-t=+ 12.0s  HTTP=503  "database": "failing"   latency=0.013s
-t=+ 12.9s  HTTP=503  "database": "failing"   latency=0.013s
+t=+   1.2s  HTTP=200  "database": "ok"   latency=0.000383s
+t=+   2.0s  HTTP=200  "database": "ok"   latency=0.000377s
+t=+   2.8s  HTTP=200  "database": "ok"   latency=0.000360s
+t=+   3.6s  HTTP=200  "database": "ok"   latency=0.000378s
+t=+   4.5s  HTTP=200  "database": "ok"   latency=0.000357s
+t=+   5.3s  HTTP=503  "database": "failing"   latency=0.000422s
+t=+   6.1s  HTTP=503  "database": "failing"   latency=0.000573s
+t=+   7.0s  HTTP=503  "database": "failing"   latency=0.000306s
+t=+   7.8s  HTTP=503  "database": "failing"   latency=0.000363s
+t=+   8.6s  HTTP=503  "database": "failing"   latency=0.000381s
+t=+   9.4s  HTTP=503  "database": "failing"   latency=0.000320s
+t=+  10.3s  HTTP=503  "database": "failing"   latency=0.000488s
+t=+  11.1s  HTTP=503  "database": "failing"   latency=0.000301s
+t=+  11.9s  HTTP=503  "database": "failing"   latency=0.000439s
+t=+  12.7s  HTTP=503  "database": "failing"   latency=0.000309s
 ```
 
-The flip at ~5.3 s matches `time.Second*5` [pkg/api/health.go:L23]. (After restarting the DB,
-the value flips back to `ok` on the next post-TTL probe.)
+The `"ok"` response persists for ~5 s **after** the DB is already dead, then flips to
+`"failing"` at **t=+5.3 s** — matching the `time.Second*5` TTL [pkg/api/health.go:L23]. The
+staleness itself is the observable proof of the cache: for those ~5 s the handler answers from
+`hs.CacheService.Get("db-healthy")` without touching the DB [pkg/api/health.go:L13-L14].
+(Latency does *not* distinguish the two states here — every response is sub-millisecond
+because the probe talks only to localhost, and a connection-refused `SELECT 1` against the
+dead container also fails instantly; the cache's effect is visible in the **timing of the
+flip**, not in per-request latency.) After restarting the DB, the value flips back to `ok` on
+the next post-TTL probe.
 
 ### `version`/`commit` provenance & the `HideVersion` toggle
 
@@ -921,11 +1087,15 @@ PASS
 ok  	github.com/grafana/grafana/pkg/api	0.100s
 ```
 
-These scenarios (in [pkg/api/health_test.go]) assert, respectively: the healthy version shape
-`{"database":"ok","version":"7.4.0","commit":"59906ab1bf"}`; the enterprise variant adding
-`enterpriseCommit`; the anonymous-hide-version shape `{"database":"ok"}`; a healthy 200; an
-unhealthy 503 with `{"database":"failing"}` (induced via a fake DB `ExpectedError`); and the
-cached-result behavior (a cached `false` yields 503, deleting the cache restores 200).
+These scenarios assert, respectively: the healthy version shape
+`{"database":"ok","version":"7.4.0","commit":"59906ab1bf"}` (`TestHealthAPI_Version`
+[pkg/api/health_test.go:L18]); the enterprise variant adding `enterpriseCommit`
+(`TestHealthAPI_VersionEnterprise` [pkg/api/health_test.go:L39]); the anonymous-hide-version
+shape `{"database":"ok"}` (`TestHealthAPI_AnonymousHideVersion` [pkg/api/health_test.go:L62]);
+a healthy 200 (`TestHealthAPI_DatabaseHealthy` [pkg/api/health_test.go:L79]); an unhealthy 503
+with `{"database":"failing"}` induced via a fake DB `ExpectedError` (`TestHealthAPI_DatabaseUnhealthy`
+[pkg/api/health_test.go:L106]); and the cached-result behavior — a cached `false` yields 503,
+deleting the cache restores 200 (`TestHealthAPI_DatabaseHealthCached` [pkg/api/health_test.go:L134]).
 
 ### Rationale (Q3)
 
@@ -1071,7 +1241,7 @@ of the background services:
 
 ```console
 $ ./bin/linux-amd64/grafana server --homepath="$PWD" cfg:log.level=debug \
-    cfg:paths.data=... cfg:paths.logs=... cfg:paths.plugins=... 2>&1 \
+    cfg:paths.data=/tmp/grafana-data-dbg cfg:paths.logs=/tmp/grafana-logs-dbg cfg:paths.plugins=/tmp/grafana-plugins-dbg 2>&1 \
     | grep "Starting background service"
 ```
 ```
@@ -1131,27 +1301,70 @@ func IsDisabled(srv BackgroundService) bool {
 }
 ```
 
-**Controlled demonstration.** With the two update checkers **enabled** (the default), their
-start lines are present; disabling them via
-`cfg:analytics.check_for_updates=false cfg:analytics.check_for_plugin_updates=false` makes
-them **disappear**. Comparing the distinct service sets of the two runs:
+**Controlled demonstration.** Two debug runs were captured, each sampled *after* full startup
+(the process was left running a few seconds past the `HTTP Server Listen` line so every
+background-service goroutine had emitted its start line). Run A is the default config (update
+checks **enabled**); Run B additionally sets
+`cfg:analytics.check_for_updates=false cfg:analytics.check_for_plugin_updates=false`:
 
 ```console
-# services present with checkers ENABLED but ABSENT with them DISABLED:
-$ comm -23 set_enabled.txt set_disabled.txt
+# Run A — default (update checks ENABLED)
+$ ./bin/linux-amd64/grafana server --homepath="$PWD" cfg:log.level=debug \
+    cfg:paths.data=/tmp/grafana-data-enabled cfg:paths.logs=/tmp/grafana-logs-enabled cfg:paths.plugins=/tmp/grafana-plugins-enabled 2>&1 \
+    | grep "Starting background service" > /tmp/grafana-obs/boot_q4_enabled.log
+
+# Run B — update checks DISABLED
+$ ./bin/linux-amd64/grafana server --homepath="$PWD" cfg:log.level=debug \
+    cfg:analytics.check_for_updates=false cfg:analytics.check_for_plugin_updates=false \
+    cfg:paths.data=/tmp/grafana-data-disabled cfg:paths.logs=/tmp/grafana-logs-disabled cfg:paths.plugins=/tmp/grafana-plugins-disabled 2>&1 \
+    | grep "Starting background service" > /tmp/grafana-obs/boot_q4_disabled.log
+```
+
+Reduce each run to its distinct set of started services, then diff:
+
+```console
+$ grep "Starting background service" /tmp/grafana-obs/boot_q4_enabled.log  | sed -E 's/.*service=([^ ]+).*/\1/' | sort -u > /tmp/grafana-obs/set_enabled.txt
+$ grep "Starting background service" /tmp/grafana-obs/boot_q4_disabled.log | sed -E 's/.*service=([^ ]+).*/\1/' | sort -u > /tmp/grafana-obs/set_disabled.txt
+$ wc -l /tmp/grafana-obs/set_enabled.txt /tmp/grafana-obs/set_disabled.txt
+```
+```
+  34 /tmp/grafana-obs/set_enabled.txt
+  31 /tmp/grafana-obs/set_disabled.txt
+  65 total
+```
+
+```console
+# services present with checks ENABLED but ABSENT with them DISABLED:
+$ comm -23 /tmp/grafana-obs/set_enabled.txt /tmp/grafana-obs/set_disabled.txt
+```
+```
 *angulardetectorsprovider.Dynamic
 *updatechecker.GrafanaService
 *updatechecker.PluginsService
 ```
 
-The **config-driven** difference is exactly the two update checkers
-`*updatechecker.GrafanaService` and `*updatechecker.PluginsService`; their `IsDisabled()`
-bodies return `!s.enabled` [pkg/services/updatechecker/grafana.go:L56,
-pkg/services/updatechecker/plugins.go:L71], gated by `check_for_updates = true`
-[conf/defaults.ini:L268] and `check_for_plugin_updates = true` [conf/defaults.ini:L275]. The
-third entry (`*angulardetectorsprovider.Dynamic`) is **capture-timing noise**, not a config
-skip — it *is* present in the enabled run's set; it simply logged after the sample window in
-the disabled run.
+The count drops from **34 → 31**, and the difference is **exactly three services** — this
+result was **deterministic across repeated runs**. All three are genuine **config skips** via
+the same `IsDisabled` mechanism, gated by the two update-check flags:
+
+- **`*updatechecker.GrafanaService`** — `IsDisabled()` returns `!s.enabled`
+  [pkg/services/updatechecker/grafana.go:L56]; `enabled: cfg.CheckForGrafanaUpdates`
+  [pkg/services/updatechecker/grafana.go:L48], gated by `check_for_updates = true`
+  [conf/defaults.ini:L268] (`cfg.CheckForGrafanaUpdates` [pkg/setting/setting.go:L1156]).
+- **`*updatechecker.PluginsService`** — `IsDisabled()` returns `!s.enabled`
+  [pkg/services/updatechecker/plugins.go:L71]; `enabled: cfg.CheckForPluginUpdates`
+  [pkg/services/updatechecker/plugins.go:L60], gated by `check_for_plugin_updates = true`
+  [conf/defaults.ini:L275] (`cfg.CheckForPluginUpdates` [pkg/setting/setting.go:L1157]).
+- **`*angulardetectorsprovider.Dynamic`** — **also config-gated**, on the *same*
+  `check_for_plugin_updates` flag: `IsDisabled()` returns `d.disabled`
+  [pkg/services/pluginsintegration/angulardetectorsprovider/dynamic.go:L305-L306], and the
+  struct is constructed with `disabled: !cfg.CheckForPluginUpdates`
+  [pkg/services/pluginsintegration/angulardetectorsprovider/dynamic.go:L71]. The enclosing
+  comment states the intent verbatim — *"Disable the background service if the user has opted
+  out of plugin updates. (useful for air-gapped installations)"*
+  [pkg/services/pluginsintegration/angulardetectorsprovider/dynamic.go:L69-L70]. So opting out
+  of plugin-update checks deterministically drops the dynamic angular-detectors provider along
+  with the plugins update checker — it is **not** capture-timing noise.
 
 ### Reconciling 36 registered vs 34 started
 
@@ -1161,16 +1374,18 @@ registered services that never start under the default OSS config are skipped by
 
 - **`searchService`** (`*searchV2.StandardSearchService`) — `IsDisabled()` returns
   `!s.features.IsEnabledGlobally(featuremgmt.FlagPanelTitleSearch)`
-  [pkg/services/searchV2/service.go:L120]. The `panelTitleSearch` flag is `PublicPreview`
-  (off by default) [pkg/services/featuremgmt/registry.go], so it is skipped.
+  [pkg/services/searchV2/service.go:L120-L121]. The `panelTitleSearch` flag is
+  `PublicPreview` (off by default) — `Stage: FeatureStagePublicPreview`
+  [pkg/services/featuremgmt/registry.go:L45-L47], so it is skipped.
 - **`grpcServerProvider`** (`*gPRCServerService`) — `IsDisabled()` returns `!s.enabled`
   [pkg/services/grpcserver/service.go:L136]; the gRPC server is off by default, so it is
   skipped.
 
 Both are skipped at `if registry.IsDisabled(svc) { continue }`
 [pkg/server/server.go:L150-L152] — identical to the update-checker mechanism. So: **36
-registered → 34 startable under defaults (with update checkers on) → the 2 update checkers
-additionally drop out if their config flags are set false.**
+registered → 34 startable under defaults (with update checks on) → three more services (the
+two update checkers *and* the dynamic angular-detectors provider) drop out, leaving 31, if the
+update-check config flags are set false.**
 
 ### `READY=1` / systemd notification
 
@@ -1187,8 +1402,8 @@ logger=server  level=debug msg="Waiting on services..."
 
 The registry is assembled by Google Wire. The OSS binding for
 `backgroundsvcs.ProvideBackgroundServiceRegistry` lives in
-[pkg/server/wireexts_oss.go:L74], while the overall server graph is declared in
-[pkg/server/wire.go].
+[pkg/server/wireexts_oss.go:L74], while the overall server graph is assembled by
+`wire.Build(wireExtsSet)` inside `Initialize(...)` [pkg/server/wire.go:L444-L446].
 
 ### Rationale (Q4)
 
@@ -1263,11 +1478,12 @@ addressed with observed evidence.
   debug-level generic lines.
 - [x] `*api.HTTPServer` appears as a background service in the debug capture.
 - [x] `IsDisabled` skip [pkg/server/server.go:L150-L152; pkg/registry/registry.go:L52-L56] —
-  controlled enabled/disabled comparison for the update checkers; 36→34 reconciliation
-  (searchV2 + gRPC skipped).
+  controlled enabled/disabled comparison drops exactly three config-gated services (34→31: the
+  two update checkers **and** the dynamic angular-detectors provider, all gated by the
+  update-check flags); plus the 36→34 default reconciliation (searchV2 + gRPC skipped).
 - [x] `READY=1` / systemd notify [pkg/server/server.go:L176], captured (`NOTIFY_SOCKET`
   unset).
-- [x] Wire DI wiring [pkg/server/wireexts_oss.go:L74; pkg/server/wire.go].
+- [x] Wire DI wiring [pkg/server/wireexts_oss.go:L74; pkg/server/wire.go:L444-L446].
 - [x] "How much before the UI" — the HTTP server is itself one background service; the whole
   backend comes up concurrently, not before, the UI.
 
