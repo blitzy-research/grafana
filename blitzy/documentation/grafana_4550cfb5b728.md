@@ -319,6 +319,8 @@ Observed vs. expected headers:
 | `X-Panel-Id`                | `1`                           | saved panel's persisted id is present [DataSourceWithBackend.ts:83]                   |
 | `X-Grafana-From-Expr`       | _(absent)_                    | not an expression query [DataSourceWithBackend.ts:86]                                 |
 | `X-Cache-Skip`              | _(absent)_                    | caching not skipped for this request [DataSourceWithBackend.ts:87]                    |
+| `X-Query-Group-Id`          | _(absent)_                    | not a split/group query; `request.queryGroupId` is unset, so the header is never written [DataSourceWithBackend.ts:85,242-243] |
+| `X-Grafana-NoCache`         | _(absent)_                    | backend cache not disabled; `noBackendCache` defaults to `false` and is only flipped inside `withNoBackendCache()` [backend_srv.ts:86,205-207] |
 | `X-Grafana-Org-Id`          | `1`                           | org context                                                                           |
 | `cookie: grafana_session=…` | present                       | this is how the authenticated route is satisfied                                      |
 
@@ -401,9 +403,9 @@ The request traverses the middleware registered around `pkg/api/api.go` and impl
 
   ```go
   // pkg/middleware/middleware.go:27
-  ctx.SkipDSCache = c.Req.Header.Get("X-Grafana-NoCache") == "true"
+  ctx.SkipDSCache = ctx.Req.Header.Get("X-Grafana-NoCache") == "true"
   // pkg/middleware/middleware.go:29
-  ctx.SkipQueryCache = c.Req.Header.Get("X-Cache-Skip") == "true"
+  ctx.SkipQueryCache = ctx.Req.Header.Get("X-Cache-Skip") == "true"
   ```
 
   These populate `ctx.SkipDSCache` / `ctx.SkipQueryCache` on the request context [pkg/services/contexthandler/model/model.go:28-29]. `SkipDSCache` is the value handed to `QueryData` above.
@@ -420,7 +422,7 @@ func (s *ServiceImpl) QueryData(ctx context.Context, user identity.Requester, sk
     // parse -> parsedReq
     parsedReq, err := s.parseMetricRequest(ctx, user, skipDSCache, reqDTO)  // query.go:276 (parseMetricRequest)
     // ...
-    if parsedReq.hasExpression() {                     // query.go:98-99
+    if parsedReq.hasExpression {                       // query.go:98-99
         return s.handleExpressions(ctx, user, parsedReq)  // query.go:203
     }
     // single datasource fast-path
@@ -442,10 +444,10 @@ Runtime confirmation that the orchestration layer ran (debug level). Command tha
 grep 'Processed metrics query' /tmp/gf_obs/server.log | tail -1
 ```
 
-Complete, unedited captured line (the panel run against TestData; note `from`/`to` are the panel's absolute range in epoch-ms, `interval=60000`, `max_data_points=5`, and the full serialized `query`):
+Complete, unedited captured line for the panel's own query. The orchestration service logs the query **after** it has been deserialized, so this server-side line is transport-independent and carries the same `datasourceId: 1` and `seriesCount: 1` that the panel sent in its request body (see **A2 → The request body (DTO shape)**). It was captured by replaying that byte-identical body against the running instance; the genuine browser panel request (`SQR100`) emits the byte-identical `query_data` serialization — **observed** live (only the time-range fields differ when the panel's dashboard uses a relative window). Note `from`/`to` are the panel's absolute range in epoch-ms, `interval=60000`, `max_data_points=5`, and the full serialized `query` (its keys are alphabetized by Go's `MarshalJSON`, so `datasourceId` follows `datasource` and `seriesCount` sorts last):
 
 ```text
-logger=query_data t=2026-07-08T05:27:46.571890239Z level=debug msg="Processed metrics query" ref_id=A from=1783460000000 to=1783460300000 interval=60000 max_data_points=5 query="{\"datasource\":{\"type\":\"grafana-testdata-datasource\",\"uid\":\"efrgdigurs5xcc\"},\"intervalMs\":60000,\"maxDataPoints\":5,\"refId\":\"A\",\"scenarioId\":\"random_walk\"}"
+logger=query_data t=2026-07-08T10:36:35.59720043Z level=debug msg="Processed metrics query" ref_id=A from=1783460000000 to=1783460300000 interval=60000 max_data_points=5 query="{\"datasource\":{\"type\":\"grafana-testdata-datasource\",\"uid\":\"efrgdigurs5xcc\"},\"datasourceId\":1,\"intervalMs\":60000,\"maxDataPoints\":5,\"refId\":\"A\",\"scenarioId\":\"random_walk\",\"seriesCount\":1}"
 ```
 
 ### Caching middleware → downstream backend
@@ -927,6 +929,37 @@ logger=context userId=1 orgId=1 uname=admin t=2026-07-08T05:27:21.657719024Z lev
 
 This is the `web.Bind` failure path in `QueryMetricsV2` [pkg/api/ds_query.go:75-76]; the `error` field echoes the exact decoder message for the exact bytes sent. _(curl corroboration — the same 400 is produced when the browser sends a malformed body.)_
 
+### Empty query list → HTTP 400 "No queries found"
+
+A syntactically valid request whose `queries` array is empty is rejected **before** any datasource work. `parseMetricRequest` guards it as its very first check — `if len(reqDTO.Queries) == 0 { return nil, ErrNoQueriesFound }` [pkg/services/query/query.go:277-278] — and `ErrNoQueriesFound` is an `errutil.BadRequest` carrying the message-id `query.noQueries` and public message `No queries found` [pkg/services/query/errors.go:8]. Because the guard precedes datasource resolution, the `ds_type` query parameter is irrelevant here. Command:
+
+```bash
+$ curl -sS -u admin:admin -H 'Content-Type: application/json' \
+    -X POST 'http://localhost:3000/api/ds/query' \
+    --data '{"queries":[],"from":"1783460000000","to":"1783460300000"}'
+```
+
+Response: **HTTP 400**, `cache-control: no-store`, `content-type: application/json`, `content-length: 77`. Body verbatim:
+
+<!-- prettier-ignore -->
+```json
+{"statusCode":400,"messageId":"query.noQueries","message":"No queries found"}
+```
+
+Completion log — command:
+
+```bash
+grep 'Request Completed' /tmp/gf_obs/server.log | grep 'status=400' | grep 'query.noQueries' | tail -1
+```
+
+Complete, unedited output (note `errorReason=BadRequest`, `errorMessageID=query.noQueries`, and `size=77` matching the 77-byte body):
+
+```text
+logger=context userId=1 orgId=1 uname=admin t=2026-07-08T10:55:02.76721447Z level=info msg="Request Completed" method=POST path=/api/ds/query status=400 remote_addr=127.0.0.1 time_ms=6 duration=6.320674ms size=77 referer= handler=/api/ds/query status_source=server errorReason=BadRequest errorMessageID=query.noQueries error="no queries found"
+```
+
+Contrast with the malformed-body case above: that one fails inside `web.Bind` and returns the bare `{"message":"bad request data"}`, whereas this 400 originates one layer deeper (inside `QueryData` → `parseMetricRequest`), so its JSON envelope carries the structured `errutil` fields `statusCode`/`messageId`.
+
 ### Per-`refId` result error → HTTP 400 (query succeeds at HTTP layer, result carries error)
 
 Using the TestData `random_walk_with_error` scenario (`RandomWalkWithError` [scenarios.go:150], handler [scenarios.go:387]):
@@ -1016,7 +1049,7 @@ Response: **HTTP 200**, `results.A.status == 200`, `cache-control: no-store`, an
 
 ### Server-side expression query → routed through `handleExpressions`
 
-An expression query uses the special expression datasource. **Note:** the expression datasource UID is `__expr__` (`expr.DatasourceUID` [pkg/expr/service.go:28], value `"__expr__"` [pkg/expr/service.go:24]) — _not_ `__expression__` (an initial attempt with `__expression__` returned 404). The frontend appends `&expression=true` [DataSourceWithBackend.ts:224-225] and sets `X-Grafana-From-Expr: true` [DataSourceWithBackend.ts:86].
+An expression query uses the special expression datasource. **Note:** the expression datasource UID is `__expr__` (`expr.DatasourceUID` [pkg/expr/service.go:28], value `"__expr__"` [pkg/expr/service.go:24]) — _not_ `__expression__` (an initial attempt with `__expression__` returned 404). The frontend appends `&expression=true` [DataSourceWithBackend.ts:224-225] and sets `X-Grafana-From-Expr: true` [DataSourceWithBackend.ts:86]. The corroboration `curl` below deliberately keeps `ds_type=grafana-testdata-datasource` so the manual request stays parallel to the happy-path examples; the **genuine browser panel** issues `ds_type=__expr__` instead — captured and explained in the **Observed — real browser panel (`ds_type=__expr__`)** note after this section's log evidence.
 
 ```bash
 $ curl -sS -u admin:admin -H 'Content-Type: application/json' \
@@ -1041,6 +1074,20 @@ logger=expr datasourceType=grafana-testdata-datasource queryRefId=A datasourceUi
 ```
 
 `QueryData` detects the expression node and dispatches to `handleExpressions` [pkg/services/query/query.go:203].
+
+**Observed — real browser panel (`ds_type=__expr__`).** The corroboration `curl` above hand-set `ds_type=grafana-testdata-datasource`, but a real panel that contains an expression issues the request through the **expression datasource**, not through the TestData datasource. `runRequest` scans the request targets and, on the first expression reference, returns `expressionDatasource.query(request)` [public/app/features/query/state/runRequest.ts:224-225]; that instance's `this.type` is `__expr__` (`ExpressionDatasourceApi` is built from `instanceSettings` whose `type` is `ExpressionDatasourceRef.type` [public/app/features/expressions/ExpressionDatasource.ts:67,94], and `ExpressionDatasourceRef.type === '__expr__'` [packages/grafana-runtime/src/utils/DataSourceWithBackend.ts:41]). Because the URL is built as `'/api/ds/query?ds_type=' + this.type` [packages/grafana-runtime/src/utils/DataSourceWithBackend.ts:209], the panel's URL becomes `ds_type=__expr__`. This was reproduced by adding a `Math` expression `B = $A * 2` to the panel (dashboard `blitzyqa01`, panel id 1) and reading the DevTools Network entry. Captured URL and key request headers (verbatim):
+
+```text
+POST /api/ds/query?ds_type=__expr__&expression=true&requestId=SQR101   [HTTP 200]
+x-grafana-from-expr: true
+x-datasource-uid: efrgdigurs5xcc
+x-plugin-id: grafana-testdata-datasource
+x-panel-id: 1
+x-dashboard-uid: blitzyqa01
+x-panel-plugin-id: timeseries
+```
+
+Note that although the URL says `ds_type=__expr__`, the `X-Plugin-Id`/`X-Datasource-Uid` headers still name the underlying data source (`grafana-testdata-datasource` / `efrgdigurs5xcc`), because those headers aggregate the plugin IDs and UIDs of the datasources referenced by the queries [packages/grafana-runtime/src/utils/DataSourceWithBackend.ts:206-207], independent of which instance issued the request. The panel's request body carried both queries — `A` (`grafana-testdata-datasource`, with `datasourceId: 1`/`seriesCount: 1`) and `B` (`{"type":"__expr__","uid":"__expr__","name":"Expression"}`, `type: "math"`, `expression: "$A * 2"`) — and the **HTTP 200** response returned both `results.A` and `results.B`, with every `B` value exactly twice the corresponding `A` value (observed, e.g. `A[0] = 5.33207200640959` → `B[0] = 10.66414401281918`). **Cause → effect:** `ds_type` is only a client-side convenience label; the backend routes each query independently on its own per-query body `datasource` field, so the byte-identical body resolves correctly whether `ds_type` is `__expr__` (real panel) or `grafana-testdata-datasource` (the corroboration `curl`) — **observed** across both. Screenshot evidence of the rendered result (the yellow `B` line sitting at exactly double the green `A` line): `blitzy/screenshots/fix_f5_expression_panel_ds_type_expr.png`.
 
 ### grafanads "-- Grafana --" secondary built-in source
 
