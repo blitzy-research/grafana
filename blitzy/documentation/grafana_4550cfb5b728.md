@@ -168,13 +168,13 @@ The 10-minute cadence was **stable across two independent runs**: the measured c
 `599.99 s` (run1) / `599.99 s` (run2), and the plugin-update-checker interval was `600.05 s`/`599.98 s`
 (run1) and `600.03 s`/`600.00 s` (run2) — all within a few tens of milliseconds of the nominal 600 s.
 The 30-minute usage-stats cadence was likewise **stable across two independent extended idle runs**,
-each showing two consecutive `1800.00 s` intervals (`1800.002 s` then `1800.000 s` in *both* runs — see
+each showing two consecutive `1800.00 s` intervals (`1800.002 s` then `1800.000 s` in _both_ runs — see
 the "Extended idle run" evidence below).
 
 Two clarifications about the ≥ 60-second window the question specifies:
 
 1. **Neither 10-minute entry has fired yet inside the first 60 seconds.** The first cleanup tick and the
-   first *recurring* plugin-checker tick both land ~10 minutes after boot, so within the strict
+   first _recurring_ plugin-checker tick both land ~10 minutes after boot, so within the strict
    first-60-second window neither of the two 10-minute lines appears (the rest of the INFO stream at that
    point is one-time startup lines, which settle at ~`t+0`).
 2. **The 30-minute usage-stats line is the one recurring entry whose _first_ occurrence can appear at/near
@@ -230,9 +230,9 @@ logger=cleanup t=2026-07-08T06:01:47.270212733Z level=info msg="Completed cleanu
 
 Interval between consecutive occurrences:
 
-| Run              | 1st occurrence       | 2nd occurrence       | Interval                    |
-| ---------------- | -------------------- | -------------------- | --------------------------- |
-| run1 (port 3000) | `05:51:47.281380027` | `06:01:47.27118049` | **599.99 s (10.00 min)** |
+| Run              | 1st occurrence       | 2nd occurrence       | Interval                 |
+| ---------------- | -------------------- | -------------------- | ------------------------ |
+| run1 (port 3000) | `05:51:47.281380027` | `06:01:47.27118049`  | **599.99 s (10.00 min)** |
 | run2 (port 3001) | `05:51:47.281188628` | `06:01:47.270212733` | **599.99 s (10.00 min)** |
 
 The plugin update checker recurs on the same cadence (it additionally fires once at startup, so three
@@ -259,7 +259,7 @@ witness the first cleanup tick, and > 20 min to measure the interval between two
 ticks (done above — two ticks per run).
 
 **Extended idle run (30-minute usage-stats cadence).** The ≈ 24-minute runs above are long enough to
-measure the two 10-minute cadences but too short to capture a *second* `infra.usagestats` tick (its
+measure the two 10-minute cadences but too short to capture a _second_ `infra.usagestats` tick (its
 cadence is 30 minutes). Two additional pure-idle instances were therefore run — on the canonical binary
 (`version=11.5.0-pre`), ports 3000 and 3001, with data/logs/plugins redirected under `/tmp/investigation`
 — for **63.1 minutes** (`10:50:32Z` → `11:53:38Z`), specifically to observe the recurrence. The
@@ -344,9 +344,9 @@ momentary SQLite write contention — did **not** occur at all in either extende
   `s.updateTotalStats(ctx)` (`:L116`), and **after the first tick the ticker is re-armed to the 1800 s
   `sendInterval`** (`:L120` `updateStatsTicker.Reset(nextSendInterval)`) — which is exactly why the line
   **recurs every 30 minutes**. `updateTotalStats()` is what invokes `SetReadyToReport(ctx)` (`:L339`).
-  Note the distinction from a *separate* loop, **`UsageStats.Run()`**
+  Note the distinction from a _separate_ loop, **`UsageStats.Run()`**
   (`pkg/infra/usagestats/service/service.go:L56`), which runs on a **24 h** `sendInterval` (`:L70`
-  `sendInterval := time.Hour * 24`) and merely *sends* the collected stats (logging
+  `sendInterval := time.Hour * 24`) and merely _sends_ the collected stats (logging
   `Warn("Failed to send usage stats")` on failure at `:L90`); it does **not** emit the readiness line.
   The 30-minute recurrence therefore comes from the collector's ticker, not from the 24 h send loop.
 - Background services are launched as goroutines by **`Server.Run()`** —
@@ -394,7 +394,7 @@ to the fixed 1800 s interval.
   ticker is re-armed to the fixed 1800 s interval (`:L120`), with each tick calling `updateTotalStats()`
   (`:L116`) → `SetReadyToReport()` (`:L339`). A **separate** send loop (`UsageStats.Run()`,
   `pkg/infra/usagestats/service/service.go:L56`) runs on a **24 h** interval (`:L70`
-  `sendInterval := time.Hour * 24`) and only *sends* the collected stats — logging
+  `sendInterval := time.Hour * 24`) and only _sends_ the collected stats — logging
   `msg="Failed to send usage stats"` (Warn) on failure (`:L90`), which does not surface at INFO on an
   idle host. It is the collector's 30-minute ticker, **not** this 24 h send loop, that produces the
   recurring readiness line.
@@ -1890,8 +1890,8 @@ All three sources agree:
   build output is embedded in the "Investigation environment" section above). Verified directly:
   `./bin/linux-amd64/grafana --version` → `grafana version 11.5.0-pre`.
 - Invocation (run1, the instance queried above): `./bin/linux-amd64/grafana server --homepath="$PWD"
-  cfg:paths.data=/tmp/investigation/dataA cfg:paths.logs=/tmp/investigation/logs1
-  cfg:paths.plugins=/tmp/investigation/plugins1` (listening on `http://localhost:3000`).
+cfg:paths.data=/tmp/investigation/dataA cfg:paths.logs=/tmp/investigation/logs1
+cfg:paths.plugins=/tmp/investigation/plugins1` (listening on `http://localhost:3000`).
 - The reported `11.5.0-pre` is therefore the **canonical** value. The dev default `9.2.0`
   (`pkg/cmd/grafana/main.go:L17`) would appear only from an unstamped `go run` / `make run-go` and
   was **not** used here.
@@ -2376,29 +2376,29 @@ removes the transient `model.hide` flag from each query; it does not drop querie
 Each question decomposed into every distinct thing and named item it asks for, with where it is
 answered.
 
-| #   | Distinct ask                                                                            | Answered? | Where / value                                                                                                                                                                                        |
-| --- | --------------------------------------------------------------------------------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Q1  | Server running ≥ 60 s with no user requests                                             | ✅        | Idle proven; `grep` for request logs = `0` across all runs; no 10-minute recurring entry fires in the first 60 s (the usage-stats line's first tick can land at ~30–120 s)                           |
-| Q1  | The **exact recurring** log entries                                                     | ✅        | `msg="Completed cleanup jobs"` (10 min), `msg="Update check succeeded"` (`plugins.update.checker`, 10 min), **and** `msg="Usage stats are ready to report"` (`infra.usagestats`, 30 min)             |
-| Q1  | **Actual log output** as runtime evidence                                               | ✅        | Verbatim logfmt lines from run1 & run2 (10-min lines) + extended idle runs idle1 & idle2 (30-min usage-stats line) embedded                                                                          |
-| Q1  | Magnitude/timing observed & stable across ≥ 2 runs                                      | ✅        | Cleanup `599.99 s` & plugin-check `~600 s` in both ≈ 24-min runs; usage-stats **two consecutive `1800.00 s` intervals** (`1800.002 s`/`1800.000 s`) in each of two extended > 60-min idle runs (`10:50:32Z`→`11:53:38Z`, ≈ 63 min) |
+| #   | Distinct ask                                                                            | Answered? | Where / value                                                                                                                                                                                                                                                                                                             |
+| --- | --------------------------------------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Q1  | Server running ≥ 60 s with no user requests                                             | ✅        | Idle proven; `grep` for request logs = `0` across all runs; no 10-minute recurring entry fires in the first 60 s (the usage-stats line's first tick can land at ~30–120 s)                                                                                                                                                |
+| Q1  | The **exact recurring** log entries                                                     | ✅        | `msg="Completed cleanup jobs"` (10 min), `msg="Update check succeeded"` (`plugins.update.checker`, 10 min), **and** `msg="Usage stats are ready to report"` (`infra.usagestats`, 30 min)                                                                                                                                  |
+| Q1  | **Actual log output** as runtime evidence                                               | ✅        | Verbatim logfmt lines from run1 & run2 (10-min lines) + extended idle runs idle1 & idle2 (30-min usage-stats line) embedded                                                                                                                                                                                               |
+| Q1  | Magnitude/timing observed & stable across ≥ 2 runs                                      | ✅        | Cleanup `599.99 s` & plugin-check `~600 s` in both ≈ 24-min runs; usage-stats **two consecutive `1800.00 s` intervals** (`1800.002 s`/`1800.000 s`) in each of two extended > 60-min idle runs (`10:50:32Z`→`11:53:38Z`, ≈ 63 min)                                                                                        |
 | Q1  | Which part of the codebase                                                              | ✅        | `CleanUpService.clean()`/`Run()` (`cleanup.go:L77,L80,L128`); plugin checker `plugins.go:L78` (ticker) + `L123` (INFO emit); usage-stats `UsageStats.SetReadyToReport()` (`service.go:L116-117`) driven by `statscollector.Service.Run()` (`statscollector/service.go:L106,L120,L339`); `Server.Run()` (`server.go:L139`) |
-| Q2  | Server-start output confirming schema up to date                                        | ✅        | `msg="migrations completed" … performed=0 skipped=626`                                                                                                                                               |
-| Q2  | Runtime evidence of the migration check (before/after)                                  | ✅        | Fresh DB `performed=626`; migrated DB `performed=0` — both embedded                                                                                                                                  |
-| Q2  | Responsible symbol                                                                      | ✅        | `Migrator.run()` (`migrator.go:L241`, Info at `L247` & `L287`)                                                                                                                                       |
-| Q3  | Verify build info **by querying the API of the running instance**                       | ✅        | `GET /api/health` and `GET /api/frontend/settings` both queried live                                                                                                                                 |
-| Q3  | **Exact value** of the version string                                                   | ✅        | **`11.5.0-pre`**                                                                                                                                                                                     |
-| Q3  | Runtime evidence it was reported by the API                                             | ✅        | Full `curl` commands + unedited JSON for both endpoints + matching banner                                                                                                                            |
-| Q3  | Canonical build labeling / dev `9.2.0` handling                                         | ✅        | Canonical `make build-backend` (`-X main.version=11.5.0-pre`); dev `9.2.0` labeled non-canonical, not observed                                                                                       |
-| Q3  | Responsible symbols                                                                     | ✅        | `HTTPServer.apiHealthHandler` (`http_server.go:L710,L720`), `getFrontendSettings` (`frontendsettings.go:L161`), source chain `main.go:L17`→`build/cmd.go:L55,L247`                                   |
-| Q4  | Initialization logic during dashboard-view → panel-editor transition                    | ✅        | `onActivate()`→`loadDataSource()` (`PanelDataQueriesTab.tsx:L59-60,L63`)                                                                                                                             |
-| Q4  | **Test script output** proving the picker auto-resolves to the query-defined datasource | ✅        | `yarn jest PanelDataQueriesTab.test.tsx` — 25/25 PASS, incl. `should load data source`                                                                                                               |
-| Q4  | Whether it displays the datasource defined in the panel queries                         | ✅        | Yes — `state.datasource`/`dsSettings` from `queryRunner.state.datasource` → `QueryGroupTopSection`                                                                                                   |
-| Q4  | Which part of the codebase                                                              | ✅        | `PanelDataQueriesTab.loadDataSource()` + `QueryGroup.tsx` (picker host)                                                                                                                              |
-| Q5  | Alerting rule-creation process at runtime                                               | ✅        | Ruler API observed live — POST `RoutePostNameRulesConfig:L331` (202) + GET `RouteGetNamespaceRulesConfig:L193` (202, `grafana_alert.data` populated); by-UID variant `RouteGetRuleByUID:L309`; `AlertRule.Data` (`alert_rule.go:L746`)                                                                        |
-| Q5  | Whether backend rule definition populates query state on edit                           | ✅        | Yes — `form.queries` == backend `grafana_alert.data` (ad-hoc test) **and** confirmed by the observed Ruler round-trip (evidence (c))                                                                                                                     |
-| Q5  | **Test script output**                                                                  | ✅        | `yarn jest rule-form.test.ts` (21/21 PASS) + ad-hoc test (2/2 PASS) embedded                                                                                                                         |
-| Q5  | Which part of the codebase                                                              | ✅        | `formValuesFromExistingRule` & `rulerRuleToFormValues` (`rule-form.ts:L916-917,L365,L380,L402`), invoked by `AlertRuleForm` (`AlertRuleForm.tsx:L105,L126-128`); `ignoreHiddenQueries` (`L909,L912`) |
+| Q2  | Server-start output confirming schema up to date                                        | ✅        | `msg="migrations completed" … performed=0 skipped=626`                                                                                                                                                                                                                                                                    |
+| Q2  | Runtime evidence of the migration check (before/after)                                  | ✅        | Fresh DB `performed=626`; migrated DB `performed=0` — both embedded                                                                                                                                                                                                                                                       |
+| Q2  | Responsible symbol                                                                      | ✅        | `Migrator.run()` (`migrator.go:L241`, Info at `L247` & `L287`)                                                                                                                                                                                                                                                            |
+| Q3  | Verify build info **by querying the API of the running instance**                       | ✅        | `GET /api/health` and `GET /api/frontend/settings` both queried live                                                                                                                                                                                                                                                      |
+| Q3  | **Exact value** of the version string                                                   | ✅        | **`11.5.0-pre`**                                                                                                                                                                                                                                                                                                          |
+| Q3  | Runtime evidence it was reported by the API                                             | ✅        | Full `curl` commands + unedited JSON for both endpoints + matching banner                                                                                                                                                                                                                                                 |
+| Q3  | Canonical build labeling / dev `9.2.0` handling                                         | ✅        | Canonical `make build-backend` (`-X main.version=11.5.0-pre`); dev `9.2.0` labeled non-canonical, not observed                                                                                                                                                                                                            |
+| Q3  | Responsible symbols                                                                     | ✅        | `HTTPServer.apiHealthHandler` (`http_server.go:L710,L720`), `getFrontendSettings` (`frontendsettings.go:L161`), source chain `main.go:L17`→`build/cmd.go:L55,L247`                                                                                                                                                        |
+| Q4  | Initialization logic during dashboard-view → panel-editor transition                    | ✅        | `onActivate()`→`loadDataSource()` (`PanelDataQueriesTab.tsx:L59-60,L63`)                                                                                                                                                                                                                                                  |
+| Q4  | **Test script output** proving the picker auto-resolves to the query-defined datasource | ✅        | `yarn jest PanelDataQueriesTab.test.tsx` — 25/25 PASS, incl. `should load data source`                                                                                                                                                                                                                                    |
+| Q4  | Whether it displays the datasource defined in the panel queries                         | ✅        | Yes — `state.datasource`/`dsSettings` from `queryRunner.state.datasource` → `QueryGroupTopSection`                                                                                                                                                                                                                        |
+| Q4  | Which part of the codebase                                                              | ✅        | `PanelDataQueriesTab.loadDataSource()` + `QueryGroup.tsx` (picker host)                                                                                                                                                                                                                                                   |
+| Q5  | Alerting rule-creation process at runtime                                               | ✅        | Ruler API observed live — POST `RoutePostNameRulesConfig:L331` (202) + GET `RouteGetNamespaceRulesConfig:L193` (202, `grafana_alert.data` populated); by-UID variant `RouteGetRuleByUID:L309`; `AlertRule.Data` (`alert_rule.go:L746`)                                                                                    |
+| Q5  | Whether backend rule definition populates query state on edit                           | ✅        | Yes — `form.queries` == backend `grafana_alert.data` (ad-hoc test) **and** confirmed by the observed Ruler round-trip (evidence (c))                                                                                                                                                                                      |
+| Q5  | **Test script output**                                                                  | ✅        | `yarn jest rule-form.test.ts` (21/21 PASS) + ad-hoc test (2/2 PASS) embedded                                                                                                                                                                                                                                              |
+| Q5  | Which part of the codebase                                                              | ✅        | `formValuesFromExistingRule` & `rulerRuleToFormValues` (`rule-form.ts:L916-917,L365,L380,L402`), invoked by `AlertRuleForm` (`AlertRuleForm.tsx:L105,L126-128`); `ignoreHiddenQueries` (`L909,L912`)                                                                                                                      |
 
 **"Which part of the codebase" — answered by name for every question:**
 Q1 → `CleanUpService.clean()` (cleanup run loop) + `plugins.update.checker` + `statscollector.Service.Run()` / `UsageStats.SetReadyToReport()` (usage-stats);
