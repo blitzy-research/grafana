@@ -286,7 +286,7 @@ log line, and the blocking accept loop starts **after** it. The relevant window 
 ```
 
 - For `http`/`socket` the server calls `hs.httpSrv.Serve(listener)` [pkg/api/http_server.go:L451-L452].
-- For `h2`/`https` it calls `hs.httpSrv.ServeTLS(listener, "", "")` [pkg/api/http_server.go:L455-L456].
+- For `h2`/`https` it calls `hs.httpSrv.ServeTLS(listener, "", "")` [pkg/api/http_server.go:L459-L460].
 - `getListener()` builds a **TCP** listener via `net.Listen("tcp", hs.httpSrv.Addr)` for
   `http`/`https`/`h2`, or a **unix-socket** listener via `net.ListenUnix` followed by
   `os.Chmod(hs.Cfg.SocketPath, os.FileMode(hs.Cfg.SocketMode))` for `socket`
@@ -534,14 +534,16 @@ login = (formModel: FormModel) => {
 [public/app/core/components/Login/LoginPage.tsx:L84-L92]:
 
 ```tsx
-// public/app/core/components/Login/LoginPage.tsx:L84-L92 (excerpt)
-{isChangingPassword && !config.auth.passwordlessEnabled && (
-  <ChangePassword
-    showDefaultPasswordWarning={showDefaultPasswordWarning}
-    onSubmit={changePassword}
-    onSkip={() => skipPasswordChange()}
-  />
-)}
+// public/app/core/components/Login/LoginPage.tsx:L84-L92
+          {isChangingPassword && !config.auth.passwordlessEnabled && (
+            <InnerBox>
+              <ChangePassword
+                showDefaultPasswordWarning={showDefaultPasswordWarning}
+                onSubmit={changePassword}
+                onSkip={() => skipPasswordChange()}
+              />
+            </InnerBox>
+          )}
 ```
 
 > **Frontend-rendering label:** the change-password *view* itself was **inferred from code**
@@ -554,14 +556,26 @@ login = (formModel: FormModel) => {
 `PUT /api/user/password` [public/app/core/components/Login/LoginCtrl.tsx:L78-L105]:
 
 ```ts
-// public/app/core/components/Login/LoginCtrl.tsx:L78-L105 (excerpt)
-changePassword = (password: string) => {
+// public/app/core/components/Login/LoginCtrl.tsx:L78-L105
+  changePassword = (password: string) => {
     const pw = {
       newPassword: password,
       confirmNew: password,
       oldPassword: 'admin',
     };
-    ...
+
+    if (this.props.resetCode) {
+      const resetModel = {
+        code: this.props.resetCode,
+        newPassword: password,
+        confirmPassword: password,
+      };
+
+      getBackendSrv()
+        .post('/api/user/password/reset', resetModel)
+        .then(() => {
+          this.toGrafana();
+        });
     } else {
       getBackendSrv()
         .put('/api/user/password', pw)
@@ -570,8 +584,13 @@ changePassword = (password: string) => {
         })
         .catch((err) => console.error(err));
     }
-};
+  };
 ```
+
+For the first-login path `this.props.resetCode` is undefined, so the `else` branch runs and issues
+`PUT /api/user/password` [public/app/core/components/Login/LoginCtrl.tsx:L97-L99]; the
+`if (this.props.resetCode)` branch above is the separate forgotten-password reset-via-code flow
+(`POST /api/user/password/reset`) and is not exercised on first login.
 
 Driving that exact call with the authenticated session cookie:
 
@@ -827,7 +846,7 @@ configured SQL store and **caches the boolean for 5 seconds** under key `"db-hea
 [pkg/api/health.go:L10-L25]:
 
 ```go
-// pkg/api/health.go:L10-L24
+// pkg/api/health.go:L10-L25
 func (hs *HTTPServer) databaseHealthy(ctx context.Context) bool {
 	const cacheKey = "db-healthy"
 
@@ -1171,7 +1190,7 @@ at:
 critically, the per-service log is at **DEBUG** level [pkg/server/server.go:L162]:
 
 ```go
-// pkg/server/server.go:L146-L179 (excerpt)
+// pkg/server/server.go:L146-L179
 	services := s.backgroundServices
 
 	// Start background services.
@@ -1190,7 +1209,15 @@ critically, the per-service log is at **DEBUG** level [pkg/server/server.go:L162
 			}
 			s.log.Debug("Starting background service", "service", serviceName)
 			err := service.Run(s.context)
-			...
+			// Do not return context.Canceled error since errgroup.Group only
+			// returns the first error to the caller - thus we can miss a more
+			// interesting error.
+			if err != nil && !errors.Is(err, context.Canceled) {
+				s.log.Error("Stopped background service", "service", serviceName, "reason", err)
+				return fmt.Errorf("%s run error: %w", serviceName, err)
+			}
+			s.log.Debug("Stopped background service", "service", serviceName, "reason", err)
+			return nil
 		})
 	}
 
