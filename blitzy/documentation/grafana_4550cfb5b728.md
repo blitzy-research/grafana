@@ -125,6 +125,65 @@ var enterpriseCommit = gcli.DefaultCommitValue
 var buildBranch = "main"
 ```
 
+**Commit provenance & exact reproducibility.** The `version` above is read from `package.json`
+and is identical on every rebuild, but the `commit` value is stamped from the *build tree's*
+Git HEAD: `build.go` calls `getGitSha()`, which runs `git rev-parse --short HEAD`
+[pkg/build/git.go:L11-L17 — the `rev-parse` is at L12], and emits the result as the linker
+flag `-X main.commit=<sha>` [pkg/build/cmd.go:L228 (`commitSha := getGitSha()`), L248
+(`-X main.commit=%s`)]. The observed `commit` therefore always equals the short SHA of the
+exact revision the binary was built from; it is the single build-dependent value that tracks
+the build revision by construction and reflects no behavioral difference.
+
+The `4550cfb5b7` reported in every build/health block below is the short SHA of the pinned
+canonical base revision named above, captured by building at that revision. That mapping is
+fixed:
+
+```console
+$ git rev-parse --short 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff
+4550cfb5b7
+```
+
+This strictly read-only investigation adds exactly one artifact on top of that base revision —
+this document — and changes no source, build, or configuration file. Diffing every
+source/build/config path between the base revision and the branch tip produces no output; the
+only tracked difference is the added document itself:
+
+```console
+$ git diff --stat 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff HEAD -- pkg conf public Makefile go.mod package.json build.go
+$                                          # (no output — zero source/build/config changes)
+$ git diff --name-status 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff HEAD
+A       blitzy/documentation/grafana_4550cfb5b728.md
+```
+
+Because a documentation-only commit still advances the branch HEAD, rebuilding from such a
+descendant stamps *that* descendant's short SHA instead of `4550cfb5b7`. This is a pure
+build-metadata difference: `version` stays `11.5.0-pre`, the `/api/health` body stays 75 bytes
+(any 10-character short SHA leaves `Content-Length` unchanged), and every behavioral
+observation in this document (the listen line, the health JSON shape, the 36-service
+enumeration, the login flow) is byte-identical, because the compiled source is byte-identical.
+For example, at the branch tip at the time of writing — `dbdd0bd66e`, a documentation-only
+descendant of the base — the same canonical build stamps `commit=dbdd0bd66e`:
+
+```console
+$ git rev-parse --short HEAD                # documentation-only descendant (branch tip at time of writing)
+dbdd0bd66e
+$ ./bin/linux-amd64/grafana server --version
+Version 11.5.0-pre (commit: dbdd0bd66e, branch: blitzy-9bd4d785-f42c-4324-90e2-ee47d660145a)
+$ curl -s http://localhost:3000/api/health
+{
+  "database": "ok",
+  "version": "11.5.0-pre",
+  "commit": "dbdd0bd66e"
+}
+```
+
+To reproduce the documented `commit=4550cfb5b7` exactly, build at the pinned base revision:
+
+```console
+$ git checkout 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff
+$ go run build.go -build-tags=oss build     # emits -X main.commit=4550cfb5b7
+```
+
 **Run command (default canonical config):**
 
 ```console
