@@ -75,11 +75,14 @@ go version go1.23.1 linux/amd64
 Targeting linux/amd64
 ```
 
-The banner reports `commit=fed6d6df08`. That is the current branch `HEAD`; its **only** delta from the
-pinned parent commit `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` is *this Markdown document* — there is no
-Go source change, so the compiled scheduler behavior is identical to the pinned commit (see the read-only
-proof in §6.4). The real server binary (the 298 MB `grafana` command, distinct from the deprecation-shim
-`grafana-server` produced above) was then built directly:
+The banner reports `commit=fed6d6df08` — the short hash of the doc-only commit that was branch `HEAD` when
+this build ran. Its **only** delta from the pinned parent commit
+`4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` is *this Markdown document*, and the same invariant holds for the
+current `HEAD`: the cumulative diff from the pinned commit is exactly this one file (revising this document
+stacks additional doc-only commits but never touches source). There is no Go source change, so the compiled
+scheduler behavior is identical to the pinned commit (see the read-only proof in §6.4). The real server
+binary (the 298 MB `grafana` command, distinct from the deprecation-shim `grafana-server` produced above)
+was then built directly:
 
 ```console
 $ go build -o ./bin/linux-amd64/grafana ./pkg/cmd/grafana
@@ -1406,7 +1409,7 @@ stress is not borne out by either run.
 | Defaults (timeout 30 s / attempts 3 / base 10 s / eval 60 s) | package constants | `setting_unified_alerting.go:49,52,62,64` |
 | Scheduler wiring / logger name | `SchedulerCfg{... Log: log.New("ngalert.scheduler")}` → `NewScheduler` | `ngalert.go:376,390,424` |
 
-### 6.2 Anchor reference table (every `file:line` cited, verified at HEAD `fed6d6df08`)
+### 6.2 Anchor reference table (every `file:line` cited, verified against the pinned commit `4550cfb5b728`)
 
 - **`schedule.go`** — `schedulePeriodic` `205`; `start := time.Now().Round(0)` `214`; `BehindSeconds.Set`
   `215`; `processTick` `235`; `Rule restarted because type changed` `295`; `itemFrequency` `314`; `offset`
@@ -1470,15 +1473,16 @@ All observation was read-only against the source tree. Every temporary artifact 
 lived under `/tmp/obs2` (outside the repository) and was removed after the investigation. The server
 binaries and the generated `pkg/server/wire_gen.go` are git-ignored build artifacts.
 
-The **only** change to the repository is this one document. It sits directly on the pinned commit, and the
-manifests are untouched:
+The **only** change to the repository is this one document. The pinned commit is an ancestor of the current
+`HEAD`, its entire cumulative delta is this single file (revising this document stacks another doc-only
+commit on top but never changes that invariant), and the manifests are untouched:
 
 ```console
-$ git rev-parse HEAD~1                                      # parent = pinned commit
-4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff
-$ git diff --name-only 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff
+$ git merge-base --is-ancestor 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff HEAD && echo "pinned is an ancestor of HEAD"
+pinned is an ancestor of HEAD
+$ git diff --name-only 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff HEAD
 blitzy/documentation/grafana_4550cfb5b728.md
-$ git diff --stat 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff -- go.mod go.sum package.json
+$ git diff --name-only 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff HEAD -- go.mod go.sum package.json
 $ git check-ignore bin/linux-amd64/grafana pkg/server/wire_gen.go
 bin/linux-amd64/grafana
 pkg/server/wire_gen.go
@@ -1491,12 +1495,13 @@ satisfied.
 ### 6.5 Environment caveat (build/version labels)
 
 - The server was **built** with the canonical `make build-server`, whose banner reports `Version: 11.5.0`
-  and `commit=fed6d6df08` (§1.2). The **real** server binary that was actually run
-  (`./bin/linux-amd64/grafana`, built via `go build ./pkg/cmd/grafana` without version ldflags) reports
-  `grafana version 9.2.0` at `--version`. These are two build-embedded *labels* on the same tree; the
-  **authoritative** identifier of the code that ran is the **git commit** — branch `HEAD` `fed6d6df08`,
-  whose only delta from the pinned parent `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` is *this document*
-  (§6.4). All source citations are line-verified against that checked-out tree.
+  and `commit=fed6d6df08` (§1.2) — the short hash of the doc-only commit that was `HEAD` when that build
+  ran. The **real** server binary that was actually run (`./bin/linux-amd64/grafana`, built via
+  `go build ./pkg/cmd/grafana` without version ldflags) reports `grafana version 9.2.0` at `--version`.
+  These are two build-embedded *labels* on the same tree; the **authoritative** identifier of the code that
+  ran is the **git commit**, whose only cumulative delta from the pinned parent
+  `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` is *this document* (§6.4). All source citations are
+  line-verified against that tree, which is byte-identical to the pinned commit for every cited source file.
 - The slow/fast data sources and the short tick interval are **test levers**, not product defaults. The
   canonical defaults (10 s tick, 30 s eval timeout, 3 attempts, 60 s rule interval) are stated in
   §1.5/§1.7; the stressed run departs from them **by configuration only** (the `configurableSchedulerTick`
