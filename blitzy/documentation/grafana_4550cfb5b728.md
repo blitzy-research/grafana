@@ -69,13 +69,13 @@ const DEFAULT_EMPTY_VALUE = SpecialValue.Empty;
 **2. Resolving the option to the default when unset** — `groupingToMatrix.ts:71`:
 
 ```typescript
-const emptyValue = options.emptyValue || DEFAULT_EMPTY_VALUE;
+        const emptyValue = options.emptyValue || DEFAULT_EMPTY_VALUE;
 ```
 
 **3. The missing-cell line (the heart of the emit)** — `groupingToMatrix.ts:117`:
 
 ```typescript
-const value = matrixValues[columnName][rowName] ?? getSpecialValue(emptyValue);
+            const value = matrixValues[columnName][rowName] ?? getSpecialValue(emptyValue);
 ```
 
 `matrixValues[columnName][rowName]` is `undefined` for a `(column, row)` combination that never appeared in the input. The `??` (nullish coalescing) operator therefore falls through to `getSpecialValue(emptyValue)` — so the emitted value for a missing cell is whatever `getSpecialValue` returns for the resolved `emptyValue`.
@@ -83,8 +83,8 @@ const value = matrixValues[columnName][rowName] ?? getSpecialValue(emptyValue);
 **4. The produced column preserves the value field's config and type** — `groupingToMatrix.ts:132-133`:
 
 ```typescript
-config: valueField.config,
-type: valueField.type,
+            config: valueField.config,
+            type: valueField.type,
 ```
 
 This is why the empty-string fill lands in a field still declared as `number`: the column inherits `type: valueField.type`. That preserved numeric type over a non-numeric placeholder is the **latent root cause** of the downstream coercion inconsistencies.
@@ -125,12 +125,12 @@ There is **no `Zero` member** — zero is not an available fill option anywhere 
 **7. The editor UI exposing the options** — `public/app/features/transformers/editors/GroupingToMatrixTransformerEditor.tsx:61-66`:
 
 ```typescript
-const specialValueOptions: Array<SelectableValue<SpecialValue>> = [
-  { label: 'Null', value: SpecialValue.Null, description: 'Null value' },
-  { label: 'True', value: SpecialValue.True, description: 'Boolean true value' },
-  { label: 'False', value: SpecialValue.False, description: 'Boolean false value' },
-  { label: 'Empty', value: SpecialValue.Empty, description: 'Empty string' },
-];
+  const specialValueOptions: Array<SelectableValue<SpecialValue>> = [
+    { label: 'Null', value: SpecialValue.Null, description: 'Null value' },
+    { label: 'True', value: SpecialValue.True, description: 'Boolean true value' },
+    { label: 'False', value: SpecialValue.False, description: 'Boolean false value' },
+    { label: 'Empty', value: SpecialValue.Empty, description: 'Empty string' },
+  ];
 ```
 
 The user sees exactly **Null / True / False / Empty** — confirming the UI has no zero option.
@@ -209,7 +209,7 @@ export function reduceField(options: ReduceFieldOptions): FieldCalcs {
 **3. Default null handling** — `fieldReducer.ts:198`:
 
 ```typescript
-const { nullValueMode = NullValueMode.Ignore } = field.config;
+  const { nullValueMode = NullValueMode.Ignore } = field.config;
 ```
 
 **4. The function that actually performs sum/mean/count** — `fieldReducer.ts:468`:
@@ -234,7 +234,7 @@ An empty string is **not** `== null`, so it is **neither** skipped (ignoreNulls)
 **6. Count increments for every cell** — `fieldReducer.ts:498`:
 
 ```typescript
-calcs.count++;
+    calcs.count++;
 ```
 
 **7. The numeric guard** — `fieldReducer.ts:500`:
@@ -248,7 +248,7 @@ calcs.count++;
 **8. The divergence site (SUM)** — `fieldReducer.ts:508`:
 
 ```typescript
-calcs.sum += currentValue;
+        calcs.sum += currentValue;
 ```
 
 For the empty string this executes `30 + ''`, which in JavaScript is **string concatenation** → the running sum becomes the string `"30"`.
@@ -256,7 +256,7 @@ For the empty string this executes `30 + ''`, which in JavaScript is **string co
 **9. Non-null count increments too** — `fieldReducer.ts:510`:
 
 ```typescript
-calcs.nonNullCount++;
+        calcs.nonNullCount++;
 ```
 
 The empty string counts as non-null.
@@ -264,7 +264,7 @@ The empty string counts as non-null.
 **10. MEAN divides the (string) sum** — `fieldReducer.ts:569`:
 
 ```typescript
-calcs.mean = calcs.sum! / calcs.nonNullCount;
+    calcs.mean = calcs.sum! / calcs.nonNullCount;
 ```
 
 Dividing the string `"30"` by a number coerces back to a number: `"30" / 2 === 15`.
