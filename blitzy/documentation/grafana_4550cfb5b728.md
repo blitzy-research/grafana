@@ -136,6 +136,12 @@ window at `2026-07-08T05:41:47Z` (the instant each logged `HTTP Server Listen`) 
 **Methodology & honesty conventions**
 
 - Backend questions (Q1–Q3) were answered from these running instances.
+- Q1 additionally uses a pair of **extended (> 60-minute) pure-idle runs** — two instances on the
+  canonical binary (`version=11.5.0-pre`), ports 3000/3001, `10:50:32Z` → `11:53:38Z` (≈ 63 min),
+  data/logs redirected under `/tmp/investigation` — performed specifically to observe the 30-minute
+  `infra.usagestats` cadence that the ≈ 24-minute runs above are too short to capture (see Q1's
+  "Extended idle run"). The usage-stats cadence is set by `total_stats_collector_interval_seconds` and is
+  independent of build stamping, so these runs are directly comparable to the runs above.
 - Frontend questions (Q4–Q5) were answered by running the modules' own **Jest** tests through
   their real code paths (non-watch, `--ci`); Q5 additionally uses one temporary ad-hoc test
   (now deleted) that directly exercises the responsible functions.
@@ -152,25 +158,34 @@ window at `2026-07-08T05:41:47Z` (the instant each logged `HTTP Server Listen`) 
 At the default **INFO** log level an idle Grafana server is almost silent. Distinguishing
 **recurring** entries (what the question asks for) from one-time startup lines, the answer is:
 
-**Exactly two INFO log entries _recur_, both on a 10-minute cadence:**
+**Three INFO log entries _recur_ on a fixed cadence — two every 10 minutes and one every 30 minutes:**
 
-- `msg="Completed cleanup jobs"` (`logger=cleanup`) — the background cleanup service.
-- `msg="Update check succeeded"` (`logger=plugins.update.checker`) — the plugin update checker.
+- `msg="Completed cleanup jobs"` (`logger=cleanup`) — the background cleanup service (**10-minute** cadence).
+- `msg="Update check succeeded"` (`logger=plugins.update.checker`) — the plugin update checker (**10-minute** cadence).
+- `msg="Usage stats are ready to report"` (`logger=infra.usagestats`) — the usage-stats collector (**30-minute** cadence).
 
 The 10-minute cadence was **stable across two independent runs**: the measured cleanup interval was
 `599.99 s` (run1) / `599.99 s` (run2), and the plugin-update-checker interval was `600.05 s`/`599.98 s`
 (run1) and `600.03 s`/`600.00 s` (run2) — all within a few tens of milliseconds of the nominal 600 s.
+The 30-minute usage-stats cadence was likewise **stable across two independent extended idle runs**,
+each showing two consecutive `1800.00 s` intervals (`1800.002 s` then `1800.000 s` in *both* runs — see
+the "Extended idle run" evidence below).
 
 Two clarifications about the ≥ 60-second window the question specifies:
 
-1. **No _recurring_ entry has fired yet inside the first 60 seconds.** The first cleanup tick and the
+1. **Neither 10-minute entry has fired yet inside the first 60 seconds.** The first cleanup tick and the
    first *recurring* plugin-checker tick both land ~10 minutes after boot, so within the strict
-   first-60-second window the INFO stream shows only one-time startup lines (which settle at ~`t+0`).
-2. **One _non-recurring_ INFO line does surface near the 60-second mark:**
-   `msg="Usage stats are ready to report"` (`logger=infra.usagestats`). It fires exactly once, at a
-   **randomized 30–120 s** offset after startup — observed at `+58.0 s` in run2 (inside the window)
-   and `+63.0 s` in run1 (just outside it). It is a one-time readiness signal, **not** a recurring
-   entry (see "Secondary / edge conditions").
+   first-60-second window neither of the two 10-minute lines appears (the rest of the INFO stream at that
+   point is one-time startup lines, which settle at ~`t+0`).
+2. **The 30-minute usage-stats line is the one recurring entry whose _first_ occurrence can appear at/near
+   the 60-second mark:** `msg="Usage stats are ready to report"` (`logger=infra.usagestats`). Its **first**
+   occurrence lands at a **randomized 30–120 s** offset after startup — observed at `+58.0 s` in run2 and
+   `+63.0 s` in run1 (original runs), and at `+54.0 s` (inside the window) and `+118.0 s` (just outside it)
+   in the two extended idle runs. After that first tick it **recurs every 30 minutes** (see the "Extended
+   idle run" evidence below); it is therefore a genuine recurring entry, not a one-time signal. Observing
+   the recurrence requires an idle window longer than 30 minutes: the ≈ 24-minute runs used for Q1's
+   10-minute cadence capture only the first usage-stats occurrence, which is why the extended (> 60-minute)
+   idle runs below were performed.
 
 ### Runtime evidence
 
@@ -237,10 +252,68 @@ logger=plugins.update.checker t=2026-07-08T06:01:47.323588687Z level=info msg="U
 
 Its intervals were `600.05 s`/`599.98 s` (run1) and `600.03 s`/`600.00 s` (run2).
 
-**Run durations used:** both runs ran ≈ 24 minutes (idle window `05:41:47Z` → ~`06:05:47Z`; run1.log
-= 102 lines, run2.log = 71 lines total — themselves evidence of how sparse an idle INFO stream
-is). A ≥ 60 s window proves idleness; a > 10 min window is required to witness the first cleanup tick,
-and > 20 min to measure the interval between two consecutive ticks (done above — two ticks per run).
+**Run durations used (10-minute cadences):** both runs above ran ≈ 24 minutes (idle window
+`05:41:47Z` → ~`06:05:47Z`; run1.log = 102 lines, run2.log = 71 lines total — themselves evidence of
+how sparse an idle INFO stream is). A ≥ 60 s window proves idleness; a > 10 min window is required to
+witness the first cleanup tick, and > 20 min to measure the interval between two consecutive 10-minute
+ticks (done above — two ticks per run).
+
+**Extended idle run (30-minute usage-stats cadence).** The ≈ 24-minute runs above are long enough to
+measure the two 10-minute cadences but too short to capture a *second* `infra.usagestats` tick (its
+cadence is 30 minutes). Two additional pure-idle instances were therefore run — on the canonical binary
+(`version=11.5.0-pre`), ports 3000 and 3001, with data/logs/plugins redirected under `/tmp/investigation`
+— for **63.1 minutes** (`10:50:32Z` → `11:53:38Z`), specifically to observe the recurrence. The
+usage-stats cadence derives solely from `total_stats_collector_interval_seconds` (default `1800`) and is
+independent of link-time build stamping, so these runs are directly comparable to the runs above.
+
+Both extended instances were genuinely idle (zero inbound HTTP requests) and each emitted only 77 log
+lines over the full 63 minutes:
+
+```
+$ grep -cE "logger=context|method=GET|method=POST|status=" /tmp/investigation/idle1.log
+0
+$ grep -cE "logger=context|method=GET|method=POST|status=" /tmp/investigation/idle2.log
+0
+```
+
+The `infra.usagestats` line recurs three times per run — i.e. two consecutive 30-minute intervals:
+
+```
+$ grep "Usage stats are ready to report" /tmp/investigation/idle2.log
+logger=infra.usagestats t=2026-07-08T10:52:30.734271555Z level=info msg="Usage stats are ready to report"
+logger=infra.usagestats t=2026-07-08T11:22:30.735795343Z level=info msg="Usage stats are ready to report"
+logger=infra.usagestats t=2026-07-08T11:52:30.73594465Z level=info msg="Usage stats are ready to report"
+
+$ grep "Usage stats are ready to report" /tmp/investigation/idle1.log
+logger=infra.usagestats t=2026-07-08T10:51:26.734078329Z level=info msg="Usage stats are ready to report"
+logger=infra.usagestats t=2026-07-08T11:21:26.73622786Z level=info msg="Usage stats are ready to report"
+logger=infra.usagestats t=2026-07-08T11:51:26.736005651Z level=info msg="Usage stats are ready to report"
+```
+
+Interval between consecutive occurrences (two intervals per run):
+
+| Run               | 1st → 2nd               | 2nd → 3rd               | Both intervals                          |
+| ----------------- | ----------------------- | ----------------------- | --------------------------------------- |
+| idle1 (port 3000) | `10:51:26` → `11:21:26` | `11:21:26` → `11:51:26` | **1800.002 s / 1800.000 s (30.00 min)** |
+| idle2 (port 3001) | `10:52:30` → `11:22:30` | `11:22:30` → `11:52:30` | **1800.002 s / 1800.000 s (30.00 min)** |
+
+The two 10-minute lines recur throughout this same 63-minute window as well (six cleanup ticks and
+seven plugin-checker occurrences per run), confirming those cadences over a longer horizon too:
+
+```
+$ grep -c "Completed cleanup jobs" /tmp/investigation/idle2.log
+6
+$ grep -c "logger=plugins.update.checker" /tmp/investigation/idle2.log
+7
+```
+
+A per-message recurrence scan of the extended idle stream confirms **exactly these three** INFO
+messages recur on a fixed cadence; every other message with more than one occurrence is a simultaneous
+startup burst with a sub-second span (e.g. the `migrator` and `resource-migrator` scopes each logging
+`Starting DB migrations`/`migrations completed` once at boot, ~0.2 s apart). The transient
+`sqlstore.transactions` `"Database locked, sleeping then retrying"` retry — which can appear under
+momentary SQLite write contention — did **not** occur at all in either extended idle run (`grep -c` =
+`0`), confirming it is load-dependent rather than a ticker-driven recurring entry.
 
 ### Responsible code
 
@@ -258,6 +331,24 @@ and > 20 min to measure the interval between two consecutive ticks (done above �
   `ctxLogger.Info("Update check succeeded", "duration", time.Since(start))`, driven by the 10-minute
   ticker created in **`PluginsService.Run()`** at `pkg/services/updatechecker/plugins.go:L78`
   `ticker := time.NewTicker(time.Minute * 10)`, under `logger=plugins.update.checker`.
+- **Usage-stats readiness line** — `msg="Usage stats are ready to report"` is emitted by
+  **`UsageStats.SetReadyToReport()`** at `pkg/infra/usagestats/service/service.go:L116`
+  (`uss.log.Info("Usage stats are ready to report")` at `:L117`), under `logger=infra.usagestats`. Its
+  **30-minute recurrence** is driven by the stats collector **`statscollector.Service.Run()`**
+  (`pkg/infra/usagestats/statscollector/service.go:L106`): the loop's `sendInterval` is
+  `MetricsTotalStatsIntervalSeconds` (`:L107`), whose default is **1800 s** (`conf/defaults.ini:L1592`
+  `total_stats_collector_interval_seconds = 1800`, read by `pkg/setting/setting.go:L1153`
+  `MustInt(1800)`). The **first** tick fires after a randomized initial delay computed at `:L108`
+  (`nextSendInterval := time.Duration(rand.Intn(maxDelay-minDelay)+minDelay) * time.Second`, with
+  `minDelay = 30`/`maxDelay = 120` at `:L28`/`:L29` ⇒ 30–119 s). Each tick calls
+  `s.updateTotalStats(ctx)` (`:L116`), and **after the first tick the ticker is re-armed to the 1800 s
+  `sendInterval`** (`:L120` `updateStatsTicker.Reset(nextSendInterval)`) — which is exactly why the line
+  **recurs every 30 minutes**. `updateTotalStats()` is what invokes `SetReadyToReport(ctx)` (`:L339`).
+  Note the distinction from a *separate* loop, **`UsageStats.Run()`**
+  (`pkg/infra/usagestats/service/service.go:L56`), which runs on a **24 h** `sendInterval` (`:L70`
+  `sendInterval := time.Hour * 24`) and merely *sends* the collected stats (logging
+  `Warn("Failed to send usage stats")` on failure at `:L90`); it does **not** emit the readiness line.
+  The 30-minute recurrence therefore comes from the collector's ticker, not from the 24 h send loop.
 - Background services are launched as goroutines by **`Server.Run()`** —
   `pkg/server/server.go:L139` (`func (s *Server) Run() error`); the launch loop uses an `errgroup`
   and skips disabled services (`pkg/server/server.go:L150` `registry.IsDisabled(svc)`,
@@ -267,10 +358,15 @@ and > 20 min to measure the interval between two consecutive ticks (done above �
 ### Rationale
 
 The idle INFO stream is sparse **by design**: the default log level is INFO, and most periodic
-background services log their per-tick activity at **DEBUG** (invisible at INFO). The two lines that
-do surface are the ones whose services log at INFO on a 10-minute ticker. The exact 10.00-minute
-spacing follows directly from `time.NewTicker(time.Minute * 10)`, and the first cleanup occurrence
-lands ~10 minutes after boot because the completion message is emitted only from the ticker branch.
+background services log their per-tick activity at **DEBUG** (invisible at INFO). The three lines that
+do surface are the ones whose services log at INFO on a ticker: the cleanup service and the plugin
+update checker, each on a 10-minute `time.NewTicker(time.Minute * 10)`, and the usage-stats collector on
+a 30-minute ticker (`total_stats_collector_interval_seconds`, default 1800 s). The exact 10.00-minute
+and 30.00-minute spacings follow directly from those ticker intervals. The first cleanup occurrence lands
+~10 minutes after boot because the completion message is emitted only from the ticker branch; the
+usage-stats line's first occurrence instead lands at a randomized 30–120 s offset — because its collector
+ticker starts with a random initial delay — and then recurs every 30 minutes once that ticker is re-armed
+to the fixed 1800 s interval.
 
 ### Secondary / edge conditions (enumerated and observed)
 
@@ -288,23 +384,20 @@ lands ~10 minutes after boot because the completion message is emitted only from
   (`pkg/services/ngalert/schedule/schedule.go:L157` `sch.log.Info("Starting scheduler", ...)`) — not a
   recurring entry.
 
-- **One-time `infra.usagestats "Usage stats are ready to report"` near the 60-second mark.** This is
-  the INFO line that surfaces closest to the question's 60 s boundary, but it is emitted **exactly
-  once**, not on a recurring cadence, and its offset is **randomized**:
-
-  ```
-  logger=infra.usagestats t=2026-07-08T05:42:45.26096101Z level=info msg="Usage stats are ready to report"
-  logger=infra.usagestats t=2026-07-08T05:42:50.263380874Z level=info msg="Usage stats are ready to report"
-  ```
-
-  observed at `+58.0 s` (run2, inside the 60 s window) and `+63.0 s` (run1, just outside it).
-  The randomness is by design: readiness is flagged by **`UsageStats.SetReadyToReport()`**
-  (`pkg/infra/usagestats/service/service.go:L116`), called by the stats collector
-  (`pkg/infra/usagestats/statscollector/service.go:L339`) only after an initial delay computed at
-  `pkg/infra/usagestats/statscollector/service.go:L108`
-  `nextSendInterval := time.Duration(rand.Intn(maxDelay-minDelay)+minDelay) * time.Second`
-  with `minDelay = 30` / `maxDelay = 120` (`:L28`/`:L29`) — i.e. a random 30–119 s. The subsequent
-  send loop then runs on a 24 h cadence, so this line does not recur within the window.
+- **Two distinct `infra.usagestats` loops (only one produces the recurring readiness line).** The
+  recurring 30-minute `msg="Usage stats are ready to report"` line is covered in the direct answer,
+  runtime evidence, and responsible-code sections above; the edge-condition nuance worth enumerating here
+  is that usage-stats runs **two** independent loops. The **stats collector**
+  (`statscollector.Service.Run()`, `pkg/infra/usagestats/statscollector/service.go:L106`) drives the
+  readiness line on the 30-minute `total_stats_collector_interval_seconds` ticker — its first tick fires
+  at the randomized 30–120 s offset (`:L108`, `minDelay = 30`/`maxDelay = 120` at `:L28`/`:L29`), then the
+  ticker is re-armed to the fixed 1800 s interval (`:L120`), with each tick calling `updateTotalStats()`
+  (`:L116`) → `SetReadyToReport()` (`:L339`). A **separate** send loop (`UsageStats.Run()`,
+  `pkg/infra/usagestats/service/service.go:L56`) runs on a **24 h** interval (`:L70`
+  `sendInterval := time.Hour * 24`) and only *sends* the collected stats — logging
+  `msg="Failed to send usage stats"` (Warn) on failure (`:L90`), which does not surface at INFO on an
+  idle host. It is the collector's 30-minute ticker, **not** this 24 h send loop, that produces the
+  recurring readiness line.
 - **Longer-cadence (24 h) INFO line** that fires once in this ~24-minute window and would only recur
   after a day: `logger=grafana.update.checker msg="Update check succeeded"`, driven by a 24 h ticker
   (`pkg/services/updatechecker/grafana.go:L63` `time.NewTicker(time.Hour * 24)`) and emitted by
@@ -2285,11 +2378,11 @@ answered.
 
 | #   | Distinct ask                                                                            | Answered? | Where / value                                                                                                                                                                                        |
 | --- | --------------------------------------------------------------------------------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Q1  | Server running ≥ 60 s with no user requests                                             | ✅        | Idle proven; `grep` for request logs on run2 = `0`; first 60 s after startup is silent                                                                                                               |
-| Q1  | The **exact recurring** log entries                                                     | ✅        | `msg="Completed cleanup jobs"` (10 min) **and** `msg="Update check succeeded"` (`plugins.update.checker`, 10 min)                                                                                    |
-| Q1  | **Actual log output** as runtime evidence                                               | ✅        | Verbatim logfmt lines from run1 & run2 embedded                                                                                                                                                      |
-| Q1  | Magnitude/timing observed & stable across ≥ 2 runs                                      | ✅        | Cleanup interval `599.99 s` (run1) / `599.99 s` (run2); plugin-check `600.05/599.98 s` (run1), `600.03/600.00 s` (run2); both runs ≈ 24 min                                                                                                           |
-| Q1  | Which part of the codebase                                                              | ✅        | `CleanUpService.clean()`/`Run()` (`cleanup.go:L77,L80,L128`); plugin checker `plugins.go:L78` (ticker) + `L123` (INFO emit); `Server.Run()` (`server.go:L139`)                                                                                    |
+| Q1  | Server running ≥ 60 s with no user requests                                             | ✅        | Idle proven; `grep` for request logs = `0` across all runs; no 10-minute recurring entry fires in the first 60 s (the usage-stats line's first tick can land at ~30–120 s)                           |
+| Q1  | The **exact recurring** log entries                                                     | ✅        | `msg="Completed cleanup jobs"` (10 min), `msg="Update check succeeded"` (`plugins.update.checker`, 10 min), **and** `msg="Usage stats are ready to report"` (`infra.usagestats`, 30 min)             |
+| Q1  | **Actual log output** as runtime evidence                                               | ✅        | Verbatim logfmt lines from run1 & run2 (10-min lines) + extended idle runs idle1 & idle2 (30-min usage-stats line) embedded                                                                          |
+| Q1  | Magnitude/timing observed & stable across ≥ 2 runs                                      | ✅        | Cleanup `599.99 s` & plugin-check `~600 s` in both ≈ 24-min runs; usage-stats **two consecutive `1800.00 s` intervals** (`1800.002 s`/`1800.000 s`) in each of two extended > 60-min idle runs (`10:50:32Z`→`11:53:38Z`, ≈ 63 min) |
+| Q1  | Which part of the codebase                                                              | ✅        | `CleanUpService.clean()`/`Run()` (`cleanup.go:L77,L80,L128`); plugin checker `plugins.go:L78` (ticker) + `L123` (INFO emit); usage-stats `UsageStats.SetReadyToReport()` (`service.go:L116-117`) driven by `statscollector.Service.Run()` (`statscollector/service.go:L106,L120,L339`); `Server.Run()` (`server.go:L139`) |
 | Q2  | Server-start output confirming schema up to date                                        | ✅        | `msg="migrations completed" … performed=0 skipped=626`                                                                                                                                               |
 | Q2  | Runtime evidence of the migration check (before/after)                                  | ✅        | Fresh DB `performed=626`; migrated DB `performed=0` — both embedded                                                                                                                                  |
 | Q2  | Responsible symbol                                                                      | ✅        | `Migrator.run()` (`migrator.go:L241`, Info at `L247` & `L287`)                                                                                                                                       |
@@ -2308,7 +2401,7 @@ answered.
 | Q5  | Which part of the codebase                                                              | ✅        | `formValuesFromExistingRule` & `rulerRuleToFormValues` (`rule-form.ts:L916-917,L365,L380,L402`), invoked by `AlertRuleForm` (`AlertRuleForm.tsx:L105,L126-128`); `ignoreHiddenQueries` (`L909,L912`) |
 
 **"Which part of the codebase" — answered by name for every question:**
-Q1 → `CleanUpService.clean()` (cleanup run loop) + `plugins.update.checker`;
+Q1 → `CleanUpService.clean()` (cleanup run loop) + `plugins.update.checker` + `statscollector.Service.Run()` / `UsageStats.SetReadyToReport()` (usage-stats);
 Q2 → `Migrator.run()`;
 Q3 → `HTTPServer.apiHealthHandler` and `getFrontendSettings` (both reading `setting.BuildVersion`);
 Q4 → `PanelDataQueriesTab.loadDataSource()` (picker hosted by `QueryGroup.tsx`);
@@ -2317,8 +2410,10 @@ Q5 → `formValuesFromExistingRule` / `rulerRuleToFormValues`.
 ### Summary of direct answers
 
 - **Q1:** At INFO, the idle stream is sparse; the recurring INFO entries are `"Completed cleanup jobs"`
-  and `"Update check succeeded"`, both every **10 minutes** (stable across two runs); within a strict
-  60 s window there are effectively none.
+  and `"Update check succeeded"` (both every **10 minutes**) plus `"Usage stats are ready to report"`
+  (every **30 minutes**) — all stable across two runs. Within a strict 60 s window neither 10-minute
+  line has fired; the usage-stats line's first occurrence may fall at/just after the 60 s mark
+  (randomized 30–120 s initial delay) and then recurs every 30 minutes.
 - **Q2:** `msg="migrations completed" … performed=0` (schema already up to date).
 - **Q3:** `version = 11.5.0-pre` (canonical build), reported identically by `/api/health`,
   `/api/frontend/settings`, and the startup banner.
