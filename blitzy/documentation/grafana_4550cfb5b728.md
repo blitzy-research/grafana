@@ -13,7 +13,7 @@
 | Repository HEAD (commit) | `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` |
 | Source branch (origin of this file's name) | `grafana_4550cfb5b728` |
 | Observed build identity | `version=9.2.0 commit=NA branch=main` — **default-build value**, see Q5 |
-| Toolchain used | Go `1.23.1` (`go.mod:3`), GCC `15.2.0` (Cgo for the SQLite driver), Node `v22.23.1`, Yarn `4.5.3` |
+| Toolchain used | Go `1.23.1` (`go.mod:3`), GCC `15.2.0` (Cgo for the SQLite driver), Node `v22.23.1` (observed container runtime; repo pins `.nvmrc` = `v22.11.0` — reconciled in Q5b), Yarn `4.5.3` |
 | HTTP port observed | `3000` (`conf/defaults.ini:41`) |
 | Database observed | SQLite at `data/grafana.db` (`conf/defaults.ini:123,164`) |
 
@@ -40,6 +40,17 @@ CGO_ENABLED=1 GOFLAGS=-mod=readonly go build -tags oss -o /tmp/grafana ./pkg/cmd
 
 ```bash
 go run -tags oss ./pkg/cmd/grafana -v      # -> "grafana version 9.2.0" (identical to the built binary)
+```
+
+**Toolchain versions actually observed** (each value is the verbatim output of the command shown, in this
+container; the two Node values — observed runtime vs. repo-pinned `.nvmrc` — are reconciled in Q5b):
+
+```bash
+go version        # -> go version go1.23.1 linux/amd64
+gcc --version     # -> gcc (Ubuntu 15.2.0-4ubuntu4) 15.2.0   (first line)
+node --version    # -> v22.23.1     (container runtime actually used for this run)
+cat .nvmrc        # -> v22.11.0     (the Node version the repository pins)
+yarn --version    # -> 4.5.3        (matches package.json:453 packageManager yarn@4.5.3)
 ```
 
 The default configuration source is `conf/defaults.ini` — its header says
@@ -84,16 +95,24 @@ exist; (6) it runs the full **626-migration** schema build; (7) it **seeds the d
 (8) it loads **54 core plugins**; and (9) it starts the HTTP listener on `:3000`. The lifecycle is driven by
 `Server.Init()` (`pkg/server/server.go:113`) followed by `Server.Run()` (`pkg/server/server.go:139`).
 
-`Server.Init()` performs the one-time setup steps: it writes a PID file via `s.writePIDFile()`
-(`pkg/server/server.go:122`), registers fixed RBAC roles via `s.roleRegistry.RegisterFixedRoles(...)`
-(`pkg/server/server.go:130`), and runs initial provisioners via
-`s.provisioningService.RunInitProvisioners(...)` (`pkg/server/server.go:134`).
+`Server.Init()` performs the one-time setup steps: it calls `s.writePIDFile()`
+(`pkg/server/server.go:122`) — which on a canonical start writes **nothing**, because
+`func (s *Server) writePIDFile()` returns early at its first statement (`if s.pidFile == "" { return nil }`,
+`pkg/server/server.go:206`) and `s.pidFile` is populated only from the **optional** `--pidfile` CLI flag
+(`Name: "pidfile"`, `pkg/cmd/grafana-server/commands/flags.go:40`, wired into `server.Options` at
+`pkg/cmd/grafana-server/commands/cli.go:111`), which the default invocation does not supply. It then
+registers fixed RBAC roles via `s.roleRegistry.RegisterFixedRoles(...)` (`pkg/server/server.go:130`), and
+runs initial provisioners via `s.provisioningService.RunInitProvisioners(...)` (`pkg/server/server.go:134`).
 
 **Command & captured evidence** (first clean start; the salient banner/init lines, verbatim):
 
 ```bash
 /tmp/grafana server --homepath="$(pwd)" > /tmp/run1.log 2>&1 &
+run1_pid=$!                              # capture the exact PID (so shutdown can target this process only)
+sleep 8                                  # allow the first-run bootstrap (DB create + 626 migrations) to finish
 grep -E 'Starting Grafana|Config loaded from|msg=Target|Path (Home|Data|Logs|Plugins|Provisioning)|App mode|FeatureToggles|Connecting to DB' /tmp/run1.log
+# run 1 stays up to serve the Q3/Q4 API probes; when finished, stop exactly this process with:
+#   kill "$run1_pid"; wait "$run1_pid" 2>/dev/null || true   (never pkill — that could hit other processes)
 ```
 
 ```text
@@ -195,10 +214,12 @@ and disabled optional subsystems are simply passed over rather than erroring out
 ### Q2a — What state gets created, and where on disk does it live?
 
 **Direct answer.** The first run creates a **SQLite database at `data/grafana.db`** plus the runtime
-sub-directories `data/log/` (with `grafana.log`), `data/csv/`, `data/pdf/`, and `data/png/`, and it writes a
-PID file. All of it lives under the `data/` directory (relative to `--homepath`). The database is where the
-durable state lives: the `migration_log`, `user`, `org`, and `org_user` tables are all populated on first
-run; `data_source` is created but left empty.
+sub-directories `data/log/` (with `grafana.log`), `data/csv/`, `data/pdf/`, and `data/png/`. All of it lives
+under the `data/` directory (relative to `--homepath`). **No PID file is written on a canonical start** —
+`writePIDFile()` returns early unless the optional `--pidfile` flag is supplied (see Q1a), which is exactly
+why the `find data` listing below contains no PID file. The database is where the durable state lives: the
+`migration_log`, `user`, `org`, and `org_user` tables are all populated on first run; `data_source` is
+created but left empty.
 
 The locations come straight from `conf/defaults.ini`: `[paths] data = data` (`conf/defaults.ini:15`) and
 `logs = data/log` (`conf/defaults.ini:21`); `[database] type = sqlite3` (`conf/defaults.ini:123`) with
@@ -286,8 +307,13 @@ so on run 2, with one `admin` user already present, it short-circuits before the
 **Command & captured evidence — run the identical command a second time and diff the two logs:**
 
 ```bash
+# Precondition: run 1 has already served its Q3/Q4 API probes and been stopped with its OWN targeted
+# shutdown — kill "$run1_pid"; wait "$run1_pid" 2>/dev/null || true — so port :3000 is free (never pkill).
 # Run 2: IDENTICAL command, but data/ now holds run 1's state.
 /tmp/grafana server --homepath="$(pwd)" > /tmp/run2.log 2>&1 &
+run2_pid=$!                              # capture run 2's PID for a clean, targeted shutdown
+sleep 8                                  # run 2's startup is much shorter (migrations already applied)
+kill "$run2_pid"; wait "$run2_pid" 2>/dev/null || true   # stop run 2; both logs are now complete
 # Compare volumes and the decisive lines:
 echo "run1 lines: $(wc -l < /tmp/run1.log)   run2 lines: $(wc -l < /tmp/run2.log)"
 grep -c "Executing migration"            /tmp/run1.log /tmp/run2.log
@@ -433,11 +459,26 @@ in Q2). Access therefore requires *these created credentials* — there is no an
 re-created (see Q2b).
 
 **Canonical-defaults cross-check (web).** External documentation confirms these are the *canonical* Grafana
-defaults, not an artifact of this checkout: the default login is `admin`/`admin` with a forced password
-change on first successful login; anonymous access is disabled by default and must be explicitly enabled;
-and basic (password) authentication is enabled by default. Grafana's own docs describe basic auth as
-"password authentication enabled by default," and community/vendor guidance describes anonymous auth as
-disabled unless you add `[auth.anonymous] enabled = true`. Every observed value above matches upstream.
+defaults, not an artifact of this checkout. Each upstream source is cited below, and every observed value
+matches it:
+
+- **Default login `admin`/`admin`, with a forced password change on first login** — Grafana's official
+  "Sign in to Grafana" guide instructs you to enter `admin` for both username and password and states that a
+  successful sign-in shows a prompt to change the password:
+  <https://grafana.com/docs/grafana/latest/setup-grafana/sign-in-to-grafana/>. This matches the seeded
+  `admin` / `admin@localhost` row observed above and `contribute/developer-guide.md:131`.
+- **`admin_user` defaults to `admin` and `admin_email` to `admin@localhost`** — Grafana's "Configure
+  Grafana" reference documents both as the built-in defaults, created on startup:
+  <https://grafana.com/docs/grafana/latest/administration/configuration/>. This matches
+  `conf/defaults.ini:328` (`admin_user = admin`) and `conf/defaults.ini:334` (`admin_email = admin@localhost`).
+- **Anonymous access is disabled by default** — Grafana's "Configure anonymous access" page shows that you
+  must explicitly set `[auth.anonymous] enabled = true` to turn it on (i.e., it is off unless enabled):
+  <https://grafana.com/docs/grafana/latest/setup-grafana/configure-access/configure-authentication/anonymous-auth/>.
+  This matches `conf/defaults.ini:650` (`enabled = false`) and the `401` observed above.
+- **Basic (password) authentication is enabled by default** — Grafana's "Configure basic authentication"
+  page describes it as providing "password authentication enabled by default":
+  <https://grafana.com/docs/grafana/latest/setup-grafana/configure-access/configure-authentication/grafana/>.
+  This matches `conf/defaults.ini:875` (`[auth.basic] enabled = true`).
 
 
 ---
@@ -582,15 +623,22 @@ embedded asset (`cue.mod/module.cue`, via `embed.go`) is compiled into the binar
 **Command & captured evidence — compile FAILS without `wire_gen.go`:**
 
 ```bash
-# Temporarily remove the generated file to reproduce a genuine clean checkout, then build:
-mv pkg/server/wire_gen.go /tmp/wire_gen.go.bak
+# Move the generated file ASIDE to reproduce a genuine clean checkout, build (which fails), then RESTORE
+# it immediately and verify the working tree is byte-for-byte unchanged. `wire_gen.go` is gitignored
+# (`.gitignore:194`), so this whole sequence leaves the repository clean.
+sha_before=$(sha256sum pkg/server/wire_gen.go | cut -d' ' -f1)
+mv pkg/server/wire_gen.go /tmp/wire_gen.go.moved                                    # move aside
 CGO_ENABLED=1 GOFLAGS=-mod=readonly go build -tags oss -o /tmp/grafana ./pkg/cmd/grafana; echo "EXIT_CODE=$?"
+mv /tmp/wire_gen.go.moved pkg/server/wire_gen.go                                    # RESTORE immediately
+sha_after=$(sha256sum pkg/server/wire_gen.go | cut -d' ' -f1)
+[ "$sha_before" = "$sha_after" ] && echo "RESTORED: byte-identical ($sha_after)"
 ```
 
 ```text
 # github.com/grafana/grafana/pkg/server
 pkg/server/service.go:31:15: undefined: Initialize
 EXIT_CODE=1
+RESTORED: byte-identical (87899e3ddd41801a8ea6815a48bd31d092777f4fa1d04bb34cef162a34aa6e79)
 ```
 
 **Cause → effect.** `pkg/server/service.go:31` calls `Initialize(s.cfg, s.opts, s.apiOpts)` — but
@@ -682,9 +730,14 @@ reported here exactly as produced rather than adjusted toward any expected relea
 
 **Toolchain that must be present.** Go `1.23.1` (`go.mod:3`) and GCC (for the Cgo SQLite driver,
 `github.com/mattn/go-sqlite3`; see `contribute/developer-guide.md:12,135`) are required to build and run the
-backend. A full front-end additionally requires Node (`.nvmrc` pins `v22.11.0`; `package.json:451`
-`"node": ">= 22"`) and Yarn `4.5.3` (`package.json:453`) to produce `public/build` — but, per Q5a, the
-backend serves without it. Key generated/ORM/migration dependencies: `github.com/google/wire v0.6.0`
+backend. A full front-end additionally requires Node and Yarn `4.5.3` (`package.json:453`) to produce
+`public/build` — but, per Q5a, the backend serves without it. **Node version — observed vs. pinned (why the
+header and this section differ):** the repository pins `.nvmrc` = `v22.11.0`, while the constraint in
+`package.json:451` is only `"node": ">= 22"`. The container this run used actually reports
+`node --version` = `v22.23.1` (captured in the Provenance "Toolchain versions actually observed" block).
+Both `v22.11.0` and `v22.23.1` satisfy the `>= 22` engine constraint, so the two figures are **consistent,
+not contradictory**: the header reports the version that was actually run, and `.nvmrc` reports the version
+the repository recommends. Key generated/ORM/migration dependencies: `github.com/google/wire v0.6.0`
 (`go.mod:72`, the codegen tool), `github.com/golang-migrate/migrate/v4 v4.7.0` (`go.mod:66`, drives
 `migration_log`), and `xorm.io/xorm v0.8.2` (`go.mod:202`) replaced by the in-repo fork
 `github.com/grafana/grafana/pkg/util/xorm v0.0.1` (`go.mod:537`).
@@ -782,13 +835,17 @@ CGO_ENABLED=1 GOFLAGS=-mod=readonly go build -tags oss -o /tmp/grafana ./pkg/cmd
 
 # Run 1 (first clean start) — captures DB creation, 626 migrations, admin seed, plugin load, :3000 listen
 /tmp/grafana server --homepath="$(pwd)" > /tmp/run1.log 2>&1 &
+run1_pid=$!                                                                 # capture PID for targeted shutdown
+sleep 8                                                                      # wait for bootstrap + HTTP listener
 curl -s http://localhost:3000/api/health
 curl -s -u admin:admin http://localhost:3000/api/plugins > /tmp/plugins.json
-# ... stop the server (SIGTERM) ...
+kill "$run1_pid"; wait "$run1_pid" 2>/dev/null || true                       # stop EXACTLY run 1 (never pkill)
 
 # Run 2 (identical command, existing state) — migrations skipped, no admin re-seed
 /tmp/grafana server --homepath="$(pwd)" > /tmp/run2.log 2>&1 &
-# ... stop the server (SIGTERM) ...
+run2_pid=$!
+sleep 8
+kill "$run2_pid"; wait "$run2_pid" 2>/dev/null || true                       # stop EXACTLY run 2
 
 diff <(sed 's/t=[^ ]* //' /tmp/run1.log) <(sed 's/t=[^ ]* //' /tmp/run2.log)   # 1357 vs 62 lines
 ```
@@ -802,4 +859,43 @@ resource-migrator `18`; plugins loaded `54`; `/api/plugins` entries `49` (30 pan
 *All values above were produced by the commands shown next to each claim and were confirmed stable across
 the two runs where applicable. Statements labeled **(inferred)** were reasoned from code rather than
 directly observed; every other claim is backed by captured runtime output.*
+
+---
+
+## Read-only & cleanup verification
+
+This investigation was **strictly read-only**: no existing repository file was modified, and the only file
+added is this document. Every artifact produced while building and running Grafana — the Wire-generated
+`pkg/server/wire_gen.go`, the front-end `public/build` output, the runtime `data/` directory, any built
+binary under `bin/`, and all throwaway `/tmp` logs and scripts — was **removed after evidence capture**, so
+the working tree contains nothing but this single Markdown deliverable.
+
+**Command & captured evidence — generated/runtime artifacts are absent:**
+
+```bash
+ls pkg/server/wire_gen.go public/build data bin 2>&1
+```
+
+```text
+ls: cannot access 'pkg/server/wire_gen.go': No such file or directory
+ls: cannot access 'public/build': No such file or directory
+ls: cannot access 'data': No such file or directory
+ls: cannot access 'bin': No such file or directory
+```
+
+**Command & captured evidence — the working tree's only change is this document:**
+
+```bash
+git status --porcelain
+```
+
+```text
+ M blitzy/documentation/grafana_4550cfb5b728.md
+```
+
+The single ` M` entry is this document being delivered; once it is committed, a fresh `git status` reports a
+clean tree. `pkg/server/wire_gen.go` (`.gitignore:194`) and `public/build` (`.gitignore:9`) are gitignored,
+so they never show as tracked changes even when present — they were nonetheless removed to satisfy the
+clean-tree requirement. There are no PID files and no throwaway scripts in the tree, and no reference file
+cited in this document was edited: each was opened read-only and its code path executed for observation only.
 
