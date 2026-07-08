@@ -160,7 +160,7 @@ OBS-B atomicHandover: rebuilds=323343 reads=3982680 sawA=658539 sawB=671452 miss
 
 **How to read it.** The harness's builder alternates rulesets on each `BuildRules` call: **ruleset A** (odd calls) contains the distinct pattern `a/x`, **ruleset B** (even calls) contains the distinct pattern `b/y`; both always contain the invariant `common/z`. As `fillOrg` swaps the tree ~323k times, readers see the distinct pattern flip between the two views: `sawA=658539` (reads that matched `a/x`) and `sawB=671452` (reads that matched `b/y`) are **both large and comparable**. That is the observable signature of the authoritative view changing wholesale between rebuilds — a reader that catches ruleset A matches `a/x` but not `b/y`, and vice‑versa; it never sees a blend. (Run 2: `sawA=652154 sawB=655365`; Run 3: `sawA=684011 sawB=685036` — same story.)
 
-**Causal reason.** Because the whole tree is replaced by one pointer assignment (`rule_cache_segmented.go:55`) rather than mutated field‑by‑field, the handover is atomic *from a reader's perspective*: a reader holding `RLock` either read the map entry before the writer's `Lock` (seeing the old tree in full) or after the writer's `Unlock` (seeing the new tree in full). The Go memory model formalizes this — a writer's `Unlock` "synchronizes before" a subsequent `RLock` (see §7) — so `radix[orgID]` is never observed mid‑transition.
+**Causal reason.** Because the whole tree is replaced by one pointer assignment (`rule_cache_segmented.go:55`) rather than mutated field‑by‑field, the handover is atomic *from a reader's perspective*: a reader holding `RLock` either read the map entry before the writer's `Lock` (seeing the old tree in full) or after the writer's `Unlock` (seeing the new tree in full). The Go memory model formalizes this — a writer's `Unlock` is ordered ahead of (happens‑before) any subsequent `RLock` (see §7) — so `radix[orgID]` is never observed mid‑transition.
 
 **Sibling contrast.** This whole‑structure swap is what makes `CacheSegmentedTree` distinctive. The sibling components mutate their maps **in place** instead: `runstream/manager.go` edits entries under `s.mu.Lock()` (e.g. `runstream/manager.go:160`, `:336`) and refreshes via `time.NewTicker` (`runstream/manager.go:179`, `:181`); `managedstream/runner.go` edits its stream/rate maps under `r.mu.Lock()` (`managedstream/runner.go:119`) and `s.rateMu.Lock()` (`managedstream/runner.go:206`). Only `CacheSegmentedTree` throws away the entire per‑org tree and rebuilds it (§6).
 
@@ -230,6 +230,43 @@ OBS-B atomicHandover: rebuilds=323343 reads=3982680 sawA=658539 sawB=671452 miss
 
 **Sibling contrast.** The two sibling caches also reconcile readers/writers with a `sync.RWMutex` (`runstream/manager.go:52`; `managedstream/runner.go:40`, plus a second `rateMu` at `:142`), so the *reader/writer discipline* is a shared convention across Grafana Live. What is unique to `CacheSegmentedTree` is combining that discipline with an off‑lock build and a whole‑tree swap, rather than in‑place edits (§6).
 
+### Secondary paths — edge, error, and transitional states (Rule R7 coverage)
+
+The primary Q1–Q4 answers above cover the happy path. The routing layer also has three implied **secondary / edge / error / transitional** states, each exercised run‑first with a **second temporary in‑package harness** (`pkg/services/live/pipeline/blitzy_adhoc_test_edge_test.go`, `package pipeline`) that drives the real `NewCacheSegmentedTree`, the real `Get`, and the real `updatePeriodically` goroutine. **Exercised command** (run **twice** for stability; the *complete, unedited* output of both runs is in §10.5, the harness source verbatim in §10.4; the harness was **removed after use** and `git status` verified clean — see §8):
+
+```
+go test -count=1 -v -run 'TestBlitzyObsErrWrap|TestBlitzyObsNoMatch|TestBlitzyObsPeriodicLogContinue' ./pkg/services/live/pipeline/
+```
+
+**(a) `Get` lazy‑fill error is wrapped — `rule_cache_segmented.go:69`.** When a subscriber `Get` triggers a lazy fill (`rule_cache_segmented.go:66-71`) and the off‑lock `BuildRules` fails, `Get` neither panics nor returns a bare error — it returns `nil, false, fmt.Errorf("error filling org: %w", err)` at `rule_cache_segmented.go:69`, wrapping the cause. Observed line (builder whose `BuildRules` always errors):
+
+```
+OBS-C errWrap: get(1,"a/x") on always-failing builder -> ruleIsNil=true ok=false err="error filling org: boom: simulated BuildRules failure"
+```
+
+*How to read it / causal reason.* The error string is exactly `error filling org: boom: simulated BuildRules failure`: the `error filling org: ` prefix is the literal wrap text at `rule_cache_segmented.go:69`, and `boom: simulated BuildRules failure` is the underlying `BuildRules` error surfaced through `%w` (so it is recoverable via `errors.Unwrap`/`errors.Is`). `ok=false` with a nil rule gives the caller a clean, inspectable failure. Because `fillOrg` returns at `rule_cache_segmented.go:50-51` **before** ever taking the write lock, a `Get`‑time build failure never touches `radix` — it cannot corrupt or partially populate the tree.
+
+**(b) A populated org queried on an unmatched channel returns `(nil, false, nil)` — `rule_cache_segmented.go:79-80`.** After a successful fill, querying a channel that matches no route is **not** an error: `Get` reads the tree under `RLock`, calls `t.GetValue("/"+channel, true)` (`rule_cache_segmented.go:78`), finds `nodeValue.Handler == nil`, and returns `nil, false, nil` at `rule_cache_segmented.go:79-80` — the deterministic "no route" signal of the radix matcher (per `tree/readme.md`, a request matches exactly one route or none). Observed lines (builder publishing only pattern `a/x`):
+
+```
+OBS-D match:   get(1,"a/x")            -> pattern="a/x" ok=true err=<nil>
+OBS-D noMatch: get(1,"no/such/channel") -> ruleIsNil=true ok=false err=<nil>
+```
+
+*How to read it / causal reason.* The first `Get(1, "a/x")` proves a successful lazy fill and match (`ok=true`, `pattern="a/x"`). The second `Get(1, "no/such/channel")` on the **now‑populated** org returns `ruleIsNil=true ok=false err=<nil>` — the distinguishing signature of the `rule_cache_segmented.go:79-80` path: `bool=false` means "no rule matched" while `error=nil` means "nothing went wrong." This is precisely how a caller tells an **unmatched channel** (`false, nil`) apart from a **fill failure** (`false, <wrapped error>` from case (a)).
+
+**(c) A periodic‑refresh `BuildRules` failure is logged, and the loop continues — `rule_cache_segmented.go:38-40`.** The single background writer `updatePeriodically` (`rule_cache_segmented.go:28-43`) refreshes each known org via `fillOrg`; if one org's refresh returns an error it calls `logger.Error("Error filling orgId", "error", err, "orgId", orgID)` at `rule_cache_segmented.go:39` and **continues** to the next org (then keeps looping). This was exercised through the **real** `updatePeriodically` goroutine (launched by the constructor at `rule_cache_segmented.go:24`), with the package logger routed to stdout via the canonical operator API `log.SetupConsoleLogger("info")` — necessary because the *default* root logger discards output (`pkg/infra/log/log.go:50-54`); the L38‑40 code path is real and unmodified, only the log **sink** is configured, exactly as a running server's `[log.console]` config does. Two orgs are primed, org 1 is then flipped to fail while org 2 keeps succeeding, and the test waits ~24s to span at least one periodic pass (`time.Sleep(20 * time.Second)` at `rule_cache_segmented.go:42`). Observed lines (run 1; run 2 in §10.5 is identical in kind):
+
+```
+OBS-E prime:   org1Get(ok=true) org2Get(ok=true) org2Calls=1
+OBS-E flip:    failOrg1=true; waiting ~24s for a periodic pass (updatePeriodically sleeps 20s at rule_cache_segmented.go:42)
+logger=live.pipeline t=2026-07-08T04:50:42.709316292Z level=error msg="Error filling orgId" error="boom: simulated BuildRules failure for org 1" orgId=1
+logger=live.pipeline t=2026-07-08T04:51:02.720954994Z level=error msg="Error filling orgId" error="boom: simulated BuildRules failure for org 1" orgId=1
+OBS-E after:   org1Get(ok=true pattern="a/x") org2Get(ok=true) org1Fails=2 org2Calls=3
+```
+
+*How to read it / causal reason.* The two `logger=live.pipeline … level=error msg="Error filling orgId" … orgId=1` lines are the **real** `logger.Error` emissions from `rule_cache_segmented.go:39` — one per periodic pass — and their timestamps are ~20s apart (`04:50:42` → `04:51:02`), exactly the `time.Sleep(20 * time.Second)` interval at `rule_cache_segmented.go:42`. Crucially the loop **continued** past each error: `org2Calls` rose from `1` (priming) to `3` (two periodic refreshes of org 2), and `org2Get(ok=true)` confirms org 2 stayed queryable. Meanwhile `org1Get(ok=true pattern="a/x")` shows org 1 **still serves its previous rule** even though its own refresh failed — because `fillOrg` returns at `rule_cache_segmented.go:50-51` **before** the `s.radix[orgID] = tree.New()` swap (`rule_cache_segmented.go:55`), so a failed refresh leaves the old snapshot intact (a *stale but complete* view, consistent with the Q3 bounded‑staleness answer). This is stable across both runs (§10.5): `org1Fails=2`, `org2Calls=3`, org 1 stale‑preserved, org 2 refreshed, and two log lines ~20s apart; only the wall‑clock timestamps differ run‑to‑run.
+
 ---
 
 ## 5. The wiring finding — why direct construction is the *canonical* entry point (not a bypass)
@@ -265,7 +302,7 @@ Why the swap is even necessary: the radix tree (`tree/tree.go`) is **not** concu
 The observed design — a `map` guarded by `sync.RWMutex`, heavy work done off‑lock, and a whole‑value swap under the write lock — is a textbook read‑heavy, periodically‑refreshed cache pattern. Validation against authoritative sources (≤1 short quote per source; otherwise paraphrased):
 
 - **Official Go `sync` documentation** ([pkg.go.dev/sync](https://pkg.go.dev/sync)) is the primary reference. It documents that an `RWMutex` may be held by any number of readers or a single writer, and that once a goroutine calls `Lock`, subsequent `RLock` calls block until the writer has acquired and released the lock. The Go source comment states it plainly: "The lock can be held by an arbitrary number of readers or a single writer." This is exactly why `fillOrg`'s write‑locked swap (`rule_cache_segmented.go:53-58`) is atomic with respect to `Get` readers.
-- **Go memory model guarantee** (same `sync` docs): the n'th `Unlock` "synchronizes before" the m'th `Lock` for `n < m`, and for any `RLock` there is an `Unlock` that synchronizes‑before it. This is the formal basis for the Q3 claim that an `RLock` reader observes *either* the pre‑swap *or* the post‑swap tree, never a mid‑write state.
+- **Go memory model guarantee** (same `sync` docs, paraphrased): the n'th `Unlock` is ordered ahead of the m'th `Lock` for `n < m`, and for any `RLock` there is an `Unlock` that is ordered ahead of it. This is the formal basis for the Q3 claim that an `RLock` reader observes *either* the pre‑swap *or* the post‑swap tree, never a mid‑write state.
 - **map + `RWMutex` is the recommended general‑purpose concurrent‑map pattern**, as opposed to `sync.Map`. The official docs note `sync.Map` is optimized for write‑once/read‑many or disjoint‑key workloads — which is **not** this cache's pattern (it overwrites the *same* per‑org key on every refresh). A widely‑cited write‑up puts it directly: "For most applications, a regular map with an sync.RWMutex is a better choice." ([pratikpandey.substack.com](https://pratikpandey.substack.com/p/dive-deep-series-syncmap-in-golang)). A practitioner guide agrees that mutex‑protected maps are more flexible and often faster for general‑purpose concurrent access, and recommends the `RWMutex`‑map when the same keys are updated repeatedly ([oneuptime.com](https://oneuptime.com/blog/post/2026-01-25-sync-map-vs-mutex-maps-go/view)). This validates the choice of `radixMu` (`rule_cache_segmented.go:14`) over a lock‑free structure.
 - **Doing heavy work off‑lock and keeping critical sections short** is documented best practice; naively releasing a read lock and re‑taking a write lock to publish a result breaks atomicity, whereas computing off‑lock and installing under one exclusive hold does not ([upstash.com](https://upstash.com/blog/upgradable-rwlock-for-go)). This validates calling `BuildRules` before `radixMu.Lock()` (`rule_cache_segmented.go:49` then `:53`).
 - **`RWMutex` is preferred when reads greatly outnumber writes** — as one guide summarizes, "RWMutex handles a specific case: when reads are more common than writes." ([dev.to/shrsv](https://dev.to/shrsv/mutex-vs-rwmutex-in-golang-a-developers-guide-2mb)). The observed ~12:1 read:write ratio (§4) is squarely in that regime.
@@ -280,7 +317,8 @@ Framed in this document's own words: lookups and the whole‑tree swap are atomi
 - **Observed counts are host‑ and timing‑specific.** The integer counts (`rebuilds`, `reads`, `sawA`, `sawB`) vary run to run and machine to machine; only the **qualitative invariants** are stable and meaningful: `radixLenBeforeFirstGet=0`, `missCommon=0` in every run, and `sawA`/`sawB` both large. Any illustrative figures from scoping differ from these observed numbers — that is expected and required by the run‑first methodology.
 - **Staleness is bounded, not eliminated.** The design guarantees *complete* snapshots, not *fresh* ones. Between refreshes a reader may serve routes up to one refresh interval old, governed by `time.Sleep(20 * time.Second)` (`rule_cache_segmented.go:42`) and the per‑build `5*time.Second` context timeout (`rule_cache_segmented.go:47`).
 - **`fmt.Errorf` line correction.** The lazy‑fill error wrap in `Get` is `fmt.Errorf("error filling org: %w", err)` at **`rule_cache_segmented.go:69`** (an illustrative range of L66–L68 seen during scoping is off by one; the verified line is **L69**).
-- **Read‑only integrity.** No existing source file was modified, added, or deleted. The temporary harness `pkg/services/live/pipeline/blitzy_obs_test.go` was created for observation, run, and then **removed**; `git status` was verified clean afterward, and `wc -l pkg/services/live/pipeline/rule_cache_segmented.go` remained **83**. This document is the only persisted new artifact.
+- **Edge/error states used a second temporary harness; the periodic logger is silent by default.** The §4 secondary paths (lazy-fill error wrap, no-match, and periodic log-and-continue) were observed with a second temporary in-package harness, `pkg/services/live/pipeline/blitzy_adhoc_test_edge_test.go` (also removed after use). The periodic `logger.Error` at `rule_cache_segmented.go:39` emits **nothing under a bare `go test`**, because the default root logger writes to `io.Discard` (`pkg/infra/log/log.go:50-54`); it was made visible with the canonical operator API `log.SetupConsoleLogger("info")` (`pkg/infra/log/log.go:519`), which routes the package logger to stdout exactly as a running server's `[log.console]` configuration does. The `updatePeriodically` L38-40 code path is real and unmodified — only the log *sink* was configured.
+- **Read‑only integrity.** No existing source file was modified, added, or deleted. Two temporary in-package harnesses — `pkg/services/live/pipeline/blitzy_obs_test.go` (primary Q1-Q4 evidence, §10.1) and `pkg/services/live/pipeline/blitzy_adhoc_test_edge_test.go` (the §4 edge/error/transitional evidence, §10.4) — were created for observation, run, and then **removed**; `git status` was verified clean afterward, and `wc -l pkg/services/live/pipeline/rule_cache_segmented.go` remained **83**. This document is the only persisted new artifact.
 - **Cache inactive in default build.** As established in §5, `g.Pipeline` is never assigned in production, so the routing cache is not on the live subscriber path in a default server build. The routing layer was therefore exercised via its canonical direct‑construction entry point, not a bypass.
 - **Sibling behavior is inferred from reading, not run.** The §6 statements about `runstream` and `managedstream` mutating in place are *inferred* from their source (line references verified); those components were not executed because they are outside the routing‑cache question.
 
@@ -294,7 +332,10 @@ Framed in this document's own words: lookups and the whole‑tree swap are atomi
 | **Q2** handover/authority | whole‑tree swap `radix[orgID]=tree.New()`; authoritative view = tree under `radixMu` | `rule_cache_segmented.go:53-55` | `sawA`/`sawB` both large (~650k+) | siblings mutate in place (`runstream:160`, `managedstream:119`) | single pointer reassignment ⇒ atomic from reader's view (memory model) |
 | **Q3** stable vs partial | no partial exposure; bounded staleness | empty‑assign `:55` + repopulate `:56-58` under one hold; `Sleep(20s)` `:42`; `5s` timeout `:47` | `missCommon=0` across ~320k swaps + ~4M reads; `-race` clean | — | assign + repopulate share one `radixMu.Lock()` hold (`:53-54`) |
 | **Q4** interleaving | `RWMutex` many readers or one writer; build off‑lock; short lock window | `radixMu` `:14`; `BuildRules` off‑lock `:49`; swap+populate `:53-58` | ~4M reads : ~320k rebuilds, `missCommon=0` | siblings share the RWMutex convention (`runstream:52`, `managedstream:40`) | heavy work off‑lock keeps the readers‑excluded window tiny |
-| `fmt.Errorf` cited at **L69** | error wrap on lazy‑fill failure | `rule_cache_segmented.go:69` | — | — | — |
+| `fmt.Errorf` cited at **L69** | error wrap on lazy‑fill failure | `rule_cache_segmented.go:69` | `OBS-C` → `ok=false err="error filling org: …"` | — | verified L69; cause wrapped via `%w` |
+| **Edge (a)** `Get` fill-error wrap | `nil, false, fmt.Errorf("error filling org: %w", err)` | `rule_cache_segmented.go:69` | `OBS-C` → `ruleIsNil=true ok=false err="error filling org: boom: …"` | — | `fillOrg` fails at `:50-51` before the swap ⇒ no partial state |
+| **Edge (b)** no-match | `nil, false, nil` | `rule_cache_segmented.go:79-80` | `OBS-D noMatch` → `ok=false err=<nil>` | radix "exactly one or no route" (`tree/readme.md`) | `GetValue` handler nil ⇒ `false,nil` distinguishes a miss from an error |
+| **Edge (c)** periodic log-and-continue | `logger.Error(...)`, then next org; outer loop continues | `rule_cache_segmented.go:38-40` (`:39`); sleep `:42` | `OBS-E`: two real log lines ~20s apart; `org2Calls=3`; org1 stale-preserved | siblings refresh via ticker (`runstream:179`) | error checked `:38`, logged `:39`, loop continues; failed fill preserves old tree (`:50-51`) |
 | Wiring finding documented; harness labeled canonical | `Pipeline` unset in prod; construct directly | `live.go:411`, `:638-639`, `:1123`, `:1143` | grep for assignment returns nothing | canonical unit test `rule_cache_segmented_test.go:34` | — |
 | Web validation present w/ quote discipline | idiomatic map+RWMutex, off‑lock build | — | §7 | — | — |
 | Cleanup + `git status` clean stated | harness removed; core file 83 lines | §8 | — | — | — |
@@ -552,6 +593,192 @@ ok  	github.com/grafana/grafana/pkg/services/live/pipeline	4.044s
 ```
 
 **Canonical build** — command: `go build ./pkg/services/live/pipeline/ ./pkg/services/live/pipeline/tree/` → empty output, exit `0`.
+
+### 10.4 The edge/error observation harness (verbatim)
+
+A **second** temporary harness, created at `pkg/services/live/pipeline/blitzy_adhoc_test_edge_test.go` as `package pipeline` (so it can drive the real unexported `fillOrg`/`updatePeriodically` paths and the real package-level `logger`, alongside the real exported `NewCacheSegmentedTree` and `Get`). It exercises the secondary/edge/error/transitional states for Rule R7 coverage. **Removed after use** (see §8). Reproduced here verbatim as the instrument used:
+
+```go
+package pipeline
+
+// TEMPORARY edge/error observation harness (Blitzy investigation). Deleted after use.
+//
+// In-package (package pipeline) so it drives the REAL Get / fillOrg / updatePeriodically
+// paths and the REAL package-level logger, alongside the real exported constructor
+// NewCacheSegmentedTree. It exercises the secondary (edge/error/transitional) states
+// implied by the question, per user Rule R7:
+//
+//	OBS-C  Get lazy-fill error wrapping                     rule_cache_segmented.go:69
+//	OBS-D  no-match returns (nil, false, nil)               rule_cache_segmented.go:79-80
+//	OBS-E  periodic BuildRules failure -> log-and-continue  rule_cache_segmented.go:38-40
+
+import (
+	"context"
+	"fmt"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/grafana/grafana/pkg/infra/log"
+)
+
+// errBuilder is a real RuleBuilder whose BuildRules ALWAYS fails. It drives the
+// Get lazy-fill error path (OBS-C): Get on a cold org calls fillOrg, whose
+// BuildRules error is wrapped at rule_cache_segmented.go:69.
+type errBuilder struct{}
+
+func (errBuilder) BuildRules(_ context.Context, _ int64) ([]*LiveChannelRule, error) {
+	return nil, fmt.Errorf("boom: simulated BuildRules failure")
+}
+
+// okBuilder is a real RuleBuilder that returns a single rule matching pattern
+// "a/x" for org 1. It drives the successful-fill-then-no-match path (OBS-D).
+type okBuilder struct{}
+
+func (okBuilder) BuildRules(_ context.Context, _ int64) ([]*LiveChannelRule, error) {
+	return []*LiveChannelRule{{OrgId: 1, Pattern: "a/x"}}, nil
+}
+
+// periodicBuilder is a real RuleBuilder used to drive the periodic log-and-continue
+// path (OBS-E). org 1 succeeds until failOrg1 is set, then fails on every later call;
+// org 2 always succeeds. The counters let us observe that after org 1 starts failing
+// the periodic loop still refreshes org 2 (i.e. it continues past the logged error).
+type periodicBuilder struct {
+	failOrg1  atomic.Bool
+	org1Fails atomic.Int64
+	org2Calls atomic.Int64
+}
+
+func (b *periodicBuilder) BuildRules(_ context.Context, orgID int64) ([]*LiveChannelRule, error) {
+	if orgID == 1 {
+		if b.failOrg1.Load() {
+			b.org1Fails.Add(1)
+			return nil, fmt.Errorf("boom: simulated BuildRules failure for org 1")
+		}
+		return []*LiveChannelRule{{OrgId: 1, Pattern: "a/x"}}, nil
+	}
+	b.org2Calls.Add(1)
+	return []*LiveChannelRule{{OrgId: 2, Pattern: "c/z"}}, nil
+}
+
+// OBS-C: Get lazy-fill error wrapping (rule_cache_segmented.go:69).
+func TestBlitzyObsErrWrap(t *testing.T) {
+	s := NewCacheSegmentedTree(errBuilder{})
+	rule, ok, err := s.Get(1, "a/x")
+	errStr := "<nil>"
+	if err != nil {
+		errStr = err.Error()
+	}
+	fmt.Printf("OBS-C errWrap: get(1,\"a/x\") on always-failing builder -> ruleIsNil=%v ok=%v err=%q\n",
+		rule == nil, ok, errStr)
+}
+
+// OBS-D: successful fill then unmatched channel returns (nil, false, nil)
+// (rule_cache_segmented.go:79-80).
+func TestBlitzyObsNoMatch(t *testing.T) {
+	s := NewCacheSegmentedTree(okBuilder{})
+
+	r1, ok1, err1 := s.Get(1, "a/x") // successful lazy fill + match
+	pat := ""
+	if r1 != nil {
+		pat = r1.Pattern
+	}
+	e1 := "<nil>"
+	if err1 != nil {
+		e1 = err1.Error()
+	}
+	fmt.Printf("OBS-D match:   get(1,\"a/x\")            -> pattern=%q ok=%v err=%s\n", pat, ok1, e1)
+
+	r2, ok2, err2 := s.Get(1, "no/such/channel") // populated org, unmatched channel
+	e2 := "<nil>"
+	if err2 != nil {
+		e2 = err2.Error()
+	}
+	fmt.Printf("OBS-D noMatch: get(1,\"no/such/channel\") -> ruleIsNil=%v ok=%v err=%s\n",
+		r2 == nil, ok2, e2)
+}
+
+// OBS-E: periodic BuildRules failure -> log-and-continue (rule_cache_segmented.go:38-40).
+// Uses the REAL updatePeriodically goroutine launched by the constructor, and the REAL
+// package-level logger routed to stdout via the canonical operator API SetupConsoleLogger.
+func TestBlitzyObsPeriodicLogContinue(t *testing.T) {
+	// Canonical logging setup (what an operator does via the [log]/[log.console] config).
+	// Without it, the default root logger discards output (pkg/infra/log/log.go:50-54).
+	if err := log.SetupConsoleLogger("info"); err != nil {
+		t.Fatalf("SetupConsoleLogger: %v", err)
+	}
+
+	b := &periodicBuilder{}
+	s := NewCacheSegmentedTree(b) // starts `go s.updatePeriodically()`
+
+	// Prime org 1 and org 2 (both succeed) so both become keys the periodic writer refreshes.
+	_, ok1, _ := s.Get(1, "a/x")
+	_, ok2, _ := s.Get(2, "c/z")
+	fmt.Printf("OBS-E prime:   org1Get(ok=%v) org2Get(ok=%v) org2Calls=%d\n",
+		ok1, ok2, b.org2Calls.Load())
+
+	// Flip org 1 to fail on subsequent BuildRules calls; the periodic refresh will hit it.
+	b.failOrg1.Store(true)
+	fmt.Printf("OBS-E flip:    failOrg1=true; waiting ~24s for a periodic pass "+
+		"(updatePeriodically sleeps 20s at rule_cache_segmented.go:42)\n")
+
+	time.Sleep(24 * time.Second) // guarantee at least one periodic pass runs while org 1 fails
+
+	// After the failing periodic pass:
+	//   - org 1 must STILL serve its old rule (a failed fillOrg returns before the swap at
+	//     rule_cache_segmented.go:50-51, so the previous snapshot is preserved), and
+	//   - org 2 must still be refreshed (org2Calls increased => the loop CONTINUED past org 1).
+	r1, ok1After, _ := s.Get(1, "a/x")
+	pat1 := ""
+	if r1 != nil {
+		pat1 = r1.Pattern
+	}
+	_, ok2After, _ := s.Get(2, "c/z")
+	fmt.Printf("OBS-E after:   org1Get(ok=%v pattern=%q) org2Get(ok=%v) org1Fails=%d org2Calls=%d\n",
+		ok1After, pat1, ok2After, b.org1Fails.Load(), b.org2Calls.Load())
+}
+```
+
+### 10.5 Edge/error complete, unedited outputs
+
+**Two runs** — command: `go test -count=1 -v -run 'TestBlitzyObsErrWrap|TestBlitzyObsNoMatch|TestBlitzyObsPeriodicLogContinue' ./pkg/services/live/pipeline/` (the `##########` lines are run separators; timestamps differ run-to-run, all other values are stable):
+
+```
+########## EDGE RUN 1 ##########
+=== RUN   TestBlitzyObsErrWrap
+OBS-C errWrap: get(1,"a/x") on always-failing builder -> ruleIsNil=true ok=false err="error filling org: boom: simulated BuildRules failure"
+--- PASS: TestBlitzyObsErrWrap (0.00s)
+=== RUN   TestBlitzyObsNoMatch
+OBS-D match:   get(1,"a/x")            -> pattern="a/x" ok=true err=<nil>
+OBS-D noMatch: get(1,"no/such/channel") -> ruleIsNil=true ok=false err=<nil>
+--- PASS: TestBlitzyObsNoMatch (0.00s)
+=== RUN   TestBlitzyObsPeriodicLogContinue
+OBS-E prime:   org1Get(ok=true) org2Get(ok=true) org2Calls=1
+OBS-E flip:    failOrg1=true; waiting ~24s for a periodic pass (updatePeriodically sleeps 20s at rule_cache_segmented.go:42)
+logger=live.pipeline t=2026-07-08T04:50:42.709316292Z level=error msg="Error filling orgId" error="boom: simulated BuildRules failure for org 1" orgId=1
+logger=live.pipeline t=2026-07-08T04:51:02.720954994Z level=error msg="Error filling orgId" error="boom: simulated BuildRules failure for org 1" orgId=1
+OBS-E after:   org1Get(ok=true pattern="a/x") org2Get(ok=true) org1Fails=2 org2Calls=3
+--- PASS: TestBlitzyObsPeriodicLogContinue (24.00s)
+PASS
+ok  	github.com/grafana/grafana/pkg/services/live/pipeline	24.019s
+########## EDGE RUN 2 ##########
+=== RUN   TestBlitzyObsErrWrap
+OBS-C errWrap: get(1,"a/x") on always-failing builder -> ruleIsNil=true ok=false err="error filling org: boom: simulated BuildRules failure"
+--- PASS: TestBlitzyObsErrWrap (0.00s)
+=== RUN   TestBlitzyObsNoMatch
+OBS-D match:   get(1,"a/x")            -> pattern="a/x" ok=true err=<nil>
+OBS-D noMatch: get(1,"no/such/channel") -> ruleIsNil=true ok=false err=<nil>
+--- PASS: TestBlitzyObsNoMatch (0.00s)
+=== RUN   TestBlitzyObsPeriodicLogContinue
+OBS-E prime:   org1Get(ok=true) org2Get(ok=true) org2Calls=1
+OBS-E flip:    failOrg1=true; waiting ~24s for a periodic pass (updatePeriodically sleeps 20s at rule_cache_segmented.go:42)
+logger=live.pipeline t=2026-07-08T04:51:09.538030982Z level=error msg="Error filling orgId" error="boom: simulated BuildRules failure for org 1" orgId=1
+logger=live.pipeline t=2026-07-08T04:51:29.547758937Z level=error msg="Error filling orgId" error="boom: simulated BuildRules failure for org 1" orgId=1
+OBS-E after:   org1Get(ok=true pattern="a/x") org2Get(ok=true) org1Fails=2 org2Calls=3
+--- PASS: TestBlitzyObsPeriodicLogContinue (24.00s)
+PASS
+ok  	github.com/grafana/grafana/pkg/services/live/pipeline	24.018s
+```
 
 ---
 
