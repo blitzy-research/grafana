@@ -2,7 +2,7 @@
 
 **Subject.** The Grafana Unified Alerting **scheduler** (`pkg/services/ngalert/schedule`), its per‑rule **evaluation routine**, and the **state manager** (`pkg/services/ngalert/state`). This document answers, from *live runtime observation* of a canonically‑built `grafana-server`, how alert evaluation and notification behave when the system is under stress versus normal load.
 
-**Commit under test.** `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`. Every `file:line` citation corresponds to that commit. (The binary was built from branch HEAD `3724e05ba3`, whose only difference from the pinned commit is this document — see *Investigation setup → Canonical build*, so all observed behavior is truthfully attributable to `4550cfb`.)
+**Commit under test.** `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`. Every `file:line` citation corresponds to that commit. (The binary was built from commit `3724e05ba3`, whose only difference from the pinned commit is this document — see *Investigation setup → Canonical build*, so all observed behavior is truthfully attributable to `4550cfb`.)
 
 ---
 
@@ -65,11 +65,11 @@ go build ./pkg/cmd/grafana      # full runnable server, exit 0
 Build identity (the exact binary all observations came from):
 
 ```
-binary size : 298085224 bytes
-sha256      : 9c3d7beb5eaf2e35ab6d53e34d9289c2582fbb04740c4fb4343f0f4a3df04033
-build stamp : version=11.5.0-pre commit=3724e05ba3  (main.version / main.commit via ldflags)
-branch HEAD : 3724e05ba394b5246ec49bdecfaf8be8dc4cf817
-pinned      : 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff  (== HEAD's parent)
+binary size  : 298085224 bytes
+sha256       : 9c3d7beb5eaf2e35ab6d53e34d9289c2582fbb04740c4fb4343f0f4a3df04033
+build stamp  : version=11.5.0-pre commit=3724e05ba3  (main.version / main.commit via ldflags)
+build commit : 3724e05ba394b5246ec49bdecfaf8be8dc4cf817
+pinned       : 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff  (parent of the build commit above)
 ```
 **[OBSERVED].** `git diff --name-status 4550cfb HEAD` reports exactly one changed path — `A blitzy/documentation/grafana_4550cfb5b728.md` — i.e. no `.go`, `conf`, or `Makefile` differs between HEAD and the pinned commit, so the compiled behavior is that of `4550cfb`. **[OBSERVED]** (A known quirk: the `grafana --version` subcommand and `/api/health` print a hardcoded `9.2.0`; the authoritative build stamp is `11.5.0-pre / 3724e05ba3`.)
 
@@ -97,7 +97,7 @@ Relevant API routes exercised (all authenticated, loopback):
 
 - `POST /api/v1/provisioning/alert-rules` → `201` (creates an API‑provenance rule; response carries the rule `uid`).
 - `DELETE /api/v1/provisioning/alert-rules/{uid}` → `204` (deletes an API‑provenance rule).
-- `POST /api/admin/provisioning/alerting/reload` → `200 {"message":"Alerting config reloaded"}` (re‑reads the provisioning files; the canonical way to change a *file*‑provenance rule — a single‑rule `PUT` on a file rule is refused with `500 "cannot change provenance from 'file' to ''"`).
+- `POST /api/admin/provisioning/alerting/reload` → `200 {"message":"Alerting config reloaded"}` (re‑reads the provisioning files; the canonical way to change a *file*‑provenance rule — a single‑rule `PUT` on a file rule is refused (`provisioning/alert_rules.go:588`) with `500 "cannot change provenance from 'file' to ''"`).
 
 ### Embedded harness source (complete)
 
@@ -732,7 +732,7 @@ echo "--- timeline.tsv ---"; cat "$OUT/timeline.tsv"
 
 ### The mechanism (source), then the observation
 
-Each tick runs `processTick` (`pkg/services/ngalert/schedule/schedule.go:235`): it calls `updateSchedulableAlertRules` to re‑read the DB (`pkg/services/ngalert/schedule/schedule.go:239`; fetch in `fetcher.go`), decides readiness per rule, then for the due set computes `step = baseInterval / len(readyToRun)` (`schedule.go:361`), sorts by UID (`slices.SortFunc`, `schedule.go:364`), and dispatches each rule via `time.AfterFunc(i*step, …)` (`schedule.go:372`). Dispatch calls the rule routine's `Eval` (`pkg/services/ngalert/schedule/alert_rule.go:196`), which sends the tick over the rule's **unbuffered** `evalCh` (`alert_rule.go:161`). If the routine is mid‑evaluation and therefore not receiving, `Eval` first performs a **non‑blocking drain** of the older, still‑blocked sender (`case droppedMsg = <-a.evalCh`, `alert_rule.go:205`) and only then sends the newest tick (`case a.evalCh <- eval`, `alert_rule.go:210`). The scheduler logs the warning (`schedule.go:378`) and increments the missed counter (`schedule.go:380`) **inside the `AfterFunc` callback, only after `Eval` returns**. **[INFERRED]**
+Each tick runs `processTick` (`pkg/services/ngalert/schedule/schedule.go:235`): it calls `updateSchedulableAlertRules` to re‑read the DB (`pkg/services/ngalert/schedule/schedule.go:239`; fetch in `fetcher.go`), decides readiness per rule, then for the due set computes `step = baseInterval / len(readyToRun)` (`schedule.go:361`), sorts by UID (`slices.SortFunc`, `schedule.go:364`), and dispatches each rule via `time.AfterFunc(i*step, …)` (`schedule.go:370`). Dispatch calls the rule routine's `Eval` (`pkg/services/ngalert/schedule/alert_rule.go:196`), which sends the tick over the rule's **unbuffered** `evalCh` (`alert_rule.go:161`). If the routine is mid‑evaluation and therefore not receiving, `Eval` first performs a **non‑blocking drain** of the older, still‑blocked sender (`case droppedMsg = <-a.evalCh`, `alert_rule.go:205`) and only then sends the newest tick (`case a.evalCh <- eval`, `alert_rule.go:210`). The scheduler logs the warning (`schedule.go:378`) and increments the missed counter (`schedule.go:380`) **inside the `AfterFunc` callback, only after `Eval` returns**. **[INFERRED]**
 
 ### Stressed scenario
 
@@ -876,7 +876,7 @@ logger=ngalert.state.manager rule_uid=blitzydel0 org_id=1 t=2026-07-13T18:46:40.
 logger=ngalert.sender.router rule_uid=blitzydel0 org_id=1 t=2026-07-13T18:46:40.003851711Z level=info msg="Sending alerts to local notifier" count=1
 logger=ngalert.scheduler rule_uid=blitzydel0 org_id=1 t=2026-07-13T18:46:40.003891376Z level=debug msg="Stopping alert rule routine"
 ```
-**[OBSERVED].** Reading the four lines: `Resetting state of the rule` (`state/manager.go` `DeleteStateByRuleUID`, ~:238) → `Rules state was reset states=1` (`state/manager.go:279`) → `Sending alerts to local notifier count=1` (the **resolve** notification via `expireAndSend`) → `Stopping alert rule routine` (`alert_rule.go:358`). The stop is triggered by `deleteAlertRule` calling `Stop(errRuleDeleted)` (`schedule.go:182`, sentinel `registry.go:19`), whose cleanup branch runs `DeleteStateByRuleUID(…, StateReasonRuleDeleted)` under a bounded 1‑minute context (`alert_rule.go:347–359`). The actual SQL is `DELETE FROM alert_instance WHERE rule_org_id=? AND rule_uid=?` (`pkg/services/ngalert/store/instance_database.go:222`). **[INFERRED for the SQL text; OBSERVED for the row‑count change.]** The drop counter is unaffected — `EvaluationMissed` has only `.Inc()` in the source (`schedule.go:380`), no reset/delete anywhere, so it is cumulative.
+**[OBSERVED].** Reading the four lines: `Resetting state of the rule` (`state/manager.go` `DeleteStateByRuleUID`, ~:238) → `Rules state was reset states=1` (`state/manager.go:278`) → `Sending alerts to local notifier count=1` (the **resolve** notification via `expireAndSend`) → `Stopping alert rule routine` (`alert_rule.go:358`). The stop is triggered by `deleteAlertRule` calling `Stop(errRuleDeleted)` (`schedule.go:182`, sentinel `registry.go:19`), whose cleanup branch runs `DeleteStateByRuleUID(…, StateReasonRuleDeleted)` under a bounded 1‑minute context (`alert_rule.go:347–359`). The actual SQL is `DELETE FROM alert_instance WHERE rule_org_id=? AND rule_uid=?` (`pkg/services/ngalert/store/instance_database.go:222`). **[INFERRED for the SQL text; OBSERVED for the row‑count change.]** The drop counter is unaffected — `EvaluationMissed` has only `.Inc()` in the source (`schedule.go:380`), no reset/delete anywhere, so it is cumulative.
 
 ### (2) Context cancellation — state preserved, routine exits
 
@@ -1088,7 +1088,7 @@ misses:   stress_end=242 -> recovery_end=300  (delta_in_recovery=58)  [expect ~0
 failures: stress_end=30 -> recovery_end=30  (delta_in_recovery=0)  [expect ~0 => frozen/persisted]
 evals:    stress_end=129 -> recovery_end=492  (delta_in_recovery=363)  [expect >0 => resumed rising]
 ```
-**[OBSERVED].** Across the recovery flip, `misses` **freeze at 300** and `failures` **freeze at 30** (`delta_in_recovery` ≈ 0), while `evals` resumes rising (`+363`). The full timeline shows the transition — `misses` climbs during `stress`, then flattens in `recovery` while `abs_evals` accelerates:
+**[OBSERVED].** Across the recovery flip, `failures` **freeze at 30** immediately (`delta_in_recovery = 0`), and `misses` climb for a brief ~2 tick transition (`delta_in_recovery = 58`, as the last in‑flight slow requests drain) before **freezing at 300**, while `evals` resume rising (`delta_in_recovery = +363`). The full timeline shows the transition — `misses` climbs during `stress`, then flattens in `recovery` while `abs_evals` accelerates:
 
 ```
 epoch	iso	phase	tick_count	abs_evals	abs_failures	abs_misses	d_evals	d_failures	d_misses	behind	periodic_sum
@@ -1199,7 +1199,7 @@ grafana_alerting_schedule_alert_rules 30
 
 ### Timing / rhythm — the 10 s heartbeat, the step spread, and jitter = 0
 
-The heartbeat is directly reported (`grafana_alerting_ticker_interval_seconds 10`) and visible as `Processing tick now=` boundaries exactly 10 s apart. Within a tick, the 30 due rules are dispatched ~0.333 s apart — this is the scheduler **step**, `step = baseInterval / len(readyToRun) = 10 s / 30 = 0.333 s` (`schedule.go:361`, dispatched via `time.AfterFunc(i*step)` `:372`), **not** jitter:
+The heartbeat is directly reported (`grafana_alerting_ticker_interval_seconds 10`) and visible as `Processing tick now=` boundaries exactly 10 s apart. Within a tick, the 30 due rules are dispatched ~0.333 s apart — this is the scheduler **step**, `step = baseInterval / len(readyToRun) = 10 s / 30 = 0.333 s` (`schedule.go:361`, dispatched via `time.AfterFunc(i*step)` `:370`), **not** jitter:
 
 ```
 tick now=2026-07-13T19:05:10 (30 rules, sorted by UID)
