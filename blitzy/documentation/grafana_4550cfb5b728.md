@@ -214,7 +214,10 @@ values were stable:
 
 The two edge/secondary runs used later — the Q3 `503` database-failure instance
 (§4.5, unique port) and the Q4 `level=debug` instance (§5.3) — are **not** canonical and
-are labelled as such where they appear.
+are labelled as such where they appear. Their own timing/magnitude-sensitive values are
+nonetheless confirmed stable across ≥ 2 runs inside those sections; in particular the
+§5.3 `level=debug` counts (**≈ 1120** while the server is running, **≈ 1375** after a
+graceful shutdown) were each reproduced across multiple debug boots (see §5.3).
 
 ### 1.5 Read-only scope
 
@@ -1083,12 +1086,49 @@ logger=server t=2026-07-13T18:41:04.954267909Z level=debug msg="Starting backgro
 
 $ grep -cF "Starting background service" $D/boot.log
 34
-$ grep -c 'level=debug' $D/boot.log
-1375
 ```
 
-The debug boot emitted **1375** `level=debug` lines (vs **0** at info), directly confirming
-why the generic start line is invisible in a default boot.
+The **`level=debug` volume** depends on *when in the process lifecycle the log is counted*,
+so the capture window is stated. The launch above backgrounded the server (job `%1`). While
+it is **still running**, counted a fixed **15 s after the `"HTTP Server Listen"` line** (boot
+fully settled, before any shutdown):
+
+```bash
+$ grep -c 'level=debug' $D/boot.log        # server RUNNING, +15 s after listen
+1120
+$ wc -l < $D/boot.log
+2473
+```
+
+A subsequent **graceful shutdown** (`SIGTERM`) then appends a one-time burst of service-stop
+and plugin-deregistration DEBUG lines, so re-counting the now-**stopped** server's log is
+higher:
+
+```bash
+$ kill -TERM %1; wait                       # graceful shutdown of the backgrounded server
+$ grep -c 'level=debug' $D/boot.log        # after shutdown
+1375
+$ wc -l < $D/boot.log
+2734
+```
+
+Both `level=debug` counts are **reproducible across ≥ 3 debug runs each** within a tight
+band (running, +15 s after listen: `1119`–`1122`, i.e. ≈ `1120`; after `SIGTERM`:
+`1375`–`1378`); the paired `wc -l` totals track them within the same few-line ordering
+jitter noted in §1.4 (running ≈ `2473`–`2475`; after `SIGTERM` ≈ `2734`–`2738`). The
+≈ `255`-line `level=debug` difference (`1375` − `1120`) is entirely the graceful-shutdown
+burst — dominated by `55`
+`logger=plugins.deregister` lines (`pkg/plugins/manager/pipeline/termination/steps.go:51`)
+plus one `"Stopped background service"` DEBUG line per service (`pkg/server/server.go:171`,
+emitted as each service's `Run` returns on context-cancel after `(s *Server) Shutdown` at
+`pkg/server/server.go:185-188`).
+So the single unqualified count originally reported for a *stopped* server is `1375`, whereas
+a *running* server has emitted ≈ `1120`; the total is thus lifecycle- and duration-sensitive
+(plugin discovery, migrations, and periodic SQL-debug all contribute), which is why the exact
+figure is paired here with a stated window and confirmed stable across runs. Either way the
+point that answers Q4 holds: the debug boot emits **> 1,100** `level=debug` lines versus
+**`0`** at the default `info` level — which is exactly why the generic
+`"Starting background service"` line is invisible in a default (`info`) boot.
 
 **Set stable, order non-deterministic (two debug runs).** The *set* of 34 launched services
 is identical run-to-run, but the *log order* is not — the dispatch loop calls
