@@ -69,7 +69,7 @@ Command that produced the toolchain capture (`/tmp/evidence/env/go_version.txt`,
 
 ```bash
 go version
-go env GOVERSION GOWORK CGO_ENABLED GOCACHE GOROOT   # (GOFLAGS shown blank = unset)
+go env GOVERSION GOWORK GOFLAGS CGO_ENABLED GOCACHE GOROOT   # (GOFLAGS shown blank = unset)
 gcc --version | head -1
 ```
 
