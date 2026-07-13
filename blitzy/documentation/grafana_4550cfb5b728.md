@@ -286,6 +286,38 @@ func TestObs_Q2b_ConcurrentInitialFill(t *testing.T) {
 	fmt.Printf("Q2b concurrent initial Get callers=%d ; BuildRules invocations for org %d = %d (uncoordinated fills)\n", K, orgID, n)
 }
 
+// Q2b variant: instant builder (delay defaults to 0). The fill count collapses well
+// below K and varies run-to-run, because the first fillOrg installs its tree before
+// most callers reach the missing-tree check. Proves the count is scheduling-dependent.
+func TestObs_Q2b_ConcurrentInitialFill_InstantBuilder(t *testing.T) {
+	b := &obsBuilder{rulesFn: func(int64) []*LiveChannelRule { return rulesV2() }}
+	s := NewCacheSegmentedTree(b)
+
+	const K = 16
+	const orgID = int64(42)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < K; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _, _ = s.Get(orgID, "stream/telegraf/cpu")
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	_, orgs := b.snapshot()
+	n := 0
+	for _, o := range orgs {
+		if o == orgID {
+			n++
+		}
+	}
+	fmt.Printf("Q2b (instant builder) concurrent initial Get callers=%d ; BuildRules invocations for org %d = %d (uncoordinated fills)\n", K, orgID, n)
+}
+
 // Q3a: no partial/empty exposure under accelerated-stress swaps.
 func TestObs_Q3a_NoPartialOrEmptyExposure(t *testing.T) {
 	b := &obsBuilder{rulesFn: func(int64) []*LiveChannelRule { return rulesV2() }}
@@ -663,23 +695,68 @@ ok  	github.com/grafana/grafana/pkg/services/live/pipeline	0.015s
 
 ### 7.5 Concurrent initial fills: last-completer-wins
 
-The "authoritative view" is always **lock-consistent** (a reader never sees a torn tree), but its *freshness* under concurrent **first** lookups is **not** coordinated. Because `Get` releases its read lock (`rule_cache_segmented.go:65`) *before* deciding to call `fillOrg` (`rule_cache_segmented.go:66-71`), several goroutines that all miss on the same absent org can each run a full `fillOrg` — there is no single-flight guard. Whichever `fillOrg` finishes **last** leaves its tree installed. This is demonstrated directly:
+The "authoritative view" is always **lock-consistent** (a reader never sees a torn tree), but its *freshness* under concurrent **first** lookups is **not** coordinated. Because `Get` releases its read lock (`rule_cache_segmented.go:65`) *before* deciding to call `fillOrg` (`rule_cache_segmented.go:66-71`), several goroutines that all miss on the same absent org can each run a full `fillOrg` — there is no single-flight guard. Whichever `fillOrg` finishes **last** leaves its tree installed. This is demonstrated directly below — and the *number* of redundant fills is reported honestly as a scheduling-dependent quantity, not a fixed invariant.
+
+**How many concurrent fills happen is scheduling-dependent, bounded above by the number of racing callers `K`.** The count reaches `K` only when *every* caller passes the missing-tree check (`rule_cache_segmented.go:63-65`) before the *first* `fillOrg` installs its tree (`rule_cache_segmented.go:55-57`); whether that happens depends on how long `BuildRules` takes relative to the goroutines' wake-up spread. Two runs of the same experiment — one with a **50 ms** build delay, one with an **instant** builder — make the dependence explicit. (Machine: `GOMAXPROCS=128`; see [Section 2](#2-investigation-environment-and-methodology).)
+
+**Experiment A — 50 ms build delay (`TestObs_Q2b_ConcurrentInitialFill`).** The delay is long enough that all `K = 16` callers pass the missing-tree check before any `fillOrg` finishes, so every caller runs its own fill.
 
 **Command:**
 ```bash
 go test -count=1 -run '^TestObs_Q2b_ConcurrentInitialFill$' -v ./pkg/services/live/pipeline/
 ```
-**Output (identical across 2 runs, complete, unedited):**
+**Output — run 1 (complete, unedited):**
 ```
 === RUN   TestObs_Q2b_ConcurrentInitialFill
 Q2b concurrent initial Get callers=16 ; BuildRules invocations for org 42 = 16 (uncoordinated fills)
 --- PASS: TestObs_Q2b_ConcurrentInitialFill (0.05s)
+PASS
+ok  	github.com/grafana/grafana/pkg/services/live/pipeline	0.064s
+```
+**Output — run 2 (complete, unedited):**
+```
+=== RUN   TestObs_Q2b_ConcurrentInitialFill
+Q2b concurrent initial Get callers=16 ; BuildRules invocations for org 42 = 16 (uncoordinated fills)
+--- PASS: TestObs_Q2b_ConcurrentInitialFill (0.05s)
+PASS
+ok  	github.com/grafana/grafana/pkg/services/live/pipeline	0.063s
 ```
 
-**Reading it:** 16 goroutines issuing the *first* `Get` for org 42 simultaneously produced **16** `BuildRules` invocations for that org — one per caller — proving the initial fills are uncoordinated (last-completer-wins), not a single shared build. Two consequences worth stating precisely:
+With the 50 ms delay the count is a stable **16 = K** across these runs *on this 128-core host* — but that "16" is a property of the delay (it guarantees every caller checks before the first install), **not** an inherent property of the routing code.
+
+**Experiment B — instant builder (`TestObs_Q2b_ConcurrentInitialFill_InstantBuilder`).** Removing the delay lets the first `fillOrg` install its tree almost immediately, so later-waking callers find the org already present and skip their own fill. The count collapses well below `K` and **varies run-to-run**.
+
+**Command:**
+```bash
+go test -count=1 -run '^TestObs_Q2b_ConcurrentInitialFill_InstantBuilder$' -v ./pkg/services/live/pipeline/
+```
+**Output — run 1 (complete, unedited):**
+```
+=== RUN   TestObs_Q2b_ConcurrentInitialFill_InstantBuilder
+Q2b (instant builder) concurrent initial Get callers=16 ; BuildRules invocations for org 42 = 4 (uncoordinated fills)
+--- PASS: TestObs_Q2b_ConcurrentInitialFill_InstantBuilder (0.00s)
+PASS
+ok  	github.com/grafana/grafana/pkg/services/live/pipeline	0.013s
+```
+**Output — run 2 (complete, unedited):**
+```
+=== RUN   TestObs_Q2b_ConcurrentInitialFill_InstantBuilder
+Q2b (instant builder) concurrent initial Get callers=16 ; BuildRules invocations for org 42 = 4 (uncoordinated fills)
+--- PASS: TestObs_Q2b_ConcurrentInitialFill_InstantBuilder (0.00s)
+PASS
+ok  	github.com/grafana/grafana/pkg/services/live/pipeline	0.013s
+```
+Repeating the instant-builder test **12 times** as fresh processes and recording only the fill count gives the distribution `4 4 5 4 3 2 4 3 3 3 4 3` — it ranges **2–5** and is **never 16** on this host.
+
+**Reading it:** the two experiments together separate the durable claim from the scheduling-dependent number:
+
+- **Durable invariant (observed in both experiments):** the fill count is always **> 1** — 16 goroutines issuing the *first* `Get` for org 42 produce **more than one** `BuildRules` invocation — which *proves the initial fills are uncoordinated* (a single-flight guard would force exactly 1, regardless of timing), and it is **bounded above by `K`** (16).
+- **Scheduling-dependent magnitude (observed, not an invariant):** the *exact* count is a function of build latency versus goroutine wake-up spread — it equals `K` only when every caller checks before the first install (Experiment A, 50 ms delay → 16) and is far smaller and variable with a fast builder (Experiment B, instant → 2–5). The "16" is therefore reported as a **captured sample of Experiment A on this 128-core host**, not as a reproducible property of the routing layer.
+
+Two further consequences worth stating precisely:
 
 - **Completeness is always guaranteed** regardless of this: each `fillOrg` builds its tree entirely under the lock, so every reader still sees a *complete* tree (this is why Q3's `misses=0` holds even under stress).
-- **Freshness ordering is only guaranteed for the periodic refresh, not for racing initial fills.** The background `updatePeriodically` loop runs in a *single* goroutine and refreshes serially (`rule_cache_segmented.go:28-41`), so its successive refreshes are naturally ordered; but two *concurrent initial* fills can complete in any order, so the surviving snapshot is the last writer to finish, which is not necessarily the one built from the newest rules. *(Observed: the 16-fill count. Inferred from `rule_cache_segmented.go:65-71`: the missing single-flight guard is what allows all 16.)*
+- **Freshness ordering is only guaranteed for the periodic refresh, not for racing initial fills.** The background `updatePeriodically` loop runs in a *single* goroutine and refreshes serially (`rule_cache_segmented.go:28-41`), so its successive refreshes are naturally ordered; but two *concurrent initial* fills can complete in any order, so the surviving snapshot is the last writer to finish, which is not necessarily the one built from the newest rules. *(Observed: the fill counts above — 16 with a 50 ms delay, 2–5 with an instant builder. Inferred from `rule_cache_segmented.go:65-71`: the missing single-flight guard is what allows more than one fill in the first place.)*
 
 ---
 
@@ -1065,4 +1142,4 @@ Every `file:line` referenced in this document, grouped by file, with a one-line 
 
 ---
 
-*Document generated run-first at HEAD `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`. All runtime values above are from the package-level canonical path (see [Section 3](#3-canonical-path-caveat-read-before-the-numbers)); the temporary observation harness (see [Section 4](#4-the-temporary-observation-harness-since-removed)) was created, run, and deleted, leaving the repository unchanged apart from this document. Final working-tree state after all observation and cleanup: `git status --porcelain` reports only ` M blitzy/documentation/grafana_4550cfb5b728.md` (this file), and `git diff --check` reports no whitespace or end-of-file errors.*
+*Document generated run-first at HEAD `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`. All runtime values above are from the package-level canonical path (see [Section 3](#3-canonical-path-caveat-read-before-the-numbers)); the temporary observation harness (see [Section 4](#4-the-temporary-observation-harness-since-removed)) was created, run, and deleted, leaving the repository unchanged apart from this document. Final state after all observation and cleanup: the temporary observation harness is deleted and the source tree is byte-for-byte unchanged — the **only** change relative to the base source commit is this single document. During authoring (before this file is committed) `git status --porcelain` reports just ` M blitzy/documentation/grafana_4550cfb5b728.md`; once the document is committed, `git status` on the committed tree is clean and this document remains the sole file added on top of the base commit (`git diff --name-status 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff..HEAD` shows only `A	blitzy/documentation/grafana_4550cfb5b728.md`). `git diff --check` reports no whitespace or end-of-file errors.*
