@@ -139,14 +139,14 @@ Version 11.5.0-pre (commit: 033d0bdb14, branch: blitzy-29dfbca5-c37c-4c07-9bac-2
 The banner string is `Version %s (commit: %s, branch: %s, enterprise-commit: %s)` /
 `Version %s (commit: %s, branch: %s)` printed by `RunServer` in
 `pkg/cmd/grafana-server/commands/cli.go:49` (with enterprise) / `:51` (without, the OSS
-path). The build-info variables are declared in `pkg/cmd/grafana/main.go:18-22`
+path). The build-info variables are declared in `pkg/cmd/grafana/main.go:17-21`
 (`var version = "9.2.0"`, `commit`, `enterpriseCommit`, `buildBranch`, `buildstamp`) and
 passed into `commands.ServerCommand(...)` at `pkg/cmd/grafana/main.go:47`.
 
 **How the three fields are resolved (important nuance):**
 
 - **`version` = `11.5.0-pre`** — the source fallback constant is `9.2.0`
-  (`pkg/cmd/grafana/main.go:18`), but the build **overrides** it via `-X
+  (`pkg/cmd/grafana/main.go:17`), but the build **overrides** it via `-X
   main.version=11.5.0-pre` (see the `go build` line in §1.1), sourced from
   `package.json` `"version"`. It is therefore VCS-independent.
 - **`commit` = `033d0bdb14`** — the build stamps `-X main.commit=$(getGitSha())`, and
@@ -1198,26 +1198,65 @@ supervising the process, as in this container) it logs a DEBUG line and **return
 sending anything**. The observed line confirms the no-op:
 
 ```text
-logger=server t=2026-07-13T18:41:04.953955724Z level=debug msg="NOTIFY_SOCKET environment variable empty or unset, can't send systemd notification"
+logger=server t=2026-07-13T20:03:07.577418406Z level=debug msg="NOTIFY_SOCKET environment variable empty or unset, can't send systemd notification"
 ```
 
-**Observed ordering proves the point.** In the debug run, the main goroutine reaches
-`notifySystemd` and then `s.log.Debug("Waiting on services...")` (`:178`) **before** the
-service goroutines have even logged their start:
+**Observed ordering: a non-deterministic race.** The readiness lines and the service-start
+lines are emitted from *different goroutines*, so their relative log order is **not**
+guaranteed. The dispatch loop (`:149-174`) runs to completion on the main goroutine *before*
+`s.notifySystemd("READY=1")` (`:176`), so by the readiness point all 34 services are already
+**dispatched** — every `s.childRoutines.Go(...)` call (`:156`) has returned. What races is
+whether a dispatched goroutine has yet reached its own `"Starting background service"` line
+(`:162`) at the moment the main goroutine logs `notifySystemd` (`:176`) and then
+`"Waiting on services..."` (`:178`). Both outcomes occur run-to-run. Captured with a
+temporary observation script (removed afterward) that, for each run, launched the canonical
+server at debug level on an isolated port and data dir, then classified the run by comparing
+the earliest `"Starting background service"` timestamp against the `NOTIFY_SOCKET` line:
 
 ```text
-logger=server t=2026-07-13T18:41:04.953955724Z level=debug msg="NOTIFY_SOCKET environment variable empty or unset, can't send systemd notification"
-logger=server t=2026-07-13T18:41:04.953961293Z level=debug msg="Waiting on services..."
-logger=server t=2026-07-13T18:41:04.953972292Z level=debug msg="Starting background service" service=*remotecache.RemoteCache
+$ for i in $(seq 1 8); do \
+    ./bin/linux-amd64/grafana server --homepath . \
+      cfg:log.level=debug cfg:server.http_port=$((3040+i)) cfg:paths.data=/tmp/gf_obs/data_$i \
+      > /tmp/gf_obs/boot_$i.log 2>&1 & pid=$!; \
+    until grep -qF "HTTP Server Listen" /tmp/gf_obs/boot_$i.log; do sleep 0.1; done; \
+    sleep 0.5; kill "$pid"; wait "$pid" 2>/dev/null; \
+  done
+run  first "Starting background service"     ordering
+ 1   *remotecache.RemoteCache                 readiness-BEFORE-service
+ 2   *appregistry.Service                     readiness-BEFORE-service
+ 3   *provisioning.ProvisioningServiceImpl    service-BEFORE-readiness
+ 4   *api.HTTPServer                          service-BEFORE-readiness
+ 5   *appregistry.Service                     readiness-BEFORE-service
+ 6   *pushhttp.Gateway                        service-BEFORE-readiness
+ 7   *service.UsageStats                      readiness-BEFORE-service
+ 8   *notifications.NotificationService       service-BEFORE-readiness
+DISTRIBUTION: service-BEFORE-readiness=4 ; readiness-BEFORE-service=4 ; total=8
 ```
 
-The three lines, in order, are: the `notifySystemd` no-op (`pkg/server/server.go:176` →
-empty-socket branch `:232`), `"Waiting on services..."` (`:178`), and the earliest-timestamp
-service-goroutine start line (`:162`; `*remotecache.RemoteCache` at `.953972292Z` — the
-minimum of the 34, confirmed by numeric comparison of the padded nanosecond fractions). So
-the "ready" point (`:176`) is reached *before* any `service.Run()` begins — had a systemd
-socket been present, `READY=1` would have been sent while services were only just being
-dispatched.
+*Run 1 — the main goroutine logs first* (`notifySystemd` no-op `:176` → empty-socket branch
+`:232`, then `"Waiting on services..."` `:178`, then the earliest service goroutine `:162`;
+all three within the same microsecond):
+
+```text
+logger=server t=2026-07-13T20:03:07.577418406Z level=debug msg="NOTIFY_SOCKET environment variable empty or unset, can't send systemd notification"
+logger=server t=2026-07-13T20:03:07.577424938Z level=debug msg="Waiting on services..."
+logger=server t=2026-07-13T20:03:07.577427499Z level=debug msg="Starting background service" service=*remotecache.RemoteCache
+```
+
+*Run 4 — a service goroutine logs first* (the earliest `"Starting background service"` at
+`:162` precedes the same two main-goroutine readiness lines, again within one microsecond):
+
+```text
+logger=server t=2026-07-13T20:03:15.9929271Z level=debug msg="Starting background service" service=*api.HTTPServer
+logger=server t=2026-07-13T20:03:15.992957749Z level=debug msg="NOTIFY_SOCKET environment variable empty or unset, can't send systemd notification"
+logger=server t=2026-07-13T20:03:15.992970011Z level=debug msg="Waiting on services..."
+```
+
+So the "ready" point (`:176`) is reached **concurrently with** the services beginning to run
+— which line wins the log is decided by the Go scheduler and flips run-to-run — not strictly
+before them. What *is* invariant is that all 34 goroutines are already **dispatched** by
+`:176`: had a systemd socket been present, `READY=1` would fire with every service already
+launched and executing (whether or not each had yet logged its start).
 
 **Conclusion.** By the time the HTTP listener is up (Q1), all 34 background services have
 been **dispatched as concurrent goroutines** and are executing their `Run` methods; the
@@ -1244,7 +1283,7 @@ flowchart TD
     D --> E["*api.HTTPServer goroutine → HTTPServer.Run(): getListener()"]
     E --> F["INFO 'HTTP Server Listen'<br/>address=[::]:3000 protocol=http subUrl= socket= (Q1)"]
     F --> G["httpSrv.Serve(listener)<br/>/api/health (200 ok / 503 failing) + /healthz (Ok) live (Q3)"]
-    C --> H["notifySystemd READY=1 → NO-OP (NOTIFY_SOCKET unset)<br/>reached before services' Run() begins (Q4)"]
+    C --> H["notifySystemd READY=1 → NO-OP (NOTIFY_SOCKET unset)<br/>fires after all 34 dispatched; log order vs first service start non-deterministic (Q4)"]
     G --> I["Browser login admin/admin<br/>forced change-password interstitial (Submit / Skip) → PUT /api/user/password (Q2)"]
 ```
 
