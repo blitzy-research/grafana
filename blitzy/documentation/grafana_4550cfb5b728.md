@@ -2,7 +2,7 @@
 
 > **Scope of this document.** This is a factual, *observed-behavior* account of what Grafana (`grafana/grafana`, product version `11.5.0-pre`) actually does when it boots from a **completely clean state**: no `conf/custom.ini`, no `GF_*` environment variables, and an empty data directory. Every behavioral claim below was produced by **building and running the real `server` entry point first**, capturing complete unedited output (stdout/stderr and exit status), and only *then* grounding the explanation in the source with `file:line` references.
 >
-> **Canonical build/run identity.** All values were produced by the project's own build machinery (`go run build.go build-backend`) and the resulting binary `./bin/grafana`. That binary self-reports `Version 11.5.0-pre (commit: 8bc9b06191, branch: blitzy-d319eda3-6a4f-4f3c-a8c4-70f4da2bbc81)`. The `commit`/`branch` are **naturally derived from the current checkout** (`git rev-parse --short HEAD` / `--abbrev-ref HEAD`), not hand-supplied. The source branch from which this file is named, `grafana_4550cfb5b728`, corresponds to the upstream baseline commit `4550cfb5b7`; the working checkout adds exactly one commit on top of it (this document), so HEAD is `8bc9b06191`. Where a reported value depends on how the binary is built, both the **canonical** value and any **non-canonical** fallback are shown and labeled.
+> **Canonical build/run identity.** All values were produced by the project's own build machinery (`go run build.go build-backend`) and the resulting binary `./bin/grafana`. That binary self-reports `Version 11.5.0-pre (commit: 8bc9b06191, branch: blitzy-d319eda3-6a4f-4f3c-a8c4-70f4da2bbc81)`. The `commit`/`branch` are **naturally derived from the current checkout** (`git rev-parse --short HEAD` / `--abbrev-ref HEAD`), not hand-supplied. The source branch from which this file is named, `grafana_4550cfb5b728`, corresponds to the upstream baseline commit `4550cfb5b7`; this document is added as **one or more commits on top of** that baseline, so HEAD sits *past* `4550cfb5b7`. The `commit: 8bc9b06191` shown here — **and every `commit`/`buildstamp` value throughout this document** — is the value stamped **as of authoring** (the short HEAD at the time the binary used for these observations was built); because committing this document itself advances HEAD, the exact HEAD and the number of commits on top are point-in-time and a rebuild at the *current* HEAD stamps the then-current short commit. The stable, commit-count-independent invariant is that `blitzy/documentation/grafana_4550cfb5b728.md` is the single path added on top of `4550cfb5b7`. Where a reported value depends on how the binary is built, both the **canonical** value and any **non-canonical** fallback are shown and labeled.
 >
 > **Execution context (disclosed).** The investigation ran as the container's `root` user (`uid=0`, `HOME=/root`); this is disclosed because it is observable in the evidence and, in a few places (file permissions, the `-race`/dev flags of some Make targets), it is worth noting. Anything that could not be produced at runtime after genuine effort is explicitly labeled **inferred** and grounded in a specific `file:line`.
 
@@ -38,6 +38,8 @@ HOME=/root
 
 ### Repository identity & read-only starting state
 
+The snapshot below is **as of authoring**. Self-referential git commands (`git rev-parse HEAD`, `git log`) advance every time this document is (re)committed, so re-running them later reports a *newer* HEAD than the value captured here — this is expected and does not affect any Grafana-behavior conclusion. The stable, commit-count-independent invariants are the upstream **baseline** `4550cfb5b7` and the single path this document adds on top of it (proven under *Authoritative read-only proof* below via `git diff --name-status`, which is unaffected by how many commits touch the file).
+
 ```console
 $ git rev-parse --abbrev-ref HEAD
 blitzy-d319eda3-6a4f-4f3c-a8c4-70f4da2bbc81
@@ -50,7 +52,7 @@ $ git log --oneline -2
 4550cfb5b7 Upgrade scenes to v5.32.0 (#97944)
 ```
 
-The working branch is the destination branch `blitzy-d319eda3-6a4f-4f3c-a8c4-70f4da2bbc81`. The **source branch** from which this file is named, `grafana_4550cfb5b728`, corresponds one-to-one to the upstream baseline commit `4550cfb5b7` (`Upgrade scenes to v5.32.0 (#97944)`). The working checkout adds **exactly one commit** on top of that baseline — this document — so `HEAD` is `8bc9b06191`. That is why the canonically-built binary stamps `commit: 8bc9b06191` (the current `HEAD`), **not** `4550cfb5b7`: the build reads the live checkout, and the checkout has moved one commit past the baseline.
+The working branch is the destination branch `blitzy-d319eda3-6a4f-4f3c-a8c4-70f4da2bbc81`. The **source branch** from which this file is named, `grafana_4550cfb5b728`, corresponds one-to-one to the upstream baseline commit `4550cfb5b7` (`Upgrade scenes to v5.32.0 (#97944)`). This document is added as **one or more commits on top of** that baseline (its initial authoring plus any subsequent remediation), so `HEAD` sits *past* `4550cfb5b7`; the exact HEAD and the number of commits on top advance with every (re)commit of this file and are therefore **point-in-time, not stable** values. That is why the canonically-built binary stamps a `commit` equal to the *current* short `HEAD` (**not** `4550cfb5b7`): the build reads the live checkout, which has moved past the baseline. The `commit: 8bc9b06191` shown throughout this document is that short `HEAD` **as of authoring**; a rebuild at the current `HEAD` stamps the then-current short commit.
 
 **Authoritative read-only proof.** Relative to the baseline, the *only* changed path in the entire tree is this document, and it is an addition:
 
@@ -62,7 +64,7 @@ $ git diff --stat 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff
  1 file changed, 811 insertions(+)
 ```
 
-(The `--name-status` line — one file, status `A` — is the stable invariant; the insertion count in `--stat` simply equals this document's current length and grows as the document is rewritten. The final verification in the Appendix re-runs both after the last edit.) Generated and build artifacts stay ignored, so building never dirties the tree:
+(The `--name-status` line — one file, status `A` — is the **stable invariant**: it stays `A blitzy/documentation/grafana_4550cfb5b728.md` no matter how many commits touch the file or how long the document grows. The `811 insertions(+)` reported by `--stat` is a **point-in-time** figure — it equals this document's length at the commit that first introduced it and is *not* stable; the document has since been expanded, so re-running `--stat` now reports a larger count. Read-only status is therefore asserted from `--name-status` (a single added path), not from any insertion count.) Generated and build artifacts stay ignored, so building never dirties the tree:
 
 ```console
 $ git check-ignore pkg/server/wire_gen.go bin/grafana
@@ -142,9 +144,9 @@ $ ls -l bin/grafana | awk '{print $5}'
 **ldflags grounding (nothing is hand-supplied).** The `-X main.*` values are assembled in `pkg/build/cmd.go` `ldflags()` (L222) from helpers in `pkg/build/git.go`:
 
 - `-X main.version=11.5.0-pre` — `opts.version` (from `package.json`), `cmd.go:247`.
-- `-X main.commit=8bc9b06191` — `getGitSha()` = `git rev-parse --short HEAD` (`git.go:11-15`), `cmd.go:228,248`. On git failure it falls back to `unknown-dev` (`git.go:14`) — **inferred branch, not exercised in this run: git succeeded, yielding `8bc9b06191`.**
+- `-X main.commit=8bc9b06191` — `getGitSha()` = `git rev-parse --short HEAD` (`git.go:11-15`), `cmd.go:228,248`. On git failure it falls back to `unknown-dev` (`git.go:14`) — **inferred branch, not exercised in this run: git succeeded, yielding `8bc9b06191`.** This short SHA is the HEAD **as of authoring**; because it is read from the live checkout at build time, a rebuild after this document is (re)committed stamps the then-current short HEAD instead.
 - `-X main.buildBranch=blitzy-d319eda3-6a4f-4f3c-a8c4-70f4da2bbc81` — `getGitBranch()` = `git rev-parse --abbrev-ref HEAD` (`git.go:3-6`), `cmd.go:241,253`. On git failure it falls back to `main` (`git.go:6`) — **inferred branch, not exercised in this run: git succeeded, yielding the checkout branch `blitzy-d319eda3-6a4f-4f3c-a8c4-70f4da2bbc81`.**
-- `-X main.buildstamp=1783963870` — `buildStamp()` (`cmd.go:305`) uses `SOURCE_DATE_EPOCH` if set, else `git show -s --format=%ct` (the HEAD commit time). `SOURCE_DATE_EPOCH` is unset here, and the value equals the commit time exactly:
+- `-X main.buildstamp=1783963870` — `buildStamp()` (`cmd.go:305`) uses `SOURCE_DATE_EPOCH` if set, else `git show -s --format=%ct` (the HEAD commit time). `SOURCE_DATE_EPOCH` is unset here, and the value equals the commit time exactly — this `1783963870` is the commit time of the **as-of-authoring** HEAD, so (like `commit`) a rebuild after this document is (re)committed stamps the then-current HEAD's commit time:
 
 ```console
 $ echo "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-<unset>}"
@@ -606,7 +608,7 @@ $ sed -n '148,171p' pkg/server/server.go
 ```
 
 - **The disable interface.** `pkg/registry/registry.go` `CanBeDisabled` (L18), `IsDisabled() bool` (L20), and the helper `func IsDisabled(...)` (L53) — a bare type-assert + call, no logging.
-- **Silent opt-outs (NOT emitters).** `pkg/services/searchV2/service.go:120` (`IsDisabled` → `!features.IsEnabledGlobally(FlagPanelTitleSearch)`) and `pkg/services/grpcserver/service.go:136` (`return !s.enabled`) return `true` by default and are skipped with no log — they never appear in the stream.
+- **Silent opt-outs (NOT emitters).** `pkg/services/searchV2/service.go:120` (`IsDisabled` → `!features.IsEnabledGlobally(FlagPanelTitleSearch)`) and `pkg/services/grpcserver/service.go:137` (`return !s.enabled`; the `IsDisabled` method is declared on `:136`) return `true` by default and are skipped with no log — they never appear in the stream.
 - **SQLite default.** `conf/defaults.ini` `[database] type = sqlite3`.
 - **Update checkers.** `pkg/services/updatechecker/grafana.go:23,48,56-57,95`; `pkg/services/updatechecker/plugins.go:49`; config `conf/defaults.ini:268,275`.
 - **ERR-1 source.** `pkg/storage/unified/resource/server.go:224-225` (`prometheus.Register(NewStorageMetrics())` → `logger.Warn("failed to register storage metrics", ...)`).
@@ -862,7 +864,7 @@ func (ss *SQLStore) ensureMainOrgAndAdminUser(test bool) error {
 
 ### Causal reasoning
 
-Two independent migrators each record their applied migrations as rows in their own log table. On the first run both tables are empty, so the core migrator *performs* all **626** migrations (`performed=626 skipped=0`, ~1.6 s here) and the resource migrator *performs* all **18** (`performed=18 skipped=0`, ~47 ms), writing one row per migration into `migration_log` and `resource_migration_log` respectively. On any later run each migrator reads its table, sees every migration already recorded, and reports `performed=0` (skipping 626 and 18) in microseconds. Independently, `ensureMainOrgAndAdminUser` runs `SELECT COUNT(id) FROM "user"`: on run 1 the count is `0`, so it creates the admin (from `cfg.AdminUser`/`cfg.AdminPassword`) and the Main Org., emitting the two `Created default admin`/`Created default organization` info lines; on run 2 the count is `> 0`, so it returns early at L204 (`return nil`) and neither line is logged. Because the deciding state is persisted on disk — the relational rows in `data/grafana.db`, plus the on-disk plugin, log, and cache directories — it survives a stop/restart, which is exactly the run-to-run difference the question is about. State is therefore *not* "all in `grafana.db`": the database holds the relational state that gates first-run vs. subsequent-run behavior, while renders, logs, and externally-installed plugins persist as ordinary files under the data path.
+Two independent migrators each record their applied migrations as rows in their own log table. On the first run both tables are empty, so the core migrator *performs* all **626** migrations (`performed=626 skipped=0`, ~1.6 s here) and the resource migrator *performs* all **18** (`performed=18 skipped=0`, ~47 ms), writing one row per migration into `migration_log` and `resource_migration_log` respectively. On any later run each migrator reads its table, sees every migration already recorded, and reports `performed=0` (skipping 626 and 18) in microseconds. Independently, `ensureMainOrgAndAdminUser` runs `SELECT COUNT(id) FROM "user"`: on run 1 the count is `0`, so it creates the admin (from `cfg.AdminUser`/`cfg.AdminPassword`) and the Main Org., emitting the two `Created default admin`/`Created default organization` info lines; on run 2 the count is `> 0`, so it returns early at L205 (`return nil`, reached via the `if stats.Count > 0` guard on `:204`) and neither line is logged. Because the deciding state is persisted on disk — the relational rows in `data/grafana.db`, plus the on-disk plugin, log, and cache directories — it survives a stop/restart, which is exactly the run-to-run difference the question is about. State is therefore *not* "all in `grafana.db`": the database holds the relational state that gates first-run vs. subsequent-run behavior, while renders, logs, and externally-installed plugins persist as ordinary files under the data path.
 
 **Web cross-check (documented vs observed).** Grafana's official documentation matches the observed default. The *Configure Grafana* → `[database]` section states that by default Grafana "is configured to use sqlite3 which is an embedded database (included in the main Grafana binary)" and that for `sqlite3` the file comes from `[database] path` resolved under the data path — exactly the `<paths.data>/grafana.db` observed here: <https://grafana.com/docs/grafana/latest/setup-grafana/configure-grafana/#database>. The *Set up for high availability* page independently confirms Grafana "uses an embedded sqlite3 database to store users, dashboards, and other persistent data by default": <https://grafana.com/docs/grafana/latest/setup-grafana/set-up-for-high-availability/>.
 
@@ -2023,7 +2025,7 @@ This closing pass confirms that every mechanism, function, condition, file, flag
 | The difference survives stop/restart | Area 2 | state persisted on disk (rows + files); re-query is byte-identical |
 | Migration mechanism / log | Area 2 | **two** migrators: core (`migration_log`, 626) + resource (`resource_migration_log`, 18) |
 | One-time default admin/org bootstrap | Area 2 | `ensureMainOrgAndAdminUser` → `Created default admin`/`Created default organization` on run 1 only |
-| Short-circuit on later runs | Area 2 | `SELECT COUNT(id) FROM "user"` > 0 → early `return nil` (`sqlstore.go:204`) |
+| Short-circuit on later runs | Area 2 | `SELECT COUNT(id) FROM "user"` > 0 → early `return nil` (`sqlstore.go:205`, guarded by `:204`) |
 | Migration gate | Area 2 | `pkg/services/sqlstore/sqlstore.go:134` |
 
 ### Area 3 — Security posture of the default configuration
@@ -2106,7 +2108,7 @@ This appendix records how the investigation was run, the environment it ran in, 
 
 - **Execution identity:** all commands ran as **root** (`uid=0(root)`, `HOME=/root`) inside the project's Docker container `andrewparkscaleai/coding-agent:grafana__grafana__4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`. Running as root is disclosed because it affects file ownership of engineered directories; it does **not** change any observed Grafana default.
 - **Toolchain (consumed, never changed):** Go `1.23.1`, Node `v22.23.1`, Yarn `4.5.3`, GCC `15.2.0` — matching `go.mod` (`go 1.23.1`), `.nvmrc`/`package.json engines`, and the CGO requirement of the embedded SQLite driver (`mattn/go-sqlite3`).
-- **Repository:** `grafana/grafana`, product version `11.5.0-pre`, destination branch `blitzy-d319eda3-6a4f-4f3c-a8c4-70f4da2bbc81`, HEAD `8bc9b06191`.
+- **Repository:** `grafana/grafana`, product version `11.5.0-pre`, destination branch `blitzy-d319eda3-6a4f-4f3c-a8c4-70f4da2bbc81`, sitting one or more commits past the upstream baseline `4550cfb5b7` (short HEAD `8bc9b06191` **as of authoring**; the HEAD advances with each recommit of this document, while the single-added-path invariant against `4550cfb5b7` is stable).
 - **Clean state engineered per run:** no `conf/custom.ini`, zero `GF_*` environment variables, and an empty/absent data directory redirected under `/tmp` via `cfg:paths.data=…` so no writable state ever touches the repository tree.
 - **Network:** outbound internet was **available** during the investigation, so the update checkers succeeded and the async plugin preinstall (`grafana-lokiexplore-app v1.0.10`) downloaded; offline behavior is labeled **inferred** where it appears (Areas 1 and 4).
 
@@ -2135,6 +2137,8 @@ Every run was started, settled, and stopped through this helper; probe instances
 | Working-tree screenshots | `blitzy/screenshots/*.png` | Area-3 visual evidence (transcribed into Area 3 text) | removed — **not** part of the committed deliverable |
 
 The Area-3 screenshots were transcribed into the Area 3 narrative (accessibility snapshot, Skip-button behavior) and the PNG files themselves are intentionally **not** committed; only this Markdown document is added to the repository.
+
+**Process note (cleanup hygiene).** Unlike every other ephemeral artifact — which lived under `/tmp`, outside the repository — these screenshots were briefly written *inside* the working tree at `blitzy/screenshots/`. That path is **not** git-ignored (`git check-ignore blitzy/screenshots` returns nothing; `.gitignore` ignores only the `e2e`/Cypress screenshot paths), so nothing placed there is hidden from `git status`. They were therefore removed immediately after transcription (see the section D transcript), were never staged or committed, and left no residue (`find blitzy -iname '*.png' | wc -l` → `0`). The ideal, followed for every other scratch artifact, is to keep transient files under `/tmp` (outside the repository) so no throwaway ever touches the working tree.
 
 ### D. Cleanup — actual command/output (verbatim transcript)
 
