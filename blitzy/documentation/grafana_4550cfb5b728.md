@@ -100,7 +100,7 @@ $ . /tmp/genv.sh && GF_LOG_LEVEL=debug GF_SERVER_ROUTER_LOGGING=true \
 `GF_LOG_LEVEL=debug` and `GF_SERVER_ROUTER_LOGGING=true` raise verbosity **through configuration only** (no source edit); everything else is default (`conf/defaults.ini`: `protocol = http` `:32`, `http_port = 3000` `:41`, `level = info` `:1074`). All backend logs are **redirected** to the absolute path `/tmp/grafana_investigation/server.log` (outside the repository). Startup and health:
 
 ```text
-logger=settings   t=2026-07-13T17:54:42.11Z level=info msg="Starting Grafana" version=11.5.0-pre commit=2749415797 branch=blitzy-46438301-e97a-462a-abe3-6a4976b775e1
+logger=settings   t=2026-07-13T17:54:42.11Z level=info msg="Starting Grafana" version=11.5.0-pre commit=2749415797 branch=blitzy-46438301-e97a-462a-abe3-6a4976b775e1 compiled=2026-07-13T17:04:39Z
 logger=http.server t=2026-07-13T17:54:50.13Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=
 ```
 
