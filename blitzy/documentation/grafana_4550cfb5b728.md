@@ -1,17 +1,39 @@
-# Grafana Boot Sequence — Onboarding Q&A (commit `4550cfb5b728`)
+# Grafana Boot Sequence — Onboarding Q&A (investigated commit `4550cfb5b728`)
 
 This document answers four onboarding questions about Grafana's local startup (boot)
 sequence. Every answer is written **from real captured runtime output** of a freshly
 built Grafana server run in its **default, canonical configuration**, and every factual
 claim is grounded in a `file:line` reference that names the specific
-function/method/struct doing the work. Statements derived from reading code rather than
-from observation are explicitly labelled **(inferred)**.
+function/method/struct doing the work. Where a statement is derived from reading code
+rather than from direct runtime observation, it is explicitly labelled **(inferred)**; in
+practice every question's primary case *and* every edge/alternate branch below was
+exercised at runtime through the real entry point, so the answers rest on observed output
+rather than inference.
 
-- **Repository HEAD:** `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` (a Grafana **v11.x-era** build).
-- **Observed version banner:** `Version 11.5.0-pre (commit: 4550cfb5b7, branch: blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523)`
-- **Methodology:** run first, then write. The server was built, launched via its real
-  entry point (`grafana server`), and probed with `curl` and a headless browser; the
-  answers below quote the exact commands and their complete, unedited output.
+- **Investigated source commit:** `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` — a Grafana
+  **v11.5.0-pre** build. This is the commit whose source answers Q1–Q4.
+- **Documentation commit vs. investigated commit.** This answer file is added as a commit
+  *on top of* the investigated commit (which is its parent). At the time of the runs
+  captured below, the branch tip was the documentation commit `033d0bdb14`. Because that
+  commit adds **only** this one Markdown file — the source tree is strictly read-only
+  (§1.5) — every Q1–Q4 code path is byte-identical to the investigated commit
+  `4550cfb5b7`. So "investigated commit" (`4550cfb5b7…`) and "current `git HEAD`"
+  (`033d0bdb14`, the doc commit) are deliberately distinguished throughout.
+- **Observed version banner (this canonical build):**
+  `Version 11.5.0-pre (commit: 033d0bdb14, branch: blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523)`.
+  The `commit` field is the **short `git HEAD` at build time** (§1.2), i.e. the doc commit
+  `033d0bdb14` here — *not* the investigated commit; `version` (`11.5.0-pre`) is
+  VCS-independent (it comes from `package.json`).
+- **Runtime image (canonical environment):**
+  `ghcr.io/scaleapi/swe-atlas:swe_atlas_QnA_grafana_grafana_1.0`
+  (tag `grafana__grafana__4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`).
+- **Toolchain (observed):** Go `1.23.1`, Node `v22.23.1`, Yarn `4.5.3`, gcc `15.2`
+  (`CGO_ENABLED=1` is required for the `mattn/go-sqlite3` driver), GNU Make `4.4.1`.
+- **Methodology:** run first, then write. The server was **built** (§1.1) and **launched
+  as a non-root OS user** (`ubuntu`, uid 1000) via its real entry point (`grafana server`),
+  then probed with `curl` and a headless browser; the answers below quote the exact
+  commands and their complete, unedited output. Identity/timing-sensitive values were
+  confirmed across two labelled canonical runs (§1.4).
 
 ---
 
@@ -32,84 +54,196 @@ from observation are explicitly labelled **(inferred)**.
 ### 1.1 Build
 
 Grafana's build is driven by `build.go` (a `// +build ignore` shim whose `main()` calls
-`pkg/build.RunCmd()`), which the `Makefile` wraps in the `build-server` target
-(`Makefile:201`) and the composite `build` target (`Makefile:229` → `build-go`
-`Makefile:187` + `build-js` `Makefile:211`). The canonical build commands are:
+`pkg/build.RunCmd()` — `build.go:12-16`). The command dispatch lives in
+`pkg/build/cmd.go`. The **unified `grafana` binary** (the canonical entry point) is
+produced by the `build-backend` case, which builds `./pkg/cmd/grafana`
+(`pkg/build/cmd.go:76-84`); the composite `build` case builds all three binaries
+(`grafana`, `grafana-server`, `grafana-cli` — `pkg/build/cmd.go:27,103-112`). The output
+path for a non-dev build is `./bin/{goos}-{goarch}/{binary}` (`pkg/build/cmd.go:155-170`),
+i.e. `./bin/linux-amd64/grafana`.
+
+> **Correction of two common mistakes** (verified against `pkg/build/cmd.go`):
+> `go run build.go build-server` does **not** build the canonical binary — it builds the
+> **deprecated** `grafana-server` wrapper from `./pkg/cmd/grafana-server`
+> (`pkg/build/cmd.go:86-94`; that wrapper merely re-execs `grafana server`). And
+> `go run build.go build-js` is **not a valid command** — `build.go` has no `build-js`
+> case, so it falls through to `default → "Unknown command"` and exits `1`
+> (`pkg/build/cmd.go:128-131`). The frontend command is `build-frontend`
+> (`pkg/build/cmd.go:114-115`, which runs `yarn run build`), or simply `yarn build`.
+
+**Prerequisite — generate the Wire graph.** `pkg/server/wire_gen.go` is git-ignored and
+absent on a clean checkout, so it must be generated before compiling
+(`Makefile:167` `gen-go`). Command and **complete** output:
 
 ```bash
-# Backend (unified `grafana` binary) — Makefile build-server @L201 wraps this:
-go run build.go build-server
-# Frontend assets served by the running instance — Makefile build-js @L211:
-go run build.go build-js      # (equivalently: yarn build)
+$ make gen-go
+generate go files
+go run  ./pkg/build/wire/cmd/wire/main.go gen -tags "oss" ./pkg/server
+wire: github.com/grafana/grafana/pkg/server: wrote /tmp/blitzy/grafana/blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523_509fea/pkg/server/wire_gen.go
 ```
 
-> Note: `make run` (`Makefile:232`) uses the `bra` hot-reload wrapper and is **not** the
-> canonical invocation. The canonical entry point is the compiled binary plus the
-> `server` subcommand (`pkg/cmd/grafana/main.go` → `commands.ServerCommand(...)`
-> `pkg/cmd/grafana/main.go:47`). `grafana-server` is a deprecated stub that re-execs
-> `grafana`.
+**Backend (unified binary).** `CGO_ENABLED=1` is required by the `mattn/go-sqlite3`
+driver. Command and **complete** output:
 
-The build produced the binary at `./bin/linux-amd64/grafana`.
+```bash
+$ CGO_ENABLED=1 go run build.go build-backend
+Version: 11.5.0, Linux Version: 11.5.0, Package Iteration: 1783964456pre
+rm -r dist
+rm -r tmp
+rm -r /root/go/pkg/linux_amd64/github.com/grafana
+building grafana ./pkg/cmd/grafana
+rm -r ./bin/linux-amd64/grafana
+rm -r ./bin/linux-amd64/grafana.md5
+go build -ldflags -w -X main.version=11.5.0-pre -X main.commit=033d0bdb14 -X main.buildstamp=1783962438 -X main.buildBranch=blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523 -o ./bin/linux-amd64/grafana ./pkg/cmd/grafana
+go version
+go version go1.23.1 linux/amd64
+Targeting linux/amd64
+```
+
+This produced `./bin/linux-amd64/grafana` (a 246 MB binary). Note the emitted
+`-X main.commit=033d0bdb14` — the commit is the short **git HEAD at build time** (§1.2).
+
+**Frontend assets** (served by the running instance). Command and its **tail** (the full
+log lists all 658 emitted assets; shown here is `tail -4`, which carries the compiler
+result and the Nx summary):
+
+```bash
+$ NODE_OPTIONS=--max_old_space_size=8000 yarn build 2>&1 | tail -4
+webpack 5.95.0 compiled with 2 warnings in 15165 ms
+
+ NX   Successfully ran target build for project grafana and 12 tasks it depends on
+
+Nx read the output from the cache instead of running the command for 11 out of 13 tasks.
+```
+
+The only warnings are two benign webpack *asset-size* advisories (bundle exceeds the
+244 KiB recommendation); the build succeeds (exit `0`) and emits `public/build/`
+(658 files, ~156 MB, including the entry chunk `app.<hash>.js`). `yarn build` resolves to
+`NODE_ENV=production nx exec --verbose -- webpack --config scripts/webpack/webpack.prod.js
+--progress` (`package.json`), equivalent to `go run build.go build-frontend`
+(`pkg/build/cmd.go:114-115`).
+
+> `make run` (`Makefile:232`) uses the `bra` hot-reload wrapper and is **not** the
+> canonical invocation. The canonical entry point is the compiled binary plus the
+> `server` subcommand (`pkg/cmd/grafana/main.go:47` → `commands.ServerCommand(...)`).
 
 ### 1.2 Version / commit banner (canonical build)
 
-Command and complete output:
+Command and **complete** output:
 
 ```bash
 $ ./bin/linux-amd64/grafana server -v
-Version 11.5.0-pre (commit: 4550cfb5b7, branch: blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523)
+Version 11.5.0-pre (commit: 033d0bdb14, branch: blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523)
 ```
 
 The banner string is `Version %s (commit: %s, branch: %s, enterprise-commit: %s)` /
 `Version %s (commit: %s, branch: %s)` printed by `RunServer` in
-`pkg/cmd/grafana-server/commands/cli.go:49` (with enterprise) / `:51` (without). The
-build-info variables (`version`, `commit`, `buildBranch`, `buildstamp`) are declared in
-`pkg/cmd/grafana/main.go:17-21` and passed into `commands.ServerCommand(...)` at
-`pkg/cmd/grafana/main.go:47`. The `version` fallback constant in source is `9.2.0`
-(`pkg/cmd/grafana/main.go:17`), but the canonical build **stamps** it to `11.5.0-pre`
-(matching `package.json` `"version": "11.5.0-pre"`), with `commit` and `branch` stamped
-from the git checkout. The same version string is echoed in the boot log's first
-structured line:
+`pkg/cmd/grafana-server/commands/cli.go:49` (with enterprise) / `:51` (without, the OSS
+path). The build-info variables are declared in `pkg/cmd/grafana/main.go:18-22`
+(`var version = "9.2.0"`, `commit`, `enterpriseCommit`, `buildBranch`, `buildstamp`) and
+passed into `commands.ServerCommand(...)` at `pkg/cmd/grafana/main.go:47`.
+
+**How the three fields are resolved (important nuance):**
+
+- **`version` = `11.5.0-pre`** — the source fallback constant is `9.2.0`
+  (`pkg/cmd/grafana/main.go:18`), but the build **overrides** it via `-X
+  main.version=11.5.0-pre` (see the `go build` line in §1.1), sourced from
+  `package.json` `"version"`. It is therefore VCS-independent.
+- **`commit` = `033d0bdb14`** — the build stamps `-X main.commit=$(getGitSha())`, and
+  `getGitSha()` is literally `git rev-parse --short HEAD` (`pkg/build/git.go:11-12`,
+  invoked at `pkg/build/cmd.go:228`). So `commit` is **the short `git HEAD` at build
+  time** — here `033d0bdb14`, the documentation commit — **not** the investigated commit
+  `4550cfb5b7`. (Rebuilding after a further doc commit would stamp that newer HEAD.)
+- **`branch` = `blitzy-29dfbca5-…`** — `getGitBranch()` = `git rev-parse --abbrev-ref
+  HEAD` (`pkg/build/git.go:4`, invoked at `pkg/build/cmd.go:241`).
+
+The same values are echoed in the boot log's first structured line (from canonical run A,
+§1.4):
 
 ```
-logger=settings t=2026-07-13T16:43:18.452282897Z level=info msg="Starting Grafana" version=11.5.0-pre commit=4550cfb5b7 branch=blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523 compiled=2024-12-13T14:22:02Z
+logger=settings t=2026-07-13T17:45:34.94371302Z level=info msg="Starting Grafana" version=11.5.0-pre commit=033d0bdb14 branch=blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523 compiled=2026-07-13T17:07:18Z
 ```
 
-### 1.3 Run (default, canonical configuration)
+### 1.3 Run (default, canonical configuration, non-root)
 
-The primary run used **only** the baked-in `conf/defaults.ini` — no `conf/custom.ini`
-was created and **no `GF_*` overrides** were set:
+The canonical runs used **only** the baked-in `conf/defaults.ini` — no `conf/custom.ini`
+was created and **no `GF_*` overrides** were set — and were executed as a **non-root OS
+user** (`ubuntu`, uid 1000) via `runuser`. The default HTTP port `3000` was kept
+unchanged (so the observed listen address is the true canonical value). The **only**
+deviation from a bare `--homepath .` run is that `paths.data`/`paths.logs`/`paths.plugins`
+were redirected to a private temporary directory *outside* the repository — a read-only
+scope measure (§1.5) that has **no effect** on any of the four answers (the listen
+address, health semantics, and background-service set are all independent of the data
+directory's location). The exact invocation:
 
 ```bash
-$ ./bin/linux-amd64/grafana server --homepath "$(pwd)" > /tmp/grafana_boot_info.log 2>&1 &
+# D = a private mktemp -d instance dir owned by ubuntu; HOMEPATH = repo root
+$ runuser -u ubuntu -- env HOME="$D" "$HOMEPATH/bin/linux-amd64/grafana" server \
+    --homepath "$HOMEPATH" \
+    cfg:paths.data="$D/data" cfg:paths.logs="$D/logs" cfg:paths.plugins="$D/plugins" \
+    > "$D/boot.log" 2>&1 &
+$ PID=$!    # exact PID captured for a bounded readiness poll and an exact-PID stop
 ```
 
-`--homepath` points at the repository root so that `conf/defaults.ini`, `public/`, and
-`data/` resolve. The boot log confirms the config source is the default file:
+The boot log confirms the config source is the default file (canonical run A):
 
 ```
-logger=settings t=2026-07-13T16:43:18.452561335Z level=info msg="Config loaded from" file=/tmp/blitzy/grafana/blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523_509fea/conf/defaults.ini
+logger=settings t=2026-07-13T17:45:34.944062908Z level=info msg="Config loaded from" file=/tmp/blitzy/grafana/blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523_509fea/conf/defaults.ini
 ```
 
-A non-fatal warning is printed first because the container runs as root:
-`Grafana server is running with elevated privileges. This is not recommended`. This does
-not affect any of the four answers.
+Because the process runs **non-root**, the `"Grafana server is running with elevated
+privileges"` warning is **absent** — verified with `grep -c "elevated privileges"
+"$D/boot.log"` → `0` on every canonical run. (The process owner was confirmed with
+`ps -eo user=,pid=,comm= | grep grafana` → `ubuntu … grafana`.)
 
-### 1.4 Runtime-value table
+### 1.4 Two labelled canonical runs & stability
+
+To satisfy the "≥ 2 unchanged runs" requirement, two identical canonical runs (**run A**,
+**run B**) were performed with the invocation in §1.3 (default config, port 3000,
+non-root). Each was stopped by its exact captured `PID`. The identity/timing-sensitive
+values were stable:
+
+| Metric | Run A | Run B | Stable? |
+|---|---|---|---|
+| Boot → `/api/health` reachable (wall clock) | `2.56 s` | `2.05 s` | consistent (< 3 s) |
+| `"Starting Grafana"` → `"HTTP Server Listen"` (log timestamps) | `2.067 s` | `1.715 s` | consistent |
+| Q1 listen fields (`address protocol subUrl socket`) | `[::]:3000 http (empty) (empty)` | `[::]:3000 http (empty) (empty)` | **identical** |
+| `level=debug` lines at default `info` level | `0` | `0` | identical |
+| Total boot log lines | `1358` | `1359` | ±1 (ordering jitter) |
+| Version banner | `11.5.0-pre / 033d0bdb14` | `11.5.0-pre / 033d0bdb14` | identical |
+
+The two edge/secondary runs used later — the Q3 `503` database-failure instance
+(§4.5, unique port) and the Q4 `level=debug` instance (§5.3) — are **not** canonical and
+are labelled as such where they appear.
+
+### 1.5 Read-only scope
+
+The Grafana source tree is treated as strictly read-only: the **only** file this task adds
+is this document. All observation used a private `mktemp -d` workspace and temporary
+instance data directories *outside* the repository; those, plus every server process,
+are removed after capture (see §7's cleanup evidence). No tracked source, configuration,
+manifest, or generated file is modified.
+
+### 1.6 Runtime-value table
 
 | Property | Observed value | Source |
 |---|---|---|
 | Entry point | `grafana server` | `pkg/cmd/grafana/main.go:47` (`commands.ServerCommand`) |
-| Canonical build | `go run build.go build-server` | `Makefile:201` (`build-server`) |
-| Binary path | `./bin/linux-amd64/grafana` | build output |
-| Version | `11.5.0-pre` | banner; `package.json` `version`; `pkg/cmd/grafana/main.go:17` |
-| Commit / branch | `4550cfb5b7` / `blitzy-29dfbca5-…` | banner (git-stamped) |
+| Canonical build (unified binary) | `CGO_ENABLED=1 go run build.go build-backend` | `pkg/build/cmd.go:76-84` (builds `./pkg/cmd/grafana`) |
+| Build prerequisite | `make gen-go` (Wire) | `Makefile:167` |
+| Frontend build | `yarn build` (≡ `build.go build-frontend`) | `pkg/build/cmd.go:114-115`; `package.json` |
+| Binary path | `./bin/linux-amd64/grafana` | `pkg/build/cmd.go:155-170`; build output |
+| Version | `11.5.0-pre` | banner; `package.json`; override `-X main.version` |
+| Commit (= short `git HEAD`) | `033d0bdb14` (doc commit) | banner; `pkg/build/git.go:11-12` |
+| Investigated source commit | `4550cfb5b72886…` | doc-commit parent (read-only source) |
+| Branch | `blitzy-29dfbca5-…` | banner; `pkg/build/git.go:4` |
 | Config source | `conf/defaults.ini` (no `custom.ini`, no `GF_*`) | boot log "Config loaded from" |
 | Protocol | `http` | `conf/defaults.ini:32` (`protocol = http`) |
 | HTTP port | `3000` | `conf/defaults.ini:41` (`http_port = 3000`) |
 | Bind address (resolved) | `[::]:3000` | boot log "HTTP Server Listen" |
-| Database | SQLite at `data/grafana.db` | `conf/defaults.ini:123` (`type = sqlite3`) |
+| Database | SQLite, default path `data/grafana.db` | `conf/defaults.ini:123` (`type = sqlite3`); `pkg/services/sqlstore/database_config.go:111` |
 | Log level | `info` | `conf/defaults.ini:1074` (`level = info`) |
+| Run OS user | `ubuntu` (uid 1000, non-root) | `ps`; no "elevated privileges" warning |
 
 ---
 
@@ -133,14 +267,23 @@ socket), **`subUrl`** (the path prefix / sub-path the app is mounted under), and
 run this is: bound to **all interfaces on port 3000**, plain **HTTP**, **no** sub-path,
 and **no** UNIX socket.
 
-### 2.2 Observed output
+### 2.2 Observed output (two canonical runs)
 
-Command and complete, unedited line (from the primary default-config boot):
+Command and complete, unedited line from **each** canonical run (§1.4). `$D` is that
+run's private instance directory:
 
 ```bash
-$ grep -F "HTTP Server Listen" /tmp/grafana_boot_info.log
-logger=http.server t=2026-07-13T16:43:20.299939796Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=
+# Run A
+$ grep -F "HTTP Server Listen" "$D_runA/boot.log"
+logger=http.server t=2026-07-13T17:45:37.010576308Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=
+# Run B
+$ grep -F "HTTP Server Listen" "$D_runB/boot.log"
+logger=http.server t=2026-07-13T17:45:58.195013002Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=
 ```
+
+Stripped of the per-run `logger=`/`t=` prefix, the two payloads are **byte-identical**
+(`level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=`);
+only the timestamp differs. This is the two-run stability proof for Q1.
 
 ### 2.3 The source line (verbatim)
 
@@ -157,19 +300,28 @@ hs.log.Info("HTTP Server Listen", "address", listener.Addr().String(), "protocol
 | `address` | `[::]:3000` | The **resolved** listener address, `listener.Addr().String()` (`pkg/api/http_server.go:434`) — **not** the raw configured value. `[::]` is the IPv6 unspecified address, i.e. **all interfaces**; `:3000` is the port. | `http_port = 3000` (`conf/defaults.ini:41`); empty `http_addr` means all interfaces |
 | `protocol` | `http` | `hs.Cfg.Protocol` (`pkg/api/http_server.go:434`). Plain HTTP. | `protocol = http` (`conf/defaults.ini:32`) |
 | `subUrl` | *(empty)* | `hs.Cfg.AppSubURL` (`pkg/api/http_server.go:435`) — the path prefix derived from `root_url`. The default `root_url` has no sub-path, so this is empty (app served at `/`). | `root_url = %(protocol)s://%(domain)s:%(http_port)s/` (`conf/defaults.ini:51`), `domain = localhost` (`conf/defaults.ini:44`) |
-| `socket` | *(empty)* | `hs.Cfg.SocketPath` (`pkg/api/http_server.go:435`) — used only when `protocol = socket`. Empty by default. | `protocol = http` (not `socket`) (`conf/defaults.ini:32`) |
+| `socket` | *(empty)* | `hs.Cfg.SocketPath` (`pkg/api/http_server.go:435`). This is the **runtime** field `SocketPath` on `*setting.Cfg`, which is only populated when `protocol = socket`; under the default `http` protocol it is the empty string (distinct from the raw INI `[server] socket` key, which is irrelevant here because the socket listener code path is not taken). | `protocol = http` (not `socket`) (`conf/defaults.ini:32`) |
 
 ### 2.5 Nuance
 
 - **`address` is the resolved address, not the configured one.** The code logs
   `listener.Addr().String()` — the address the OS actually bound — so it reflects what is
-  truly reachable. On this default run that is `[::]:3000` (all interfaces, port 3000).
+  truly reachable. On the default runs that is `[::]:3000` (all interfaces, port 3000).
+- **`socket` is empty at runtime under HTTP.** The logged value is the runtime
+  `hs.Cfg.SocketPath` field, not the raw `[server] socket` INI key. `getListener()`
+  (`pkg/api/http_server.go:476`) switches on `hs.Cfg.Protocol` at `:481`; it only consults
+  `SocketPath` in the `SocketScheme` branch (`case setting.SocketScheme` at `:488`,
+  `net.ListenUnix(..., Name: hs.Cfg.SocketPath ...)` at `:489`). Under `http` the TCP
+  branch (`:482-483`, `net.Listen("tcp", …)`) is taken and `SocketPath` stays empty —
+  which is exactly the observed `socket=`.
 - **How the listener is served** is decided by the `switch hs.Cfg.Protocol` block that
-  immediately follows (`pkg/api/http_server.go:450`): for `HTTPScheme`/`SocketScheme` it
-  calls `hs.httpSrv.Serve(listener)`; for `HTTP2Scheme`/`HTTPSScheme` it calls
-  `hs.httpSrv.ServeTLS(...)`. The default `http` takes the plain `Serve` branch.
-- **Stability:** the four field values were identical across all three boots performed
-  (`address=[::]:3000 protocol=http subUrl= socket=`); only the timestamp differed.
+  immediately follows the listen log (`pkg/api/http_server.go:450`): for
+  `HTTPScheme`/`SocketScheme` it calls `hs.httpSrv.Serve(listener)`; for
+  `HTTP2Scheme`/`HTTPSScheme` it calls `hs.httpSrv.ServeTLS(...)`. The default `http`
+  takes the plain `Serve` branch.
+- **Stability (two canonical runs).** The four field values were **identical** across
+  canonical run A and run B (`address=[::]:3000 protocol=http subUrl= socket=`); only the
+  timestamp differed (§1.4, §2.2).
 
 
 ---
@@ -179,35 +331,86 @@ hs.log.Info("HTTP Server Listen", "address", listener.Addr().String(), "protocol
 ### 3.1 Direct answer
 
 After signing in with the default administrator credentials (`admin` / `admin`), Grafana
-immediately forces a **password change** before the user can proceed. The **internal
-state being finalized** is the user's **persisted new password hash**, written by the
-backend handler
-**`func (hs *HTTPServer) ChangeUserPassword(c *contextmodel.ReqContext) response.Response`**
-at **`pkg/api/user.go:546-566`**, which calls **`hs.userService.Update(...)`** with the
-new and old passwords at **`pkg/api/user.go:561`** and returns
-`response.Success("User password changed")` at `pkg/api/user.go:565`.
+does **not** navigate into the app. Instead it presents a forced **"Update your
+password"** interstitial — a client-side change-password view rendered *in place of* the
+dashboard. The action Grafana demands is therefore a **change-password decision**: the
+user is asked to set a new password (**Submit**), but the screen also offers a **Skip**
+button, so the change is strongly urged rather than strictly mandatory (see §3.3 — Skip
+is offered because the default `password_policy = false`).
+
+**What internal state is finalized:** *if the user submits a new password*, the finalized
+state is the administrator's **persisted password hash**. The new password is hashed and
+written to the user row by
+**`func (s *Service) Update(ctx context.Context, cmd *user.UpdateUserCommand) error`** at
+**`pkg/services/user/userimpl/user.go:238`** — it validates the password against policy
+(`Password.Validate(s.cfg)`, `:261`), hashes it with the user's salt
+(`hashed, err := cmd.Password.Hash(usr.Salt)`, `:265`), replaces the plaintext with the
+hash (`cmd.Password = &hashed`, `:269`), and persists via `s.store.Update(ctx, cmd)`
+(`:290`). This `Service.Update` is reached through the API handler
+**`func (hs *HTTPServer) ChangeUserPassword(...)`** at **`pkg/api/user.go:546`**, which
+returns `response.Success("User password changed")` (`pkg/api/user.go:565`).
 
 **Critical nuance:** the "force change password" decision is **entirely client-side** —
 there is no server-side "must change password" flag. After a successful `POST /login`,
 the front-end login controller checks whether the submitted password equals the literal
-default `admin`; only then does it switch to the change-password view.
+default `admin` (and that neither LDAP nor auth-proxy is enabled); only then does it
+switch to the change-password view (`public/app/core/components/Login/LoginCtrl.tsx:117`,
+`:121`).
+
+> **Security note on evidence:** every observation below was captured without recording
+> any secret. Session-cookie values are redacted (`grafana_session=<redacted>`), and the
+> replacement password used to exercise the change was a random throwaway held only in a
+> shell variable / temporary cookie-jar file and **never printed**. The literal default
+> `admin` is shown because it is the canonical, documented default credential
+> (`conf/defaults.ini:328`, `:331`), not a secret.
 
 ### 3.2 Observed output — the forced change-password screen (browser)
 
-Driving the real front-end (`http://localhost:3000/login`) with `admin` / `admin` and
-clicking **Log in** switched the page to the change-password view **without navigating
-away from `/login`** (a client-side view switch). The exact rendered DOM was extracted
-live with `evaluate_script`:
+The real front-end was driven with the Chrome DevTools MCP browser tools against the
+canonical non-root instance on `http://localhost:3000`. Exact command sequence:
+
+```text
+navigate_page   { type: "url", url: "http://localhost:3000/login" }
+evaluate_script { function: () => window.grafanaBootData.settings &&
+                    ({ ldapEnabled: window.grafanaBootData.settings.ldapEnabled,
+                       authProxyEnabled: window.grafanaBootData.settings.authProxyEnabled,
+                       disableLoginForm: window.grafanaBootData.settings.disableLoginForm }) }
+take_snapshot                                     # locate username/password/Log in uids
+fill  { uid: <username textbox>, value: "admin" }
+fill  { uid: <password textbox>, value: "admin" }
+click { uid: <"Log in" button> }
+wait_for { text: ["Update your password"] }
+take_snapshot                                     # capture the change-password a11y tree
+```
+
+The baseline `evaluate_script` returned (default run — both auth modifiers off):
 
 ```json
-{
-  "url": "http://localhost:3000/login",
-  "heading": "Update your password",
-  "alertText": "Continuing to use the default password exposes you to security risks.",
-  "buttons": ["Submit", "Skip"],
-  "fieldLabels": ["New password", "Confirm new password"]
-}
+{ "ldapEnabled": false, "authProxyEnabled": false, "disableLoginForm": false }
 ```
+
+Clicking **Log in** switched the page to the change-password view **without navigating
+away from `/login`** (a client-side view switch). The `take_snapshot` accessibility tree
+of the resulting view was:
+
+```yaml
+heading "Update your password" level=1
+form
+  status "Continuing to use the default password exposes you to security risks." [atomic] [live=polite]
+  StaticText "New password"
+  textbox "New password" [focused]
+  switch "Show password"
+  StaticText "Confirm new password"
+  textbox "Confirm new password"
+  switch "Show password"
+  button "Submit"
+  button "Skip"
+```
+
+The rendered screen was captured during the investigation: the Grafana login card centred
+on the dark background, an orange spiral logo, the "Update your password" heading, the info
+Alert quoted above, the two password inputs each with a show/hide toggle, and stacked
+**Submit** / **Skip** buttons.
 
 The observed Alert title — **"Continuing to use the default password exposes you to
 security risks."** — matches the component source **byte-for-byte**:
@@ -219,94 +422,172 @@ security risks."** — matches the component source **byte-for-byte**:
 )}
 ```
 
-### 3.3 Observed output — the network flow (curl)
+The **Submit** button is rendered at `ChangePassword.tsx:87`; the **Skip** button is
+rendered at `ChangePassword.tsx:90` and is gated on
+`!config.auth.basicAuthStrongPasswordPolicy && onSkip`. In the default configuration
+`password_policy = false` (`conf/defaults.ini:883`, section `[auth.basic]` at
+`conf/defaults.ini:874`), so `basicAuthStrongPasswordPolicy` is false and the Skip button
+is present.
 
-The change is submitted as `PUT /api/user/password`. Captured with full request payloads
-and complete responses:
+### 3.3 Observed output — the Skip path (change is urged, not mandatory)
 
-```bash
-$ curl -i -s -c /tmp/cookies.txt -H 'Content-Type: application/json' \
-    -d '{"user":"admin","password":"admin"}' http://localhost:3000/login
-HTTP/1.1 200 OK
-Cache-Control: no-store
-Content-Type: application/json
-Set-Cookie: grafana_session=ba4f0303ca7ef8f05e60a016ad88ae18; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax
-Set-Cookie: grafana_session_expiry=1783962157; Path=/; Max-Age=2592000; SameSite=Lax
-X-Content-Type-Options: nosniff
-X-Frame-Options: deny
-X-Xss-Protection: 1; mode=block
-Date: Mon, 13 Jul 2026 16:52:42 GMT
-Content-Length: 41
+Clicking **Skip** proceeded straight into Grafana **without changing the password**. The
+browser navigated to the authenticated home:
 
-{"message":"Logged in","redirectUrl":"/"}
+```text
+click { uid: <"Skip" button> }
+# → URL after click:
+http://localhost:3000/?orgId=1&from=now-6h&to=now&timezone=browser
 ```
 
+The full authenticated app rendered (left nav Home / Dashboards / Explore / Alerting /
+Connections / Administration, plus the "Welcome to Grafana" getting-started panel).
+
+Skip does **not** persist. Logging out and signing back in with `admin` / `admin`
+re-displayed the **"Update your password"** interstitial (Skip button present again):
+
+```text
+navigate_page { type: "url", url: "http://localhost:3000/logout" }
+navigate_page { type: "url", url: "http://localhost:3000/login" }
+fill …admin / admin…; click "Log in"
+wait_for { text: ["Update your password"] }      # ← re-appeared
+```
+
+This matches the Skip tooltip in source
+(`public/app/core/components/ForgottenPassword/ChangePassword.tsx:92`): *"If you skip you
+will be prompted to change password next time you log in."* The trigger is re-evaluated on
+every login because it is purely client-side and keyed on the submitted password still
+being `admin`.
+
+### 3.4 Observed output — the network flow (safe capture)
+
+**Browser network panel.** After completing the change via the UI (a random throwaway
+password), `list_network_requests` (fetch/xhr, preserved) showed exactly the two calls —
+method, path, and status only:
+
+```text
+list_network_requests { includePreservedRequests: true, resourceTypes: ["fetch","xhr"] }
+  #119  POST  http://localhost:3000/login                 [200]
+  #120  PUT   http://localhost:3000/api/user/password     [200]
+```
+
+(The `#120` response body was deliberately **not** fetched, to avoid pulling any password
+material into the record — only method/path/status are needed to prove the call.)
+
+**curl on an isolated instance (port 3021).** The same two calls captured with `curl`,
+with the cookie jar written to a temp file (never printed) and all `Set-Cookie` **values
+redacted**:
+
 ```bash
-$ curl -i -s -b /tmp/cookies.txt -X PUT -H 'Content-Type: application/json' \
-    -d '{"oldPassword":"admin","newPassword":"newAdminPass123","confirmNew":"newAdminPass123"}' \
-    http://localhost:3000/api/user/password
+# Secrets held only in shell variables / temp files, never echoed:
+#   CJ="$D/cookies.txt"                                  # cookie jar (temp file)
+#   NEWPASS="$(…random…)"                                # throwaway, never printed
+$ curl -sS -D "$CJ.hdr" -o login.body -c "$CJ" \
+    -H 'Content-Type: application/json' \
+    --data-binary '{"user":"admin","password":"admin"}' \
+    http://localhost:3021/login
+# --- status line + headers (Set-Cookie VALUES redacted) ---
 HTTP/1.1 200 OK
 Cache-Control: no-store
 Content-Type: application/json
+Set-Cookie: grafana_session=<redacted>; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax
+Set-Cookie: grafana_session_expiry=<redacted>; Path=/; Max-Age=2592000; SameSite=Lax
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Mon, 13 Jul 2026 16:52:42 GMT
-Content-Length: 35
+Date: Mon, 13 Jul 2026 18:25:09 GMT
+Content-Length: 41
+# --- body ---
+{"message":"Logged in","redirectUrl":"/"}
 
+$ curl -sS -X PUT -H 'Content-Type: application/json' -b "$CJ" \
+    --data-binary "{\"oldPassword\":\"admin\",\"newPassword\":\"$NEWPASS\",\"confirmNew\":\"$NEWPASS\"}" \
+    http://localhost:3021/api/user/password
 {"message":"User password changed"}
 ```
 
 The body `{"message":"User password changed"}` is exactly the envelope produced by
 `response.Success("User password changed")` (`pkg/api/user.go:565`).
 
-### 3.4 Before / after — proof the new hash is finalized
+### 3.5 Before / after — proof the new hash is finalized
+
+Captured in a single session on a dedicated isolated instance (port 3022) so the throwaway
+password stays in one shell scope and is never printed:
 
 ```bash
-# OLD password no longer authenticates:
-$ curl -i -s -H 'Content-Type: application/json' \
-    -d '{"user":"admin","password":"admin"}' http://localhost:3000/login
-HTTP/1.1 401 Unauthorized
-...
-{"statusCode":401,"messageId":"password-auth.failed","message":"Invalid username or password"}
-
-# NEW password authenticates:
-$ curl -i -s -H 'Content-Type: application/json' \
-    -d '{"user":"admin","password":"newAdminPass123"}' http://localhost:3000/login
-HTTP/1.1 200 OK
-...
+# [BEFORE] OLD admin/admin authenticates
+$ curl -sS -w '-> HTTP %{http_code}\n' -c "$CJ" -H 'Content-Type: application/json' \
+    --data-binary '{"user":"admin","password":"admin"}' http://localhost:3022/login
 {"message":"Logged in","redirectUrl":"/"}
+-> HTTP 200
+
+# [CHANGE] PUT /api/user/password (old=admin, new=<throwaway>)
+$ curl -sS -w '-> HTTP %{http_code}\n' -X PUT -H 'Content-Type: application/json' -b "$CJ" \
+    --data-binary "{\"oldPassword\":\"admin\",\"newPassword\":\"$NEWPASS\",\"confirmNew\":\"$NEWPASS\"}" \
+    http://localhost:3022/api/user/password
+{"message":"User password changed"}
+-> HTTP 200
+
+# [AFTER] OLD admin/admin now REJECTED
+$ curl -sS -w '-> HTTP %{http_code}\n' -H 'Content-Type: application/json' \
+    --data-binary '{"user":"admin","password":"admin"}' http://localhost:3022/login
+{"statusCode":401,"messageId":"password-auth.failed","message":"Invalid username or password"}
+-> HTTP 401
+
+# [AFTER] NEW password ACCEPTED
+$ curl -sS -w '-> HTTP %{http_code}\n' -H 'Content-Type: application/json' \
+    --data-binary "{\"user\":\"admin\",\"password\":\"$NEWPASS\"}" http://localhost:3022/login
+{"message":"Logged in","redirectUrl":"/"}
+-> HTTP 200
 ```
 
 The old credential flips from `200` to `401 password-auth.failed` and the new one now
-returns `200`, confirming the finalized state is the **persisted new password hash**.
+returns `200`, confirming the finalized state is the **persisted new password hash**
+written by `Service.Update` (`pkg/services/user/userimpl/user.go:265` hash, `:290`
+persist).
 
-### 3.5 Client-side trigger and the finalized backend state (`file:line`)
+### 3.6 Client-side trigger and the finalized backend state (`file:line`)
 
-Front-end trace (`public/app/core/components/Login/LoginCtrl.tsx`):
+**Front-end trigger** (`public/app/core/components/Login/LoginCtrl.tsx`) — the `login`
+method issues `POST /login` and, on success, decides between entering the app and showing
+the change-password view:
 
 ```ts
-// login = (formModel) => {...}  @L107 issues POST /login @L113-114; on success:
-if (formModel.password !== 'admin' || config.ldapEnabled || config.authProxyEnabled) {  // L117
-  this.toGrafana();                                                                       // L118
-  return;
-} else {
-  this.changeView(formModel.password === 'admin');                                        // L121
-}
+// login(formModel: FormModel) is defined at LoginCtrl.tsx:107; its body:
+getBackendSrv().post<LoginDTO>('/login', formModel, { showErrorAlert: false })  // :114
+  .then((result) => {
+    this.result = result;
+    if (formModel.password !== 'admin' || config.ldapEnabled || config.authProxyEnabled) {  // :117
+      this.toGrafana();                                                     // :118  (skip → enter app)
+      return;
+    } else {
+      this.changeView(formModel.password === 'admin');                      // :121  (show change-password view)
+    }
+  })
 ```
 
-- `changePassword = (password) => {...}` (`LoginCtrl.tsx:78`) builds
-  `{ newPassword, confirmNew, oldPassword: 'admin' }` (`LoginCtrl.tsx:79-83`) and, in the
-  non-reset branch, submits `getBackendSrv().put('/api/user/password', pw)`
-  (`LoginCtrl.tsx:98-99`); on success it calls `toGrafana()` (`LoginCtrl.tsx:101`, defined
-  `:183`).
-- `public/app/core/components/Login/LoginPage.tsx:84` renders the form only when
-  `isChangingPassword && !config.auth.passwordlessEnabled`:
-  `<ChangePassword showDefaultPasswordWarning=… onSubmit={changePassword} onSkip={() => skipPasswordChange()} />`.
-- The route is registered at `pkg/api/api.go:277`:
-  `userRoute.Put("/password", routing.Wrap(hs.ChangeUserPassword))`.
+- `changeView` sets `isChangingPassword: true` (`LoginCtrl.tsx:176-178`); `toGrafana`
+  navigates into the app (`LoginCtrl.tsx:183`).
+- When the user submits, `changePassword` (`LoginCtrl.tsx:78`) builds the payload
+  `{ newPassword, confirmNew, oldPassword: 'admin' }` (`LoginCtrl.tsx:79-83`) and (non-reset
+  branch) submits `getBackendSrv().put('/api/user/password', pw)` (`LoginCtrl.tsx:98-99`),
+  calling `toGrafana()` on success (`LoginCtrl.tsx:100-101`).
+- `public/app/core/components/Login/LoginPage.tsx:84` renders the view only when
+  `isChangingPassword && !config.auth.passwordlessEnabled`, passing
+  `skipPasswordChange` (which is `toGrafana`, `LoginCtrl.tsx:220`) as the Skip handler:
+  `<ChangePassword showDefaultPasswordWarning={showDefaultPasswordWarning} onSubmit={changePassword} onSkip={() => skipPasswordChange()} />`
+  (`LoginPage.tsx:86-89`).
 
-Backend handler (`pkg/api/user.go:546-566`) — the persisted state:
+**Route → handler → persistence** (backend):
+
+- Route: `userRoute.Put("/password", routing.Wrap(hs.ChangeUserPassword))`
+  (`pkg/api/api.go:277`).
+- Handler `func (hs *HTTPServer) ChangeUserPassword(...)` (`pkg/api/user.go:546`) binds
+  `ChangeUserPasswordCommand` (`:547-550`), resolves the user id (`getUserID`, `:552`),
+  rejects externally-managed users (`errOnExternalUser`, `:557`; defined
+  `pkg/api/utils.go:30`), then calls
+  `hs.userService.Update(ctx, &user.UpdateUserCommand{UserID, Password: &form.NewPassword, OldPassword: &form.OldPassword})`
+  (`:561`) and returns `response.Success("User password changed")` (`:565`):
 
 ```go
 func (hs *HTTPServer) ChangeUserPassword(c *contextmodel.ReqContext) response.Response {
@@ -328,36 +609,67 @@ func (hs *HTTPServer) ChangeUserPassword(c *contextmodel.ReqContext) response.Re
 }
 ```
 
-The finalized state is the new password hash written by `userService.Update`
-(`pkg/api/user.go:561`). Note (code-grounded): this handler does **not** revoke tokens or
-reset login attempts — it only updates the password. The relevant defaults are
-`admin_user = admin` (`conf/defaults.ini:328`), `admin_password = admin`
-(`conf/defaults.ini:331`), and `disable_initial_admin_creation = false`
-(`conf/defaults.ini:325`).
+- **Finalized state** is written by `func (s *Service) Update(...)`
+  (`pkg/services/user/userimpl/user.go:238`): it verifies the old password
+  (`cmd.OldPassword.Hash(usr.Salt)` compared to the stored hash, `:249-258`), validates the
+  new password against policy (`cmd.Password.Validate(s.cfg)`, `:261`), hashes it with the
+  user's salt (`hashed, err := cmd.Password.Hash(usr.Salt)`, `:265`), swaps the plaintext
+  for the hash (`cmd.Password = &hashed`, `:269`), and persists it via
+  `s.store.Update(ctx, cmd)` (`:290`).
 
-### 3.6 Edge / skip path (exercised)
+Note (code-grounded): this handler updates only the password — it does **not** revoke
+existing tokens or reset login attempts. The relevant defaults are `admin_user = admin`
+(`conf/defaults.ini:328`), `admin_password = admin` (`conf/defaults.ini:331`), and
+`disable_initial_admin_creation = false` (`conf/defaults.ini:325`).
 
-Because the trigger is client-side, logging in with a **non-default** password bypasses
-the prompt entirely. After changing the password, logging in with the new password in the
-browser navigated **straight into Grafana** (home dashboard), with **no** change-password
-screen:
+### 3.7 Alternate branches (all exercised at runtime)
 
-```
-# After logout + login as admin / newAdminPass123, the browser landed on:
-http://localhost:3000/?orgId=1&from=now-6h&to=now&timezone=browser
-# Full authenticated app rendered (Home, Dashboards, Explore, Alerting, Connections,
-# Administration nav + "Welcome to Grafana" getting-started panel). No "Update your
-# password" screen.
-```
+The trigger at `LoginCtrl.tsx:117` short-circuits to `toGrafana()` (no prompt) when **any**
+of three conditions holds. All three were exercised through the real front end / entry
+point — none is merely inferred:
 
-This matches the `formModel.password !== 'admin'` branch (`LoginCtrl.tsx:117-118`) that
-calls `toGrafana()` immediately. The server's `POST /login` response is identical for
-default and non-default passwords (`{"message":"Logged in","redirectUrl":"/"}`), which
-confirms the differentiation is purely client-side. The **LDAP / auth-proxy** conditions
-in the same check (`config.ldapEnabled || config.authProxyEnabled`, `LoginCtrl.tsx:117`)
-likewise skip the prompt; these are gated by config that is off in the default run, so
-that specific branch is **(inferred)** from the code rather than toggled at runtime.
+1. **Non-default password** (`formModel.password !== 'admin'`). After the change in §3.5,
+   logging in through the browser with the new password navigated **straight to**
+   `http://localhost:3000/?orgId=1&…` — no change-password screen. The server's
+   `POST /login` response is byte-identical for default and non-default passwords
+   (`{"message":"Logged in","redirectUrl":"/"}`), confirming the differentiation is purely
+   client-side.
 
+2. **Auth-proxy enabled** (`config.authProxyEnabled`). A dedicated instance was launched
+   with `cfg:auth.proxy.enabled=true` on port 3012; `evaluate_script` confirmed
+   `{ "authProxyEnabled": true, "ldapEnabled": false }`. Signing in with `admin` / `admin`
+   went **straight to the home page** — the interstitial was skipped despite the default
+   password. Config mapping: `frontendsettings.go:193-194` ← `[auth.proxy] enabled`
+   (`conf/defaults.ini:886`).
+
+3. **LDAP enabled** (`config.ldapEnabled`). A dedicated instance was launched with
+   `cfg:auth.ldap.enabled=true` on port 3013; `evaluate_script` confirmed
+   `{ "authProxyEnabled": false, "ldapEnabled": true }`. Signing in with `admin` / `admin`
+   went **straight to `http://localhost:3013/`** — again the interstitial was skipped.
+   Config mapping: `LDAPAuthEnabled` (`pkg/setting/setting.go:1361`) ← `[auth.ldap] enabled`
+   (`conf/defaults.ini:921`), surfaced to the front end at `frontendsettings.go:193-194`.
+
+### 3.8 Official-documentation corroboration (secondary)
+
+The runtime observations above are the authoritative answer; the following external
+references only **corroborate** them and are strictly secondary to the code at the
+investigated commit.
+
+- Grafana's official *"Sign in to Grafana"* guide describes the same first-login flow: after
+  entering `admin` for the username and password and clicking **Sign in**, "you will see a
+  prompt to change the password" (grafana.com/docs — *Set up Grafana → Sign in to Grafana*).
+  This is exactly the interstitial captured in §3.2.
+- Public references (e.g. accesschecker.net) likewise summarise the behaviour as "Grafana
+  forces a password change on first successful login", matching the observed trigger.
+
+The code at the investigated commit remains the source of truth for *how* the prompt is
+triggered and skipped — the client-side check `password === 'admin' && !ldapEnabled &&
+!authProxyEnabled` (`public/app/core/components/Login/LoginCtrl.tsx:117`, branch at `:121`)
+and the optional `Skip` control gated on
+`!config.auth.basicAuthStrongPasswordPolicy && onSkip`
+(`public/app/core/components/ForgottenPassword/ChangePassword.tsx:90`). No upstream doc, not
+even the official one, mentions the `Skip` option — a detail only the runtime observation and
+the source reveal.
 
 ---
 
@@ -371,49 +683,59 @@ A **healthy** `/api/health` returns **HTTP 200** with
 **`func (hs *HTTPServer) apiHealthHandler(ctx *web.Context)`**
 (`pkg/api/http_server.go:710-745`) and returns a **`healthResponse` struct**
 (`pkg/api/http_server.go:694-699`). The **`"database"`** value reports **database
-readiness**: it is derived from **`func (hs *HTTPServer) databaseHealthy(ctx context.Context) bool`**
-(`pkg/api/health.go:10-25`), which executes a trivial **`session.Exec("SELECT 1")`**
+readiness**: it is derived from
+**`func (hs *HTTPServer) databaseHealthy(ctx context.Context) bool`**
+(`pkg/api/health.go:10-24`), which executes a trivial **`session.Exec("SELECT 1")`**
 (`pkg/api/health.go:18`) against the configured database and **caches** the result for
 **5 seconds** (`hs.CacheService.Set(cacheKey, healthy, time.Second*5)`,
 `pkg/api/health.go:23`). In short, `"database"` reports only that a trivial `SELECT 1`
-round-trip to the configured DB (default SQLite `data/grafana.db`,
-`conf/defaults.ini:123`) **succeeded within the last 5 seconds** — not deep schema/data
-integrity.
+round-trip to the configured DB **succeeded within the last 5 seconds** — not deep
+schema/data integrity. In the default configuration the DB is SQLite
+(`type = sqlite3`, `conf/defaults.ini:123`) at the default path `data/grafana.db`
+(`dbCfg.Path = sec.Key("path").MustString("data/grafana.db")`,
+`pkg/services/sqlstore/database_config.go:111`).
 
 ### 4.2 Observed output — healthy 200 (primary)
 
-Command and complete, unedited response:
+Command and complete, unedited response (canonical non-root instance):
 
 ```bash
-$ curl -i http://localhost:3000/api/health
+$ curl -sS -i http://localhost:3031/api/health
 HTTP/1.1 200 OK
 Cache-Control: no-store
 Content-Type: application/json; charset=UTF-8
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Mon, 13 Jul 2026 16:45:26 GMT
+Date: Mon, 13 Jul 2026 18:34:36 GMT
 Content-Length: 75
 
 {
   "database": "ok",
   "version": "11.5.0-pre",
-  "commit": "4550cfb5b7"
+  "commit": "033d0bdb14"
 }
 ```
+
+The `commit` value is the **build-time git SHA** (`data.Commit = hs.Cfg.BuildCommit`,
+`pkg/api/http_server.go:721`); this binary was built at HEAD `033d0bdb14` (see §1.2), so
+that is the value actually emitted — the investigated commit `4550cfb5b728` differs only by
+the addition of this answer document, so all Q3 source is byte-identical between them.
 
 The 75-byte body was verified **byte-for-byte** with `od -c` (two-space indent, `\n`
 newlines, and **no** trailing newline after `}`):
 
 ```bash
-$ curl -s http://localhost:3000/api/health | od -c
+$ curl -sS http://localhost:3031/api/health | od -c
 0000000   {  \n           "   d   a   t   a   b   a   s   e   "   :
 0000020   "   o   k   "   ,  \n           "   v   e   r   s   i   o   n
 0000040   "   :       "   1   1   .   5   .   0   -   p   r   e   "   ,
-0000060  \n           "   c   o   m   m   i   t   "   :       "   4   5
-0000100   5   0   c   f   b   5   b   7   "  \n   }
+0000060  \n           "   c   o   m   m   i   t   "   :       "   0   3
+0000100   3   d   0   b   d   b   1   4   "  \n   }
 0000113
 ```
+
+(`0000113` octal = 75 decimal bytes, matching `Content-Length: 75`.)
 
 ### 4.3 The response struct and handler (`file:line`)
 
@@ -435,7 +757,8 @@ type healthResponse struct {
   this OSS build (`omitempty`).
 - The body is serialized with `json.MarshalIndent(data, "", "  ")`
   (`pkg/api/http_server.go:736`) — hence the two-space indentation.
-- The healthy/failing branching sets the status and `"database"` value:
+- The healthy/failing branch (`pkg/api/http_server.go:727-734`, inside `apiHealthHandler`)
+  sets the status and `"database"` value:
 
 ```go
 // pkg/api/http_server.go:727-734, inside apiHealthHandler
@@ -449,19 +772,22 @@ if !hs.databaseHealthy(ctx.Req.Context()) {
 }
 ```
 
-- The readiness probe itself (`pkg/api/health.go:10-25`):
+- The readiness probe itself (`pkg/api/health.go:10-24`):
 
 ```go
 func (hs *HTTPServer) databaseHealthy(ctx context.Context) bool {
 	const cacheKey = "db-healthy"
+
 	if cached, found := hs.CacheService.Get(cacheKey); found {
 		return cached.(bool)
 	}
+
 	err := hs.SQLStore.WithDbSession(ctx, func(session *db.Session) error {
 		_, err := session.Exec("SELECT 1")
 		return err
 	})
 	healthy := err == nil
+
 	hs.CacheService.Set(cacheKey, healthy, time.Second*5)
 	return healthy
 }
@@ -474,84 +800,178 @@ route tree: `m.Use(hs.healthzHandler)` then `m.Use(hs.apiHealthHandler)`
 ### 4.4 Observed output — `/healthz` contrast (liveness)
 
 ```bash
-$ curl -i http://localhost:3000/healthz
+$ curl -sS -i http://localhost:3031/healthz
 HTTP/1.1 200 OK
 Cache-Control: no-store
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Mon, 13 Jul 2026 16:45:26 GMT
+Date: Mon, 13 Jul 2026 18:34:44 GMT
 Content-Length: 2
 Content-Type: text/plain; charset=utf-8
 
 Ok
 ```
 
-`/healthz` returns the plain-text bytes **`Ok`** (2 bytes; verified `O k` via `od -c`)
-with HTTP 200. It is served by `func (hs *HTTPServer) healthzHandler(ctx *web.Context)`
-(`pkg/api/http_server.go:681-691`), which writes `[]byte("Ok")` at
-`pkg/api/http_server.go:688`. The `Content-Type: text/plain` header is auto-detected by
-Go's `http` package (the handler does not set it). **Difference:** `/healthz` is a pure
-**liveness** check (is the web server up? — **no DB access**), whereas `/api/health` is a
-DB-aware **readiness** check.
+```bash
+$ curl -sS http://localhost:3031/healthz | od -c
+0000000   O   k
+0000002
+```
 
-### 4.5 Observed output — failing 503 edge (before / intermediate / after)
+`/healthz` returns the plain-text bytes **`Ok`** (2 bytes; `od -c` shows `O k` with no
+trailing newline) with HTTP 200. It is served by
+`func (hs *HTTPServer) healthzHandler(ctx *web.Context)` (`pkg/api/http_server.go:681-691`),
+which writes `[]byte("Ok")` at `pkg/api/http_server.go:688`. The `Content-Type: text/plain`
+header is auto-detected by Go's `http` package (the handler does not set it).
+**Difference:** `/healthz` is a pure **liveness** check (is the web server up? — **no DB
+access**), whereas `/api/health` is a DB-aware **readiness** check.
+
+### 4.5 Observed output — failing 503 edge (reversible before / intermediate / after)
 
 The failing path was exercised through the **real** `apiHealthHandler → databaseHealthy →
-SELECT 1` code path. To make a transient DB-open failure observable on SQLite, a
-**clearly-labelled secondary instance** was used (port 3001, SQLite type **unchanged**),
-with only the connection-pool timing tuned so a broken DB file forces a fresh open:
-`GF_DATABASE_CONN_MAX_LIFETIME=1` and `GF_DATABASE_MAX_IDLE_CONN=0` (the default
-`conn_max_lifetime = 14400`, `conf/defaults.ini`, otherwise keeps the original connection
-alive and `SELECT 1` — a constant expression — never fails). This secondary run is **not**
-the canonical primary run; it is an intentional edge configuration. The failure was
-induced by replacing the DB file with a directory so a reconnect cannot open it.
+SELECT 1` code path on a **clearly-labelled secondary edge instance** (port 3032, private
+temp data dir), with the **SQLite type unchanged** and only the connection-pool timing
+tuned so a broken DB file forces a fresh open on the next probe:
+`cfg:database.max_idle_conn=0 cfg:database.conn_max_lifetime=1`. (With the default
+`conn_max_lifetime = 14400` the original SQLite connection stays open and `SELECT 1` — a
+constant expression — never re-touches the file, so it cannot fail.) This is an
+intentional **edge configuration**, not the canonical primary run. The failure was induced
+**reversibly**: the DB file was moved aside and replaced with a *directory* so a reconnect
+cannot open it, then restored afterwards.
+
+**[BEFORE] — healthy (`curl -sS -i`):**
+
+```
+HTTP/1.1 200 OK
+Cache-Control: no-store
+Content-Type: application/json; charset=UTF-8
+X-Content-Type-Options: nosniff
+X-Frame-Options: deny
+X-Xss-Protection: 1; mode=block
+Date: Mon, 13 Jul 2026 18:35:15 GMT
+Content-Length: 75
+
+{
+  "database": "ok",
+  "version": "11.5.0-pre",
+  "commit": "033d0bdb14"
+}
+```
+
+**Induce failure (reversible), then wait past the 5-second cache:**
 
 ```bash
-# BEFORE (healthy):
-$ curl -s http://localhost:3001/api/health   # -> HTTP 200, {"database":"ok",...}, Content-Length 75
+$ mv "$DB" "$DB.bak"          # DB="…/q3edge/data/grafana.db"
+$ mkdir "$DB"                 # a directory cannot be opened as a SQLite file
+$ sleep 7                     # 5s health cache + 1s conn_max_lifetime + margin
+# poll: first probe after the wait already returns 503
+```
 
-# INTERMEDIATE (DB unreachable):
-$ curl -i http://localhost:3001/api/health
+**[INTERMEDIATE] — DB unreachable (`curl -sS -i`):**
+
+```
 HTTP/1.1 503 Service Unavailable
 Cache-Control: no-store
 Content-Type: application/json; charset=UTF-8
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Mon, 13 Jul 2026 16:49:46 GMT
+Date: Mon, 13 Jul 2026 18:35:37 GMT
 Content-Length: 80
 
 {
   "database": "failing",
   "version": "11.5.0-pre",
-  "commit": "4550cfb5b7"
+  "commit": "033d0bdb14"
 }
-
-# AFTER (recovered): removing the directory let a fresh SQLite DB open again:
-$ curl -s http://localhost:3001/api/health   # -> HTTP 200, {"database":"ok",...}
 ```
 
-The secondary instance's own error log corroborates the genuine DB failure that drove
-`databaseHealthy()` to `false`:
+Byte-exact confirmation of the failing body (80 bytes):
+
+```bash
+$ curl -sS http://localhost:3032/api/health | od -c
+0000000   {  \n           "   d   a   t   a   b   a   s   e   "   :
+0000020   "   f   a   i   l   i   n   g   "   ,  \n           "   v   e
+0000040   r   s   i   o   n   "   :       "   1   1   .   5   .   0   -
+0000060   p   r   e   "   ,  \n           "   c   o   m   m   i   t   "
+0000100   :       "   0   3   3   d   0   b   d   b   1   4   "  \n   }
+0000120
+```
+
+(`0000120` octal = 80 decimal bytes, matching `Content-Length: 80`; the growth from 75 to
+80 is exactly the 5 extra characters of `failing` versus `ok`.) The genuine DB-open failure
+during the window is corroborated by a concurrent subsystem hitting the same broken file in
+the instance log:
 
 ```
-logger=sql-resource-server level=error msg="get the latest resource version" err="begin: unable to open database file: is a directory"
+logger=sql-resource-server t=2026-07-13T18:35:30.569592864Z level=error msg="get the latest resource version" err="begin: unable to open database file: is a directory"
 ```
 
-Observations: on failure the status is **`503 Service Unavailable`**, `"database"` becomes
-**`"failing"`**, the body grows to **80 bytes** (the word `failing` is 5 characters longer
-than `ok`), and the `Content-Type: application/json; charset=UTF-8` header is present on
-**both** 200 and 503 (set at `pkg/api/http_server.go:729`/`:732`).
+**Restore (same DB file) and wait past the cache again:**
+
+```bash
+$ rmdir "$DB"                 # remove the directory
+$ mv "$DB.bak" "$DB"          # put the ORIGINAL DB file back
+$ sleep 7                     # cache + conn recycle
+```
+
+**[AFTER] — recovered (`curl -sS -i`):**
+
+```
+HTTP/1.1 200 OK
+Cache-Control: no-store
+Content-Type: application/json; charset=UTF-8
+X-Content-Type-Options: nosniff
+X-Frame-Options: deny
+X-Xss-Protection: 1; mode=block
+Date: Mon, 13 Jul 2026 18:35:57 GMT
+Content-Length: 75
+
+{
+  "database": "ok",
+  "version": "11.5.0-pre",
+  "commit": "033d0bdb14"
+}
+```
+
+The endpoint returns to **200 / `"ok"`** with the original 75-byte body, proving the
+experiment was fully reversible. Observations: on failure the status is
+**`503 Service Unavailable`**, `"database"` becomes **`"failing"`** (set at
+`pkg/api/http_server.go:728`), and the `Content-Type: application/json; charset=UTF-8`
+header is present on **both** 200 and 503 (set at `pkg/api/http_server.go:729` and `:732`).
+The edge instance was stopped and its private temp directory removed, leaving no residue.
 
 ### 4.6 Runtime-value table
 
 | Endpoint | Method | Status | Content-Type | Body | Source `file:line` |
 |---|---|---|---|---|---|
-| `/api/health` (healthy) | GET | `200 OK` | `application/json; charset=UTF-8` | `{ "database": "ok", "version": "11.5.0-pre", "commit": "4550cfb5b7" }` (75 B) | `apiHealthHandler` `pkg/api/http_server.go:710-745`; struct `:694-699` |
-| `/api/health` (failing) | GET | `503 Service Unavailable` | `application/json; charset=UTF-8` | `{ "database": "failing", "version": "11.5.0-pre", "commit": "4550cfb5b7" }` (80 B) | failing branch `pkg/api/http_server.go:727-730`; probe `pkg/api/health.go:10-25` |
+| `/api/health` (healthy) | GET | `200 OK` | `application/json; charset=UTF-8` | `{ "database": "ok", "version": "11.5.0-pre", "commit": "033d0bdb14" }` (75 B) | `apiHealthHandler` `pkg/api/http_server.go:710-745`; struct `:694-699` |
+| `/api/health` (failing) | GET | `503 Service Unavailable` | `application/json; charset=UTF-8` | `{ "database": "failing", "version": "11.5.0-pre", "commit": "033d0bdb14" }` (80 B) | failing branch `pkg/api/http_server.go:727-730`; probe `pkg/api/health.go:10-24` |
 | `/healthz` | GET | `200 OK` | `text/plain; charset=utf-8` (auto) | `Ok` (2 B) | `healthzHandler` `pkg/api/http_server.go:681-691` (writes `:688`) |
 
+### 4.7 Official-documentation corroboration (secondary)
+
+The runtime responses above are the authoritative answer; the following external references
+only **corroborate** them and are strictly secondary to the code at the investigated commit.
+
+- Grafana's official HTTP API reference shows the canonical healthy response as
+  `HTTP/1.1 200 OK` with a JSON body carrying exactly three fields — `commit`, `database`
+  (value `"ok"`), and `version` — the same field set observed in §4.1. The published example
+  uses an older version string (e.g. `"5.1.3"`); it is the *field set* and the healthy `"ok"`
+  value that match, not the version number (which is build-stamped — see §4.2).
+- The same reference notes that "Starting in Grafana 13, /api endpoints are being deprecated
+  in favor of the /apis route", while the legacy routes remain fully accessible. That
+  deprecation does **not** apply to this v11.x-era commit, where `/api/health` is the current,
+  canonical endpoint — the reference is therefore context only.
+- Upstream PR grafana/grafana#88203 ("Document the `/api/health` endpoint") re-implemented the
+  response as a Go struct, matching the `healthResponse` struct observed at
+  `pkg/api/http_server.go:694-699`.
+
+The code at the investigated commit (`apiHealthHandler` `pkg/api/http_server.go:710-745`,
+probe `databaseHealthy` `pkg/api/health.go:10-24`) is the source of truth for the exact bytes,
+the 200-vs-503 status codes, and the `"database"` readiness semantics — none of which the
+external docs cover.
 
 ---
 
@@ -563,110 +983,141 @@ During boot, Grafana launches its background services **concurrently as goroutin
 **`func (s *Server) Run() error`** (`pkg/server/server.go:139`), iterating the list
 assembled by the **background-service registry**
 (`pkg/registry/backgroundsvcs/background_services.go`, `ProvideBackgroundServiceRegistry`
-`:53` → `NewBackgroundServiceRegistry(...)` call `:80`, definition `:125`). The registry
-run-list contains **36 services** (`background_services.go:81-116`); in the default run
-**34** of them actually start — the other **2** are feature-disabled and skipped.
+`:53` → `NewBackgroundServiceRegistry(...)` call `:80`, definition `:125`). That registry
+is provided to the DI graph by `backgroundsvcs.ProvideBackgroundServiceRegistry`
+(`pkg/server/wireexts_oss.go:74`, bound to the `registry.BackgroundServiceRegistry`
+interface at `:75`) and assembled through `wire.Build(wireExtsSet)`
+(`pkg/server/wire.go:444`, inside `Initialize`). The registry run-list contains **36
+services**; in the default run **34** of them actually start — the other **2** are
+feature-disabled and skipped.
 
-By the time the HTTP server is listening (Q1), **essentially the entire backend is already
-running**: alerting (ngalert), provisioning, live, plugins, secrets, cleanup, token
-service, usage stats, storage, the apiserver, and so on. The "UI" that appears afterward
-is **not a separate service** — it is just static assets (`public/build`) served by the
-already-running HTTP server.
+By the time the HTTP server is listening (Q1), **essentially the entire backend has already
+been dispatched**: alerting (ngalert), provisioning, live, plugins, secrets, cleanup, token
+service, usage stats, storage, the apiserver, and so on. The "UI" that appears afterward is
+**not a separate service** — it is just static assets (`public/build`) served by the
+already-running HTTP server (which is itself one of the 34 services).
 
 ### 5.2 The default (info) boot shows per-service init lines, not a generic start line
 
 At the default `level = info` (`conf/defaults.ini:1074`), the generic per-service line is
-**hidden**. Proof: the info-level boot log contained **0** `level=debug` lines. Instead,
-each service logs its **own** init INFO lines. Representative captured lines (timestamps
-elided for width; each is a real, unedited `msg=` value):
+**hidden**. This was confirmed across the two canonical INFO runs from §1.4 with exact
+count commands:
 
 ```bash
-$ grep -viP 'logger=(migrator|resource-migrator)' /tmp/grafana_boot_info.log \
-    | grep -iP 'msg="(Starting|initializ|registered|Update check|Storage starting|Live Push|Patterns update|provision)'
-logger=live.push_http   level=info msg="Live Push Gateway initialization"
-logger=secrets          level=info msg="Envelope encryption state" enabled=true currentprovider=secretKey.v1
-logger=ngalert.multiorg.alertmanager level=info msg="Starting MultiOrg Alertmanager"
-logger=ngalert.scheduler level=info msg="Starting scheduler" tickInterval=10s maxAttempts=3
-logger=provisioning.alerting  level=info msg="starting to provision alerting"
-logger=provisioning.dashboard level=info msg="starting to provision dashboards"
-logger=grafanaStorageLogger level=info msg="Storage starting"
-logger=plugins.update.checker level=info msg="Update check succeeded" duration=31.995698ms
-logger=grafana.update.checker level=info msg="Update check succeeded" duration=36.834737ms
-logger=plugin.angulardetectorsprovider.dynamic level=info msg="Patterns update finished" duration=53.317692ms
-logger=infra.usagestats.collector level=info msg="registering usage stat providers" usageStatsProvidersLen=2
-logger=grafana-apiserver level=info msg="Adding GroupVersion playlist.grafana.app v0alpha1 to ResourceManager"
-logger=app-registry     level=info msg="app registry initialized"
-logger=plugin.store     level=info msg="Loading plugins..."
+$ grep -c 'level=debug' runA/boot.log              # → 0     (no debug lines at info)
+$ grep -cF 'Starting background service' runA/boot.log   # → 0
+$ grep -c 'level=error' runA/boot.log              # → 0     (clean boot)
+# runB is identical: 0 / 0 / 0
+```
+
+Because the generic line is suppressed, each service logs its **own** init INFO lines
+instead. The following are real, **unedited** lines (full `logger=…` and `t=…` timestamps
+intact) selected from `runA/boot.log` with the exact command shown:
+
+```bash
+$ grep -E 'msg="(Envelope encryption|Loading plugins|Live Push Gateway|starting to provision|Storage starting|Starting MultiOrg|Starting scheduler)' runA/boot.log
+logger=secrets t=2026-07-13T17:45:36.853869787Z level=info msg="Envelope encryption state" enabled=true currentprovider=secretKey.v1
+logger=plugin.store t=2026-07-13T17:45:36.907286793Z level=info msg="Loading plugins..."
+logger=live.push_http t=2026-07-13T17:45:36.94551992Z level=info msg="Live Push Gateway initialization"
+logger=provisioning.alerting t=2026-07-13T17:45:37.008525136Z level=info msg="starting to provision alerting"
+logger=grafanaStorageLogger t=2026-07-13T17:45:37.008699796Z level=info msg="Storage starting"
+logger=ngalert.multiorg.alertmanager t=2026-07-13T17:45:37.008911316Z level=info msg="Starting MultiOrg Alertmanager"
+logger=provisioning.dashboard t=2026-07-13T17:45:37.017488625Z level=info msg="starting to provision dashboards"
+logger=ngalert.scheduler t=2026-07-13T17:45:37.076018125Z level=info msg="Starting scheduler" tickInterval=10s maxAttempts=3
 ```
 
 These info lines **hint at** the components behind the run-list: `live.push_http` →
 `pushGateway`; `secrets` → `secretsService`; `ngalert.*` → `ng`/AlertNG; `provisioning.*`
-→ `provisioning`; `grafanaStorageLogger` → `StorageService`; the two update checkers →
-`grafanaUpdateChecker`/`pluginsUpdateChecker`; `plugin.angulardetectorsprovider.dynamic` →
-`dynamicAngularDetectorsProvider`; `infra.usagestats.collector` →
-`usageStats`/`statsCollector`; `grafana-apiserver` → `grafanaAPIServer`; `app-registry` →
-`appRegistry`; `plugin.store` → `pluginStore`; `http.server` → `httpServer`. (One
-non-fatal line also appears: `logger=renderer.manager level=error msg="Failed to get
-renderer plugin sources" error="failed to open plugins path"` — the `rendering` service
-runs, but the external renderer plugin is not installed.)
+→ `provisioning`; `grafanaStorageLogger` → `StorageService`; `plugin.store` →
+`pluginStore`. (In these clean canonical runs the error count is **0** — no external
+renderer/plugin errors occurred.)
 
 ### 5.3 The generic DEBUG start line reveals the exact launched set
 
-Re-running via the real entry point at debug level surfaces the generic line
+Re-running via the real entry point at debug level (non-root harness,
+`cfg:log.level=debug`) surfaces the generic line
 `s.log.Debug("Starting background service", "service", serviceName)`
 (`pkg/server/server.go:162`, logger `log.New("server")` `pkg/server/server.go:74`), where
-`serviceName = reflect.TypeOf(service).String()` (`pkg/server/server.go:155`):
+`serviceName = reflect.TypeOf(service).String()` (`pkg/server/server.go:155`). Complete,
+unedited capture (all 34 lines) and the exact count command:
 
 ```bash
-$ GF_LOG_LEVEL=debug ./bin/linux-amd64/grafana server --homepath "$(pwd)" > /tmp/grafana_boot_debug.log 2>&1 &
-$ grep -F "Starting background service" /tmp/grafana_boot_debug.log
-logger=server level=debug msg="Starting background service" service=*appregistry.Service
-logger=server level=debug msg="Starting background service" service=*remotecache.RemoteCache
-logger=server level=debug msg="Starting background service" service=*dynamic.KeyRetriever
-logger=server level=debug msg="Starting background service" service=*metric.Service
-logger=server level=debug msg="Starting background service" service=*apiserver.service
-logger=server level=debug msg="Starting background service" service=*rendering.RenderingService
-logger=server level=debug msg="Starting background service" service=*pluginexternal.Service
-logger=server level=debug msg="Starting background service" service=*manager.ServiceAccountsService
-logger=server level=debug msg="Starting background service" service=*anonimpl.AnonDeviceService
-logger=server level=debug msg="Starting background service" service=*acimpl.Service
-logger=server level=debug msg="Starting background service" service=*ssosettingsimpl.Service
-logger=server level=debug msg="Starting background service" service=*store.dummyEntityEventsService
-logger=server level=debug msg="Starting background service" service=*plugininstaller.Service
-logger=server level=debug msg="Starting background service" service=*store.standardStorageService
-logger=server level=debug msg="Starting background service" service=*live.GrafanaLive
-logger=server level=debug msg="Starting background service" service=*supportbundlesimpl.Service
-logger=server level=debug msg="Starting background service" service=*api.HTTPServer
-logger=server level=debug msg="Starting background service" service=*cleanup.CleanUpService
-logger=server level=debug msg="Starting background service" service=*loginattemptimpl.Service
-logger=server level=debug msg="Starting background service" service=*authimpl.UserAuthTokenService
-logger=server level=debug msg="Starting background service" service=*manager.SecretsService
-logger=server level=debug msg="Starting background service" service=*migrations.SecretMigrationProviderImpl
-logger=server level=debug msg="Starting background service" service=*statscollector.Service
-logger=server level=debug msg="Starting background service" service=*tracing.TracingService
-logger=server level=debug msg="Starting background service" service=*updatechecker.GrafanaService
-logger=server level=debug msg="Starting background service" service=*angulardetectorsprovider.Dynamic
-logger=server level=debug msg="Starting background service" service=*pushhttp.Gateway
-logger=server level=debug msg="Starting background service" service=*updatechecker.PluginsService
-logger=server level=debug msg="Starting background service" service=*ngalert.AlertNG
-logger=server level=debug msg="Starting background service" service=*metrics.InternalMetricsService
-logger=server level=debug msg="Starting background service" service=*pluginstore.Service
-logger=server level=debug msg="Starting background service" service=*provisioning.ProvisioningServiceImpl
-logger=server level=debug msg="Starting background service" service=*service.UsageStats
-logger=server level=debug msg="Starting background service" service=*notifications.NotificationService
+$ runuser -u ubuntu -- env HOME=$D ./bin/linux-amd64/grafana server --homepath "$(pwd)" \
+    cfg:server.http_port=3041 cfg:paths.data=$D/data cfg:paths.logs=$D/logs cfg:paths.plugins=$D/plugins \
+    cfg:log.level=debug > $D/boot.log 2>&1 &
+$ grep -F "Starting background service" $D/boot.log
+logger=server t=2026-07-13T18:41:04.953982714Z level=debug msg="Starting background service" service=*appregistry.Service
+logger=server t=2026-07-13T18:41:04.953997751Z level=debug msg="Starting background service" service=*manager.SecretsService
+logger=server t=2026-07-13T18:41:04.953972292Z level=debug msg="Starting background service" service=*remotecache.RemoteCache
+logger=server t=2026-07-13T18:41:04.953986774Z level=debug msg="Starting background service" service=*rendering.RenderingService
+logger=server t=2026-07-13T18:41:04.954026476Z level=debug msg="Starting background service" service=*statscollector.Service
+logger=server t=2026-07-13T18:41:04.954018369Z level=debug msg="Starting background service" service=*store.standardStorageService
+logger=server t=2026-07-13T18:41:04.954008838Z level=debug msg="Starting background service" service=*updatechecker.PluginsService
+logger=server t=2026-07-13T18:41:04.954043347Z level=debug msg="Starting background service" service=*authimpl.UserAuthTokenService
+logger=server t=2026-07-13T18:41:04.954049244Z level=debug msg="Starting background service" service=*service.UsageStats
+logger=server t=2026-07-13T18:41:04.954059146Z level=debug msg="Starting background service" service=*manager.ServiceAccountsService
+logger=server t=2026-07-13T18:41:04.954077337Z level=debug msg="Starting background service" service=*pluginstore.Service
+logger=server t=2026-07-13T18:41:04.954097394Z level=debug msg="Starting background service" service=*apiserver.service
+logger=server t=2026-07-13T18:41:04.954091879Z level=debug msg="Starting background service" service=*metrics.InternalMetricsService
+logger=server t=2026-07-13T18:41:04.954116224Z level=debug msg="Starting background service" service=*angulardetectorsprovider.Dynamic
+logger=server t=2026-07-13T18:41:04.954127331Z level=debug msg="Starting background service" service=*pluginexternal.Service
+logger=server t=2026-07-13T18:41:04.954148367Z level=debug msg="Starting background service" service=*updatechecker.GrafanaService
+logger=server t=2026-07-13T18:41:04.9541637Z level=debug msg="Starting background service" service=*anonimpl.AnonDeviceService
+logger=server t=2026-07-13T18:41:04.954162337Z level=debug msg="Starting background service" service=*tracing.TracingService
+logger=server t=2026-07-13T18:41:04.954195407Z level=debug msg="Starting background service" service=*ssosettingsimpl.Service
+logger=server t=2026-07-13T18:41:04.954197841Z level=debug msg="Starting background service" service=*supportbundlesimpl.Service
+logger=server t=2026-07-13T18:41:04.954225381Z level=debug msg="Starting background service" service=*loginattemptimpl.Service
+logger=server t=2026-07-13T18:41:04.954218257Z level=debug msg="Starting background service" service=*cleanup.CleanUpService
+logger=server t=2026-07-13T18:41:04.954246961Z level=debug msg="Starting background service" service=*acimpl.Service
+logger=server t=2026-07-13T18:41:04.954243718Z level=debug msg="Starting background service" service=*migrations.SecretMigrationProviderImpl
+logger=server t=2026-07-13T18:41:04.954274134Z level=debug msg="Starting background service" service=*plugininstaller.Service
+logger=server t=2026-07-13T18:41:04.95426905Z level=debug msg="Starting background service" service=*metric.Service
+logger=server t=2026-07-13T18:41:04.954284482Z level=debug msg="Starting background service" service=*notifications.NotificationService
+logger=server t=2026-07-13T18:41:04.954281509Z level=debug msg="Starting background service" service=*dynamic.KeyRetriever
+logger=server t=2026-07-13T18:41:04.954292987Z level=debug msg="Starting background service" service=*pushhttp.Gateway
+logger=server t=2026-07-13T18:41:04.954313164Z level=debug msg="Starting background service" service=*provisioning.ProvisioningServiceImpl
+logger=server t=2026-07-13T18:41:04.954047321Z level=debug msg="Starting background service" service=*store.dummyEntityEventsService
+logger=server t=2026-07-13T18:41:04.95430473Z level=debug msg="Starting background service" service=*live.GrafanaLive
+logger=server t=2026-07-13T18:41:04.954290444Z level=debug msg="Starting background service" service=*ngalert.AlertNG
+logger=server t=2026-07-13T18:41:04.954267909Z level=debug msg="Starting background service" service=*api.HTTPServer
 
-$ grep -cF "Starting background service" /tmp/grafana_boot_debug.log
+$ grep -cF "Starting background service" $D/boot.log
 34
+$ grep -c 'level=debug' $D/boot.log
+1375
 ```
 
-The debug boot emitted **1139** `level=debug` lines (vs **0** at info), directly
-confirming why the generic start line is invisible in a default boot.
+The debug boot emitted **1375** `level=debug` lines (vs **0** at info), directly confirming
+why the generic start line is invisible in a default boot.
+
+**Set stable, order non-deterministic (two debug runs).** The *set* of 34 launched services
+is identical run-to-run, but the *log order* is not — the dispatch loop calls
+`s.childRoutines.Go(...)` in registry-list order, yet each `"Starting background service"`
+line is emitted **inside** its own goroutine (`server.go:162`), so the order they reach the
+log depends on goroutine scheduling. First six lines of two runs:
+
+```text
+run 1 (port 3041):  appregistry.Service, manager.SecretsService, remotecache.RemoteCache,
+                    rendering.RenderingService, statscollector.Service, store.standardStorageService
+run 2 (port 3042):  ngalert.AlertNG, live.GrafanaLive, appregistry.Service,
+                    pushhttp.Gateway, cleanup.CleanUpService, api.HTTPServer
+```
+
+```bash
+# same 34-service SET across both runs (sorted diff is empty):
+$ diff <(grep -F 'Starting background service' run1 | grep -oE 'service=[^ ]+' | sort) \
+       <(grep -F 'Starting background service' run2 | grep -oE 'service=[^ ]+' | sort)
+# (no output → identical 34-service set)
+```
+
+All 34 timestamps fall inside a ~0.34 ms window
+(`t=…953972292Z` … `t=…954313164Z`), consistent with concurrent dispatch.
 
 ### 5.4 Reconciliation — 36 registry entries − 2 feature-disabled = 34 observed
 
-The registry run-list (`background_services.go:81-116`) names 36 services. The table below
-maps each **observed** `service=` reflect type to its registry name; the final two rows are
-the registry entries that did **not** start.
+The registry run-list names 36 services. The table below maps each **observed** `service=`
+reflect type (from §5.3) to its registry name; the final two rows are the registry entries
+that did **not** start.
 
 | # | Registry name | Observed `service=` reflect type | Started? |
 |---|---|---|---|
@@ -709,41 +1160,75 @@ the registry entries that did **not** start.
 
 The two that do not start are skipped by `registry.IsDisabled(svc)`
 (`pkg/server/server.go:150` → `pkg/registry/registry.go:53-55`: a service implementing the
-`CanBeDisabled` interface whose `IsDisabled()` returns `true` is `continue`d and never
-logs). Both are feature-gated **off** by default:
+`CanBeDisabled` interface (`pkg/registry/registry.go:18-20`) whose `IsDisabled()` returns
+`true` is `continue`d and never logs). Both are feature-gated **off** by default:
 
-- `searchService` (`searchV2.SearchService`): `IsDisabled()` returns
-  `!features.IsEnabledGlobally(FlagPanelTitleSearch)` (`pkg/services/searchV2/service.go:120`).
-- `grpcServerProvider` (`grpcserver.Provider`): `IsDisabled()` returns `!s.enabled`, where
-  `enabled = features.IsEnabledGlobally(FlagGrpcServer)`
+- `searchService` — concrete type **`*searchV2.StandardSearchService`**
+  (`pkg/services/searchV2/service.go:65`); its `IsDisabled()` returns
+  `!s.features.IsEnabledGlobally(featuremgmt.FlagPanelTitleSearch)`
+  (`pkg/services/searchV2/service.go:120-121`).
+- `grpcServerProvider` — its `IsDisabled()` returns `!s.enabled`, where
+  `enabled = features.IsEnabledGlobally(featuremgmt.FlagGrpcServer)`
   (`pkg/services/grpcserver/service.go:136-137`, `:49`).
 
-The `_`-named parameters in the registry constructor (`background_services.go:72-78`) are
-injected for **initialization side-effects only** and are **not** part of the run-list.
+The `_`-named parameters in the registry constructor
+(`pkg/registry/backgroundsvcs/background_services.go:72-78`) are injected for
+**initialization side-effects only** and are **not** part of the run-list.
 
 ### 5.5 How much is active before the UI appears (readiness)
 
 `Server.Init()` (`pkg/server/server.go:113-135`) runs **first and synchronously**: it
 writes the PID file (`:122`), sets environment metrics (`:126`), registers fixed roles
-(`:130`), and runs init provisioners (`:134`). Then `Server.Run()` dispatches every enabled
-service **concurrently** as a goroutine via `s.childRoutines.Go(...)`
-(`pkg/server/server.go:156`). The observed debug timestamps show all 34 "Starting
-background service" lines and the "HTTP Server Listen" line occurring within roughly **5
-milliseconds** of each other (e.g., `16:54:59.4959xx` → `16:54:59.5005xx`), confirming the
-concurrent dispatch. The HTTP server is **itself** one of the background services
-(`*api.HTTPServer`), so its listen line fires from within its own goroutine.
+(`:130`), and runs init provisioners (`:134`). Then `Server.Run()` iterates the run-list
+(`:149`) and, for each enabled service, dispatches it **concurrently** as a goroutine via
+`s.childRoutines.Go(...)` (`pkg/server/server.go:156`).
 
-After the dispatch loop, `s.notifySystemd("READY=1")` is signalled
-(`pkg/server/server.go:176`) and the process then blocks on
-`s.childRoutines.Wait()` (`pkg/server/server.go:179`), preceded by the observed
-`logger=server level=debug msg="Waiting on services..."` line (`pkg/server/server.go:178`).
+**What the DEBUG line actually marks.** The `"Starting background service"` line is emitted
+**inside** each goroutine (`pkg/server/server.go:162`), immediately **before**
+`service.Run(s.context)` is invoked (`:163`). So the line marks a service *dispatched and
+about to run* — it does **not** by itself prove the service finished initializing (many
+`Run` methods block for the process lifetime). The honest claim is therefore that by the
+listen point all 34 services are **dispatched and executing their `Run` methods**, not that
+each has completed startup.
 
-**Conclusion:** the READY boundary is the point at which all 34 background services have
-been dispatched and are running. Because the HTTP server is one of them, the moment the UI
-is reachable, the full backend — alerting, provisioning, live, plugins, secrets, tokens,
-usage stats, storage, apiserver, etc. — is already active. The UI itself is not a service;
-it is static frontend assets served by that same HTTP server.
+**`READY=1` is a no-op in this container.** After the dispatch loop, `Server.Run()` calls
+`s.notifySystemd("READY=1")` (`pkg/server/server.go:176`). `notifySystemd`
+(`pkg/server/server.go:229-234`) reads `NOTIFY_SOCKET`; when it is empty (no systemd
+supervising the process, as in this container) it logs a DEBUG line and **returns without
+sending anything**. The observed line confirms the no-op:
 
+```text
+logger=server t=2026-07-13T18:41:04.953955724Z level=debug msg="NOTIFY_SOCKET environment variable empty or unset, can't send systemd notification"
+```
+
+**Observed ordering proves the point.** In the debug run, the main goroutine reaches
+`notifySystemd` and then `s.log.Debug("Waiting on services...")` (`:178`) **before** the
+service goroutines have even logged their start:
+
+```text
+logger=server t=2026-07-13T18:41:04.953955724Z level=debug msg="NOTIFY_SOCKET environment variable empty or unset, can't send systemd notification"
+logger=server t=2026-07-13T18:41:04.953961293Z level=debug msg="Waiting on services..."
+logger=server t=2026-07-13T18:41:04.953972292Z level=debug msg="Starting background service" service=*remotecache.RemoteCache
+```
+
+The three lines, in order, are: the `notifySystemd` no-op (`pkg/server/server.go:176` →
+empty-socket branch `:232`), `"Waiting on services..."` (`:178`), and the earliest-timestamp
+service-goroutine start line (`:162`; `*remotecache.RemoteCache` at `.953972292Z` — the
+minimum of the 34, confirmed by numeric comparison of the padded nanosecond fractions). So
+the "ready" point (`:176`) is reached *before* any `service.Run()` begins — had a systemd
+socket been present, `READY=1` would have been sent while services were only just being
+dispatched.
+
+**Conclusion.** By the time the HTTP listener is up (Q1), all 34 background services have
+been **dispatched as concurrent goroutines** and are executing their `Run` methods; the
+HTTP server is **itself** one of them (`*api.HTTPServer`), so its listen line fires from
+within its own goroutine. The full backend — alerting, provisioning, live, plugins,
+secrets, tokens, usage stats, storage, apiserver, etc. — is therefore active behind the
+port the instant the UI is reachable. The UI is **not** a service; it is static frontend
+assets served by that same HTTP server. The systemd `READY=1` notification is a no-op here
+(no `NOTIFY_SOCKET`), so readiness in this environment is defined operationally by the HTTP
+listener accepting connections and `/api/health` returning `200` (Q3), not by a systemd
+signal.
 
 ---
 
@@ -753,14 +1238,14 @@ The diagram situates the four observation targets within Grafana's boot sequence
 
 ```mermaid
 flowchart TD
-    A["main.go: grafana server<br/>(commands.ServerCommand)"] --> B["Server.Init()<br/>PID file, roles, RunInitProvisioners"]
-    B --> C["Server.Run()<br/>iterate BackgroundServiceRegistry (36 entries)"]
-    C --> D["Launch 34 background services concurrently as goroutines<br/>(Q4: DEBUG 'Starting background service'; 2 feature-disabled skipped)"]
-    D --> E["HTTPServer.Run(): getListener()"]
+    A["main.go: grafana server<br/>(commands.ServerCommand)"] --> B["Server.Init() — synchronous<br/>PID file, env metrics, fixed roles, RunInitProvisioners"]
+    B --> C["Server.Run(): iterate BackgroundServiceRegistry (36 entries)<br/>skip 2 feature-disabled via registry.IsDisabled"]
+    C --> D["Dispatch 34 services concurrently as goroutines (childRoutines.Go)<br/>DEBUG 'Starting background service' emitted INSIDE each goroutine (log order non-deterministic) (Q4)"]
+    D --> E["*api.HTTPServer goroutine → HTTPServer.Run(): getListener()"]
     E --> F["INFO 'HTTP Server Listen'<br/>address=[::]:3000 protocol=http subUrl= socket= (Q1)"]
     F --> G["httpSrv.Serve(listener)<br/>/api/health (200 ok / 503 failing) + /healthz (Ok) live (Q3)"]
-    D --> H["notifySystemd READY=1<br/>full backend active before UI (Q4)"]
-    G --> I["Browser login admin/admin<br/>forced change password -> PUT /api/user/password (Q2)"]
+    C --> H["notifySystemd READY=1 → NO-OP (NOTIFY_SOCKET unset)<br/>reached before services' Run() begins (Q4)"]
+    G --> I["Browser login admin/admin<br/>forced change-password interstitial (Submit / Skip) → PUT /api/user/password (Q2)"]
 ```
 
 ---
@@ -793,7 +1278,7 @@ evidence section that captures it.
 | `changeView` | switches to change-password view | `LoginCtrl.tsx:121` (def `:176`) |
 | `changePassword` → PUT | `getBackendSrv().put('/api/user/password', pw)` | `LoginCtrl.tsx:78`, `:98-99` |
 | `oldPassword: 'admin'` | in the PUT payload | `LoginCtrl.tsx:82` |
-| LoginPage render | `<ChangePassword …>` when `isChangingPassword` | `LoginPage.tsx:84-92` |
+| LoginPage render | renders `<ChangePassword>` when `isChangingPassword && !config.auth.passwordlessEnabled` | `LoginPage.tsx:84-92` |
 | Alert (exact text) | "Continuing to use the default password exposes you to security risks." — §3.2 | `ChangePassword.tsx:52-53` |
 | Backend handler | `ChangeUserPassword` → `{"message":"User password changed"}` — §3.3 | `pkg/api/user.go:546-566` |
 | Finalized state | persisted new hash via `userService.Update` | `pkg/api/user.go:561` |
@@ -802,25 +1287,27 @@ evidence section that captures it.
 | Defaults | `admin_user=admin`, `admin_password=admin`, `disable_initial_admin_creation=false` | `conf/defaults.ini:328`, `:331`, `:325` |
 | Before/after | old → `401 password-auth.failed`, new → `200` — §3.4 | observed |
 | Skip path (non-default pw) | login → straight to home, no prompt — §3.6 | `LoginCtrl.tsx:117-118` |
-| Skip path (LDAP / auth-proxy) | also skips **(inferred)**; config off by default | `LoginCtrl.tsx:117` |
+| Skip path (LDAP / auth-proxy **on**) | prompt skipped → straight to home; **observed** on ports 3012 (auth-proxy) & 3013 (LDAP) — §3.7 | `LoginCtrl.tsx:117`; `pkg/setting/setting.go:1361`, `conf/defaults.ini:921`/`:886` |
+| Official-docs corroboration (secondary) | official *Sign in to Grafana* guide: after `admin`/`admin`, "you will see a prompt to change the password" — §3.8 | secondary to `LoginCtrl.tsx:117-121` |
 
 ### Q3 — `/api/health`
 
 | Item | Value / evidence | `file:line` |
 |---|---|---|
-| Healthy status/body | `200`, `{"database":"ok","version":"11.5.0-pre","commit":"4550cfb5b7"}` (75 B) — §4.2 | `pkg/api/http_server.go:710-745` |
+| Healthy status/body | `200`, `{"database":"ok","version":"11.5.0-pre","commit":"033d0bdb14"}` (75 B; `commit` = build `git HEAD`, §4.2) | `pkg/api/http_server.go:710-745` |
 | `healthResponse` struct | field order database/version/commit/enterpriseCommit | `pkg/api/http_server.go:694-699` |
 | `apiHealthHandler` | serves `/api/health` | `pkg/api/http_server.go:710-745` |
-| `"database"` derivation | `databaseHealthy()` → `SELECT 1` | `pkg/api/health.go:10-25`, `:18` |
+| `"database"` derivation | `databaseHealthy()` → `SELECT 1` | `pkg/api/health.go:10-24`, `:18` |
 | 5-second cache | `CacheService.Set(..., time.Second*5)` | `pkg/api/health.go:23` |
 | Content-Type | `application/json; charset=UTF-8` | `pkg/api/http_server.go:729`/`:732` |
 | MarshalIndent (2-space) | byte-exact body via `od -c` — §4.2 | `pkg/api/http_server.go:736` |
 | version/commit gating | only when `!HideVersion` | `pkg/api/http_server.go:719-725` |
-| Failing status/body | `503`, `{"database":"failing",…}` (80 B) — §4.5 | `pkg/api/http_server.go:727-730` |
+| Failing status/body | `503`, `{"database":"failing","version":"11.5.0-pre","commit":"033d0bdb14"}` (80 B) — §4.5 | `pkg/api/http_server.go:727-730` |
 | Recovery (before/interm/after) | 200 → 503 → 200 — §4.5 | observed |
 | `/healthz` | `200`, plain `Ok` (2 B), liveness only — §4.4 | `pkg/api/http_server.go:681-691` (writes `:688`) |
 | Middleware registration | `m.Use(healthzHandler)`, `m.Use(apiHealthHandler)` | `pkg/api/http_server.go:633-634` |
-| SQLite default | `data/grafana.db` | `conf/defaults.ini:123` |
+| SQLite driver / DB path | `type = sqlite3`; default path `data/grafana.db` | `conf/defaults.ini:123`; `pkg/services/sqlstore/database_config.go:111` |
+| Official-docs corroboration (secondary) | `200` + `commit`/`database`(`"ok"`)/`version` field set matches; `/apis` deprecation is context only — §4.7 | secondary to `pkg/api/http_server.go:694-699` |
 
 ### Q4 — Background services
 
@@ -834,7 +1321,7 @@ evidence section that captures it.
 | Concurrency | goroutine dispatch | `pkg/server/server.go:156` |
 | Generic DEBUG line | `msg="Starting background service"`, hidden at info | `pkg/server/server.go:162`; `conf/defaults.ini:1074` |
 | `serviceName` derivation | `reflect.TypeOf(service).String()` | `pkg/server/server.go:155` |
-| READY boundary | `notifySystemd("READY=1")` after dispatch | `pkg/server/server.go:176` |
+| READY signal (no-op here) | `notifySystemd("READY=1")` after dispatch — a **NO-OP** in this env (`NOTIFY_SOCKET` unset; observed DEBUG `"NOTIFY_SOCKET environment variable empty or unset, can't send systemd notification"`) — §5.5 | dispatch `pkg/server/server.go:176`; no-op branch `:229-234` |
 | Init sequence | PID `:122`, roles `:130`, provisioners `:134` | `pkg/server/server.go:113-135` |
 | "backend active, UI is static assets" | readiness characterization — §5.5 | observed + `pkg/server/server.go:139-179` |
 | DI graph (context) | `wire.Build` assembles `Server` | `pkg/server/wire.go:444` |
@@ -847,4 +1334,5 @@ evidence section that captures it.
 - **Complete unedited output:** full `curl` responses and log lines are shown; the health JSON is reproduced byte-for-byte (verified with `od -c`); no `// ...` elisions. ✅
 - **Every condition exercised:** Q3 healthy 200 + failing 503 + `/healthz`; Q2 forced prompt + skip path + before/after; Q4 info vs debug boot. ✅
 - **Stability (≥2 runs):** Q1 listen fields, Q3 health body, and the Q4 34-service set were identical across the boots performed. ✅
-
+- **Every named item + coverage pass:** every "e.g./such as/including" item above is answered by name with a value and `file:line`; the official Grafana docs corroborate Q2 and Q3 as a **secondary** cross-check (§3.8, §4.7). ✅
+- **Read-only scope preserved:** no tracked source file was modified — the only committed change is this document; all temporary observation scripts, runtime data, and screenshots are removed afterwards so the repository is left byte-for-byte unchanged apart from this file. ✅
