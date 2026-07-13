@@ -285,6 +285,22 @@ are **one-time startup lines** duplicated across the two migrators (`migrator` +
 `resource-migrator`) and the two update-checkers (`grafana` + `plugins`) — not background-service
 tickers. **Zero** cleanup/update-checker _ticker_ lines occur in the first 60 s.
 
+> **Instance provenance of the first-60 s sample (traceability).** The 55-line first-60 s figures
+> above were captured on a **restarted (already-migrated) instance**, not a first-ever-start one:
+> the sample's `t0 = 2026-07-13T17:55:17.569` coincides with the O2 **restart** whose migrator logs
+> `msg="migrations completed" performed=0 skipped=626` at the same instant (see the O2 section, at
+> `t=2026-07-13T17:55:17.578`). Because the schema was already up to date, the first 60 s contains
+> **no migration burst**, which is why the one-time-line volume is small (the 55 lines shown, of
+> which one is the inbound 401 probe). A **fresh** (first-ever-start) instance instead executes all
+> 644 migrations (626 core + 18 resource, each logging an INFO `msg="Executing migration"` line at
+> `pkg/services/sqlstore/migrator/migrator.go:356` — see the O2 section) inside its first 60 s, so its
+> first-60 s INFO volume is far larger. An independent zero-request re-measurement on the canonically
+> built `11.5.0-pre` binary confirmed this: a **fresh** instance emitted **1342** first-60 s INFO
+> lines and a **restart** **53** (consistent with the 55 above, which additionally counted the one
+> inbound probe) — yet **both yielded exactly 0 background-service ticker recurrences in the first
+> 60 s**. Instance provenance therefore affects only the raw startup-line count, never the O1 answer
+> (which is the negative ticker-recurrence result).
+
 ### Long idle window (≥ 22 min) — complete recurring INFO lines
 
 **Instance 3101 (INFO run #1), complete recurring lines:**
@@ -680,12 +696,17 @@ logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:25:51.036553987Z leve
   startup then installs `time.NewTicker(time.Minute*10)` at `:80`; each tick calls `clean()`,
   which logs `msg="Completed cleanup jobs"` at `:128`. First tick at t+10 min.
 - **plugins.update.checker** — `pkg/services/updatechecker/plugins.go`: `Run()` at `:75-89`
-  checks once at startup then `time.NewTicker(10*time.Minute)` at `:78`; logs
+  checks once at startup then `time.NewTicker(time.Minute*10)` at `:78`; logs
   `msg="Update check succeeded"` at `:123`.
-- **grafana.update.checker** — `pkg/services/updatechecker/grafana.go`: `time.NewTicker(24*time.Hour)`
+- **grafana.update.checker** — `pkg/services/updatechecker/grafana.go`: `time.NewTicker(time.Hour*24)`
   at `:63` (so only the startup emission is observed within a 22-min window).
-- **ngalert.scheduler** — `pkg/services/ngalert/schedule/schedule.go`: base-interval ticker; logs
-  `msg="Alert rules fetched"` (10 s default) and the one-time `msg="Starting scheduler"` at `:157`.
+- **ngalert.scheduler** — `pkg/services/ngalert/schedule/schedule.go`: `Run()` logs the one-time
+  `msg="Starting scheduler"` at `:157` and installs the base-interval ticker at `:158`
+  (`ticker.New(sch.clock, sch.baseInterval, ...)`, 10 s default). On each tick, `processTick`
+  calls `sch.updateSchedulableAlertRules(ctx)` at `:239`; that method emits the recurring
+  `msg="Alert rules fetched"` DEBUG line at `pkg/services/ngalert/schedule/fetcher.go:39` (inside
+  `updateSchedulableAlertRules`, defined at `fetcher.go:14`) — i.e. the message is logged from
+  `fetcher.go:39`, not from `schedule.go`.
 - **background-service launch** — `pkg/server/server.go` `Server.Run()` iterates the
   `BackgroundServiceRegistry` (`pkg/registry/backgroundsvcs/background_services.go`) and starts
   each service as a goroutine; those with tickers are the recurring emitters above.
@@ -697,7 +718,7 @@ logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:25:51.036553987Z leve
   requests.
 - **[INFERRED]** the 24-hour recurrence of `grafana.update.checker` — only its startup emission
   was seen in the 22-min window; the 24 h period is read from `pkg/services/updatechecker/grafana.go:63`
-  (`time.NewTicker(24 * time.Hour)`).
+  (`time.NewTicker(time.Hour * 24)`).
 
 ## O2 — Database Migration Check
 
