@@ -2909,9 +2909,11 @@ grafana version 9.2.0
 
 ### Responsible code (full repo-root paths)
 
-- **`/api/health`** — route registered at `pkg/api/http_server.go:634` (`m.Use(hs.healthHandler)`
+- **`/api/health`** — route registered at `pkg/api/http_server.go:634` (`m.Use(hs.apiHealthHandler)`
   path branch → `apiHealthHandler`); handler `apiHealthHandler` at `pkg/api/http_server.go:710`
-  builds `healthResponse` (`:694`) and sets `Version: hs.Cfg.BuildVersion` (`:716-717`);
+  builds `healthResponse` (`:694`; struct literal at `:716-717` sets `Database: "ok"`) and sets
+  `Version: hs.Cfg.BuildVersion` at `:720`, gated by the `HideVersion` check
+  (`if !hs.Cfg.Anonymous.HideVersion`) at `:719`;
   `databaseHealthy()` at `pkg/api/health.go:10` runs `SELECT 1` (`pkg/api/health.go:18`) to set
   the `database` field.
 - **`/api/frontend/settings`** — `pkg/api/frontendsettings.go:161` (`version := setting.BuildVersion`)
