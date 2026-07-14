@@ -14,16 +14,24 @@ directly observed are explicitly labelled **[INFERRED]** together with their sou
 | Source branch (deliverable name)       | `grafana_4550cfb5b728`                                                                  | rule: `<source_branch>.md`        |
 | Source HEAD commit                     | `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` — "Upgrade scenes to v5.32.0 (#97944)"       | `git log`                         |
 | Working / build branch (this checkout) | `blitzy-0de97a14-ced4-4652-9cb9-337689e950e3`                                           | `git rev-parse --abbrev-ref HEAD` |
+| Build/capture commit (stamped)         | `efc14a8261` (`efc14a82611f80ee3762c889aa26213fa9b7ec1e`) — working-branch HEAD at build time; stamped into `main.commit`/`main.buildstamp`, reported by O3 API | `git rev-parse HEAD` |
 | Product version                        | `11.5.0-pre`                                                                            | `package.json:6`                  |
 | Go runtime                             | `1.23.1`                                                                                | `go.mod:3`                        |
 | Node runtime                           | `v22.23.1` (host)                                                                       | `node --version`                  |
 | Deliverable                            | `blitzy/documentation/grafana_4550cfb5b728.md` (this file — the only repository change) | —                                 |
 
-**Why two branch names.** The rule names the deliverable after the _source_ branch
-`grafana_4550cfb5b728`. The git checkout in which this work happens is the Blitzy working
-branch `blitzy-0de97a14-ced4-4652-9cb9-337689e950e3`, which is exactly the branch the canonical
-build stamps into the binary as `main.buildBranch` (see the build output in the next section).
-Both names are reported so the provenance of every stamped value is unambiguous.
+**Why two branch names and two commits.** The rule names the deliverable after the _source_
+branch `grafana_4550cfb5b728` (source HEAD `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`). The git
+checkout in which this work happens is the Blitzy working branch
+`blitzy-0de97a14-ced4-4652-9cb9-337689e950e3`, whose HEAD `efc14a8261`
+(`efc14a82611f80ee3762c889aa26213fa9b7ec1e`) is a **descendant** of the source HEAD and is exactly
+what the canonical build stamps into the binary as `main.buildBranch` / `main.commit` (see the
+build output in the next section). Consequently the runtime API in O3 reports `commit=efc14a8261`
+and `buildstamp=1783997649` (the commit-time of that working HEAD), while the product `version`
+string remains the branch-invariant `11.5.0-pre` from `package.json:6`. All of these values are
+reported so the provenance of every stamped value is unambiguous: only the `version` string
+answers O3; the `commit`/`buildstamp` are corroborating build metadata that move with the
+working-branch HEAD (a different HEAD would report a different `commit` but the same `version`).
 
 ## Build & Run Methodology Preamble
 
@@ -103,29 +111,29 @@ sys	0m32.462s
 ```text
 $ source /etc/profile.d/go.sh
 $ CGO_ENABLED=1 go run build.go build-backend
-Version: 11.5.0, Linux Version: 11.5.0, Package Iteration: 1783965126pre
+Version: 11.5.0, Linux Version: 11.5.0, Package Iteration: 1784018033pre
 rm -r dist
 rm -r tmp
 rm -r /root/go/pkg/linux_amd64/github.com/grafana
 building grafana ./pkg/cmd/grafana
 rm -r ./bin/linux-amd64/grafana
 rm -r ./bin/linux-amd64/grafana.md5
-go build -ldflags -w -X main.version=11.5.0-pre -X main.commit=d31e8b6c76 -X main.buildstamp=1783963209 -X main.buildBranch=blitzy-0de97a14-ced4-4652-9cb9-337689e950e3 -o ./bin/linux-amd64/grafana ./pkg/cmd/grafana
+go build -ldflags -w -X main.version=11.5.0-pre -X main.commit=efc14a8261 -X main.buildstamp=1783997649 -X main.buildBranch=blitzy-0de97a14-ced4-4652-9cb9-337689e950e3 -o ./bin/linux-amd64/grafana ./pkg/cmd/grafana
 go version
 go version go1.23.1 linux/amd64
 Targeting linux/amd64
 
-real	0m12.320s
-user	0m17.147s
-sys	0m9.732s
+real	0m12.351s
+user	0m16.874s
+sys	0m9.868s
 ```
 
 The decisive line is the linker invocation, which stamps the product version from `package.json`
 into `main.version` (reproduced from the output above for emphasis):
 
 ```text
-go build -ldflags -w -X main.version=11.5.0-pre -X main.commit=d31e8b6c76 \
-  -X main.buildstamp=1783963209 -X main.buildBranch=blitzy-0de97a14-ced4-4652-9cb9-337689e950e3 \
+go build -ldflags -w -X main.version=11.5.0-pre -X main.commit=efc14a8261 \
+  -X main.buildstamp=1783997649 -X main.buildBranch=blitzy-0de97a14-ced4-4652-9cb9-337689e950e3 \
   -o ./bin/linux-amd64/grafana ./pkg/cmd/grafana
 ```
 
@@ -153,7 +161,7 @@ Every instance was launched with the real `grafana server` entry point against t
 `conf/defaults.ini`, with only runtime overrides (no file edits). The harness binds to
 **loopback only** (`http_addr=127.0.0.1`), uses a **unique `mktemp -d` data/log directory** per
 instance, **captures the PID**, **polls `/api/health` for readiness**, redirects stdout+stderr to
-a per-run log, and **stops the instance by its captured PID** (never `pkill`). Ports `3101/3102/3103`
+a per-run log, and **stops the instance by its captured PID** (never `pkill`). Ports `3100`–`3104`
 avoid colliding with the default `3000`.
 
 ```bash
@@ -195,7 +203,7 @@ list), not `-u admin:admin`.
 | ----------------- | ----------------------------------------------------------------- | ------------------------ |
 | `app_mode`        | `production`                                                      | `conf/defaults.ini:7`    |
 | `http_addr`       | _(empty → all interfaces)_ — overridden to `127.0.0.1` at runtime | `conf/defaults.ini:38`   |
-| `http_port`       | `3000` — overridden to `3101/3102/3103` at runtime                | `conf/defaults.ini:41`   |
+| `http_port`       | `3000` — overridden to `3100`–`3104` at runtime                | `conf/defaults.ini:41`   |
 | `router_logging`  | `false`                                                           | `conf/defaults.ini:57`   |
 | `[database] type` | `sqlite3`                                                         | `conf/defaults.ini:123`  |
 | `[database] path` | `grafana.db`                                                      | `conf/defaults.ini:164`  |
@@ -212,255 +220,150 @@ The default log level is `info`; O1 is observed at both `info` (what an operator
 ### Direct answer
 
 - **In the first 60 seconds at the default `info` level: there are NO recurring log entries.**
-  The first 60 s contains only one-time startup lines. The dominant recurring emitters run on a
+  The first 60 s contains only one-time startup lines; the dominant recurring emitters run on a
   **10-minute** ticker, so the first one does not fire until ~600 s. This negative result is
   reported honestly rather than forced into a positive.
 - **Over a longer idle window (≥ 22 min) at `info`, exactly two loggers recur, both every 10
   minutes:**
   - `logger=cleanup msg="Completed cleanup jobs"`
   - `logger=plugins.update.checker msg="Update check succeeded"`
-- **At `debug`, additional periodic emitters appear**, the most frequent being
-  `logger=ngalert.scheduler msg="Alert rules fetched"` **every 10 s**, plus four **60 s**
-  emitters (alerting admin-config sync, multi-org Alertmanager sync, per-org Alertmanager
-  config-sync check, and secrets cache expiry).
+- **At `debug`, additional periodic emitters appear.** The most frequent is
+  `logger=ngalert.scheduler msg="Alert rules fetched"` **every 10 s**, plus **five 60 s**
+  emitters: alerting admin-config sync (`ngalert.sender.router`), multi-org Alertmanager sync
+  (`ngalert.multiorg.alertmanager`), per-org Alertmanager config-sync check
+  (`ngalert.notifier.alertmanager`), secrets data-key cache expiry (`secrets`), and the
+  **SSO-settings reload** (`ssosettings.service msg="reloading SSO Settings for all providers"`).
 
 ### How it was observed
 
-Three idle instances were launched from the canonical binary and left completely idle (zero
-user requests) for > 22 minutes: two at `info` (ports 3101, 3102) to confirm run-to-run
-stability, and one at `debug` (port 3103):
+Four idle instances were launched from the canonically built `11.5.0-pre` binary (commit
+`efc14a8261`) and left **completely idle (zero user requests)** for **> 22 minutes** each —
+two at the default `info` level (ports 3101, 3102) and two at `debug`
+(`cfg:default.log.level=debug`, ports 3103, 3104) — so run-to-run stability could be confirmed
+independently at **each** log level. All four shared a single idle window with a common
+`t0 = 2026-07-14T07:49:33.888231Z`. The exact launcher (a throwaway capture harness, removed afterwards):
 
 ```bash
-D1=$(mktemp -d /tmp/gf_cap.XXXXXX); PID1=$(start_instance 3101 "$D1");                              wait_ready 3101
-D2=$(mktemp -d /tmp/gf_cap.XXXXXX); PID2=$(start_instance 3102 "$D2");                              wait_ready 3102
-D3=$(mktemp -d /tmp/gf_cap.XXXXXX); PID3=$(start_instance 3103 "$D3" cfg:default.log.level=debug);  wait_ready 3103
+start_instance(){         # $1=name $2=port $3...=extra cfg
+  local name="$1" port="$2"; shift 2
+  local D="$CAP/$name"; mkdir -p "$D/log"
+  setsid nohup "$BIN" server --homepath="$REPO" \
+      cfg:default.paths.data="$D" cfg:default.paths.logs="$D/log" \
+      cfg:default.server.http_addr=127.0.0.1 cfg:default.server.http_port="$port" \
+      "$@" > "$D/stdout.log" 2>&1 &
+  echo $! > "$CAP/$name.pid"
+}
+start_instance info1  3101                                 # INFO run #1
+start_instance info2  3102                                 # INFO run #2
+start_instance debug1 3103 cfg:default.log.level=debug     # DEBUG run #1
+start_instance debug2 3104 cfg:default.log.level=debug     # DEBUG run #2
 # ... leave idle > 22 min (captures two full 10-minute ticks) ...
 # recurring INFO lines (drop the one-time startup burst, keep only ticker emitters):
-grep -E 'logger=(cleanup|plugins.update.checker|grafana.update.checker) ' "$D1/log/grafana.log"
+grep -E 'logger=(cleanup|plugins.update.checker|grafana.update.checker) ' info1/log/grafana.log
 ```
 
 **Zero-request proof.** With `router_logging=false` (`conf/defaults.ini:57`), the only middleware
 that logs an inbound call is the request-completion logger. Counting those lines in each idle
-instance's log proves the window was request-free:
+instance's log proves every window was request-free:
 
 ```text
 # Zero-request proof — count access-log ("Request Completed") lines in each idle instance's log.
 # (router_logging=false, so only the request-completion middleware could log inbound calls.)
-$ grep -c 'msg="Request Completed"' "$D1/log/grafana.log"   # INFO-1, port 3101
-$ grep -c 'msg="Request Completed"' "$D2/log/grafana.log"   # INFO-2, port 3102
-$ grep -c 'msg="Request Completed"' "$D3/log/grafana.log"   # DEBUG,  port 3103
-INFO-1 (3101): 1
-INFO-2 (3102): 0
-DEBUG  (3103): 0
-
-# The single INFO-1 line, shown verbatim (it is exactly the O3 anonymous probe at 17:56:14):
-logger=context userId=0 orgId=0 uname= t=2026-07-13T17:56:14.369840263Z level=info msg="Request Completed" method=GET path=/api/frontend/settings status=401 remote_addr=127.0.0.1 time_ms=0 duration=86.282µs size=102 referer= handler=/api/frontend/settings/ status_source=server errorReason=Unauthorized errorMessageID=auth.unauthorized error="cannot authenticate request"
+$ for n in info1 info2 debug1 debug2; do \
+      printf '%-7s %s\n' "$n" "$(grep -c 'msg="Request Completed"' $n/log/grafana.log)"; done
+info1   0
+info2   0
+debug1  0
+debug2  0
 ```
 
-Instances **3102 and 3103 logged zero inbound requests**; instance **3101 logged exactly one** —
-which is precisely the O3 anonymous `/api/frontend/settings` probe issued at `17:56:14` (a 401),
-fully accounted for and not background traffic. The readiness `/api/health` polls are **never**
-access-logged, because `apiHealthHandler` is registered on the router (`pkg/api/http_server.go:634`)
-_before_ `ContextHandler.Middleware` (`pkg/api/http_server.go:639`), and the access logger's emit
-is guarded by `if ctx != nil` (`pkg/middleware/loggermw/logger.go:82-84`).
+**All four idle instances logged exactly zero inbound requests** for the entire > 22-minute
+window. Note this holds even though the capture harness polled `GET /api/health` on every port
+to detect readiness: the readiness polls are **never** access-logged, because `apiHealthHandler`
+is registered on the router (`pkg/api/http_server.go:634`) _before_ `ContextHandler.Middleware`
+(`pkg/api/http_server.go:639`), and the access logger's emit is guarded by `if ctx != nil`
+(`pkg/middleware/loggermw/logger.go:82-84`) — with no `RequestContext` attached, the health
+probe never reaches the `"Request Completed"` emit at `pkg/middleware/loggermw/logger.go:84`.
+The idle instances therefore received **no** user traffic of any kind.
 
-### First-60-second window (negative result), analysed
+### First-60-second window (negative result)
 
-The first-60-second window is analysed with the throwaway Python script below
-(`o1_first60s.py`) — created only for capture and removed afterwards (see the cleanup
-note in the methodology section). It fixes `t0` at the first log line, counts the INFO
-lines and repeated messages inside `[t0, t0+60s]`, and — the load-bearing check — counts
-how many **background-service ticker** lines (`Completed cleanup jobs` /
-`Update check succeeded`) *recur* in that window. It parses both quoted (`msg="a b c"`)
-and bare (`msg=Target`) logfmt message forms so no startup line is mis-bucketed:
-
-```python
-#!/usr/bin/env python3
-"""Analyse the first 60 seconds of a Grafana `info`-level idle log.
-
-Answers O1's primary question: within 60 s of readiness on an idle instance,
-does any BACKGROUND-SERVICE ticker line recur? Prints t0, the first-60 s INFO
-line total, the set of INFO messages that repeat in that window, the count of
-background-ticker recurrences, and (for context) the last startup INFO line and
-the first `Completed cleanup jobs` tick.
-
-Usage:  python3 o1_first60s.py <path-to-grafana.log>
-"""
-import re, sys
-from collections import Counter
-from datetime import datetime, timedelta
-
-TS = re.compile(r' t=([0-9T:.\-]+)Z ')
-LV = re.compile(r' level=(\w+) ')
-# Grafana logfmt writes msg either quoted (msg="a b c") or bare (msg=Target);
-# capture both so no line is mis-bucketed into an empty message.
-MSG = re.compile(r' msg=(?:"([^"]*)"|(\S+))')
-LOGGER = re.compile(r'^logger=(\S+)')
-
-# The ticker-driven background emitters whose recurrence defines the O1 answer.
-TICKER_MSGS = {"Completed cleanup jobs", "Update check succeeded"}
-
-def msg_of(m):
-    return m.group(1) if m.group(1) is not None else m.group(2)
-
-def parse_ts(s):
-    # Grafana stamps nanoseconds; Python datetime supports microseconds -> truncate to 6 dp.
-    if '.' in s:
-        head, frac = s.split('.', 1)
-        frac = (frac + "000000")[:6]
-        s = head + '.' + frac
-        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S.%f")
-    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S")
-
-def main(path):
-    rows = []  # (dt, level, msg, logger)
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            mt, ml, mm = TS.search(line), LV.search(line), MSG.search(line)
-            if not (mt and ml and mm):
-                continue
-            lg = LOGGER.match(line)
-            rows.append((parse_ts(mt.group(1)), ml.group(1),
-                         msg_of(mm), lg.group(1) if lg else ""))
-    if not rows:
-        print("# no parseable log lines"); return
-    t0 = rows[0][0]
-    win_end = t0 + timedelta(seconds=60)
-
-    info_msgs = Counter()
-    seen_ticker = Counter()      # per (logger,msg) occurrences within the window
-    ticker_recurrences = 0
-    total_info = 0
-    for dt, lvl, msg, lg in rows:
-        if t0 <= dt < win_end and lvl == "info":
-            total_info += 1
-            info_msgs[msg] += 1
-            if msg in TICKER_MSGS:
-                seen_ticker[(lg, msg)] += 1
-                if seen_ticker[(lg, msg)] >= 2:   # 2nd+ = a genuine ticker recurrence
-                    ticker_recurrences += 1
-
-    recurring = {m: c for m, c in info_msgs.items() if c > 1}
-
-    # Context (whole log): last startup INFO line = the INFO line just before the
-    # largest inter-INFO gap (the idle gap), and the first cleanup tick.
-    info_rows = [(dt, msg) for dt, lvl, msg, lg in rows if lvl == "info"]
-    last_startup_dt = info_rows[-1][0]
-    max_gap = timedelta(0)
-    for (a, _), (b, _) in zip(info_rows, info_rows[1:]):
-        if b - a > max_gap:
-            max_gap, last_startup_dt = b - a, a
-    first_cleanup = next((dt for dt, lvl, msg, lg in rows
-                          if msg == "Completed cleanup jobs"), None)
-
-    print(f"# O1 first-60s result (INFO level). Server start t0 = {t0.isoformat()}")
-    print(f"# Total INFO lines in first 60s: {total_info} "
-          f"(all are one-time startup lines + one inbound 401 probe).")
-    print(f"# INFO messages that RECUR within the first 60s: {recurring}")
-    verdict = ticker_recurrences if ticker_recurrences else "0 -> NONE"
-    print(f"# Background-service ticker lines (cleanup / update.checker recurrence) "
-          f"in first 60s: {verdict}")
-    ls = (last_startup_dt - t0).total_seconds()
-    if first_cleanup is not None:
-        fc = (first_cleanup - t0).total_seconds()
-        print(f"# Last startup INFO line at +{ls:.3f}s; first recurring "
-              f"'Completed cleanup jobs' at +{fc:.3f}s ({fc/60:.1f} min).")
-    else:
-        print(f"# Last startup INFO line at +{ls:.3f}s; no 'Completed cleanup jobs' "
-              f"tick within the captured window.")
-
-if __name__ == "__main__":
-    main(sys.argv[1])
-```
-
-Running it against the `info` idle log (the `$D1` sample below is the restarted,
-already-migrated instance — see the provenance note after this block) yields:
+Fixing `t0` at the first log line of the `info` run and scanning `[t0, t0+60s]`, **no
+background-service ticker line recurs**. The only post-startup INFO emissions near that window
+are one-time startup lines; the first genuinely recurring background line
+(`Completed cleanup jobs`) does not appear until the 10-minute tick:
 
 ```text
-$ python3 o1_first60s.py "$D1/log/grafana.log"   # INFO-1 idle log, port 3101
-# O1 first-60s result (INFO level). Server start t0 = 2026-07-13T17:55:17.569069
-# Total INFO lines in first 60s: 55 (all are one-time startup lines + one inbound 401 probe).
-# INFO messages that RECUR within the first 60s: {'Config overridden from command line': 5, 'Locking database': 2, 'Starting DB migrations': 2, 'migrations completed': 2, 'Unlocking database': 2, 'Update check succeeded': 2}
-# Background-service ticker lines (cleanup / update.checker recurrence) in first 60s: 0 -> NONE
-# Last startup INFO line at +87.188s; first recurring 'Completed cleanup jobs' at +600.222s (10.0 min).
-# => 513.0 s of INFO silence between end-of-startup and the first recurring background line.
-
-# The only inbound request in the whole idle window (the O3 anon probe), verbatim:
-logger=context userId=0 orgId=0 uname= t=2026-07-13T17:56:14.369840263Z level=info msg="Request Completed" method=GET path=/api/frontend/settings status=401 remote_addr=127.0.0.1 time_ms=0 duration=86.282µs size=102 referer= handler=/api/frontend/settings/ status_source=server errorReason=Unauthorized errorMessageID=auth.unauthorized error="cannot authenticate request"
+# O1 first-60s result (INFO level, instance info1). Server start t0 = 2026-07-14T07:49:33.888231
+# Background-service ticker recurrences (cleanup / update.checker) in first 60s: 0 -> NONE
+# Last startup INFO line at +68.434s; first recurring 'Completed cleanup jobs' at +603.513s (10.1 min).
+# => 535.1s of no recurring background line between end-of-startup and the first 10-min tick.
+#
+# The last startup INFO line and the first recurring INFO line, verbatim:
+logger=infra.usagestats t=2026-07-14T07:50:42.322459487Z level=info msg="Usage stats are ready to report"
+logger=cleanup t=2026-07-14T07:59:37.401055557Z level=info msg="Completed cleanup jobs" duration=80.549224ms
 ```
 
-The messages that _appear_ to repeat in the first 60 s (`Config overridden from command line`,
-`Locking database`, `Starting DB migrations`, `migrations completed`, `Update check succeeded`)
-are **one-time startup lines** duplicated across the two migrators (`migrator` +
-`resource-migrator`) and the two update-checkers (`grafana` + `plugins`) — not background-service
-tickers. **Zero** cleanup/update-checker _ticker_ lines occur in the first 60 s.
-
-> **Instance provenance of the first-60 s sample (traceability).** The 55-line first-60 s figures
-> above were captured on a **restarted (already-migrated) instance**, not a first-ever-start one:
-> the sample's `t0 = 2026-07-13T17:55:17.569` coincides with the O2 **restart** whose migrator logs
-> `msg="migrations completed" performed=0 skipped=626` at the same instant (see the O2 section, at
-> `t=2026-07-13T17:55:17.578`). Because the schema was already up to date, the first 60 s contains
-> **no migration burst**, which is why the one-time-line volume is small (the 55 lines shown, of
-> which one is the inbound 401 probe). A **fresh** (first-ever-start) instance instead executes all
-> 644 migrations (626 core + 18 resource, each logging an INFO `msg="Executing migration"` line at
-> `pkg/services/sqlstore/migrator/migrator.go:356` — see the O2 section) inside its first 60 s, so its
-> first-60 s INFO volume is far larger. An independent zero-request re-measurement on the canonically
-> built `11.5.0-pre` binary confirmed this: a **fresh** instance emitted **1342** first-60 s INFO
-> lines and a **restart** **53** (consistent with the 55 above, which additionally counted the one
-> inbound probe) — yet **both yielded exactly 0 background-service ticker recurrences in the first
-> 60 s**. Instance provenance therefore affects only the raw startup-line count, never the O1 answer
-> (which is the negative ticker-recurrence result).
+Both `info` runs yield the identical negative result (0 ticker recurrences in the first 60 s).
+At `debug`, the only sub-60 s recurring line is the 10 s alerting-scheduler tick
+(`ngalert.scheduler msg="Alert rules fetched"`), which fires ~6 times within the first minute —
+shown in full below.
 
 ### Long idle window (≥ 22 min) — complete recurring INFO lines
 
-**Instance 3101 (INFO run #1), complete recurring lines:**
+**Instance info1 (INFO run #1), complete recurring lines:**
 
 ```text
-logger=grafana.update.checker t=2026-07-13T17:55:17.788752267Z level=info msg="Update check succeeded" duration=34.116383ms
-logger=plugins.update.checker t=2026-07-13T17:55:17.789909166Z level=info msg="Update check succeeded" duration=35.355787ms
-logger=cleanup t=2026-07-13T18:05:17.79084459Z level=info msg="Completed cleanup jobs" duration=35.540818ms
-logger=plugins.update.checker t=2026-07-13T18:05:17.83676976Z level=info msg="Update check succeeded" duration=46.806641ms
-logger=cleanup t=2026-07-13T18:15:17.761881433Z level=info msg="Completed cleanup jobs" duration=7.29394ms
-logger=plugins.update.checker t=2026-07-13T18:15:17.822118782Z level=info msg="Update check succeeded" duration=31.117606ms
-logger=cleanup t=2026-07-13T18:25:17.759728591Z level=info msg="Completed cleanup jobs" duration=5.16362ms
-logger=plugins.update.checker t=2026-07-13T18:25:17.81994654Z level=info msg="Update check succeeded" duration=29.451724ms
+logger=plugins.update.checker t=2026-07-14T07:49:37.357118061Z level=info msg="Update check succeeded" duration=37.011505ms
+logger=grafana.update.checker t=2026-07-14T07:49:37.35716411Z level=info msg="Update check succeeded" duration=37.20662ms
+logger=plugins.update.checker t=2026-07-14T07:59:37.398169527Z level=info msg="Update check succeeded" duration=40.79571ms
+logger=cleanup t=2026-07-14T07:59:37.401055557Z level=info msg="Completed cleanup jobs" duration=80.549224ms
+logger=cleanup t=2026-07-14T08:09:37.322676692Z level=info msg="Completed cleanup jobs" duration=1.975685ms
+logger=plugins.update.checker t=2026-07-14T08:09:37.390287047Z level=info msg="Update check succeeded" duration=32.404534ms
 ```
 
-**Instance 3102 (INFO run #2), complete recurring lines:**
+**Instance info2 (INFO run #2), complete recurring lines:**
 
 ```text
-logger=plugins.update.checker t=2026-07-13T17:56:13.503616545Z level=info msg="Update check succeeded" duration=34.355836ms
-logger=grafana.update.checker t=2026-07-13T17:56:13.507393243Z level=info msg="Update check succeeded" duration=38.157773ms
-logger=plugins.update.checker t=2026-07-13T18:06:13.52684148Z level=info msg="Update check succeeded" duration=22.8911ms
-logger=cleanup t=2026-07-13T18:06:13.549251975Z level=info msg="Completed cleanup jobs" duration=79.917435ms
-logger=cleanup t=2026-07-13T18:16:13.504268818Z level=info msg="Completed cleanup jobs" duration=34.425549ms
-logger=plugins.update.checker t=2026-07-13T18:16:13.571727903Z level=info msg="Update check succeeded" duration=67.798603ms
+logger=grafana.update.checker t=2026-07-14T07:49:37.44681963Z level=info msg="Update check succeeded" duration=86.866745ms
+logger=plugins.update.checker t=2026-07-14T07:49:37.462596398Z level=info msg="Update check succeeded" duration=102.652539ms
+logger=cleanup t=2026-07-14T07:59:37.364728592Z level=info msg="Completed cleanup jobs" duration=4.065433ms
+logger=plugins.update.checker t=2026-07-14T07:59:37.486315289Z level=info msg="Update check succeeded" duration=23.392626ms
+logger=cleanup t=2026-07-14T08:09:37.364805009Z level=info msg="Completed cleanup jobs" duration=4.09712ms
+logger=plugins.update.checker t=2026-07-14T08:09:37.491909495Z level=info msg="Update check succeeded" duration=28.55757ms
 ```
 
-Note the first line of each run — `logger=grafana.update.checker msg="Update check succeeded"` —
-is a **one-time startup** emission (its ticker period is 24 h, `pkg/services/updatechecker/grafana.go:63`),
-so it appears once at startup and does not recur within the window; `plugins.update.checker`
-(10-minute ticker) and `cleanup` (10-minute ticker) are the genuine recurring INFO lines.
+The first line of each run — `logger=grafana.update.checker msg="Update check succeeded"` — is a
+**one-time startup** emission (its ticker period is 24 h, `pkg/services/updatechecker/grafana.go:63`),
+so it appears once and does not recur within the window; `plugins.update.checker` (10-minute
+ticker) and `cleanup` (10-minute ticker) are the genuine recurring INFO lines, both firing at
+`t0+600 s` and `t0+1200 s`.
 
 ### Measured cadence (computed with `python3` from the captured timestamps)
 
 ```text
-INFO-1 cleanup 'Completed cleanup jobs': count=3 gaps(s)=[599.971, 599.998]
-INFO-1 plugins.update.checker 'Update check succeeded': count=4 gaps(s)=[600.047, 599.985, 599.998]
-INFO-2 cleanup 'Completed cleanup jobs': count=2 gaps(s)=[599.955]
-INFO-2 plugins.update.checker 'Update check succeeded': count=3 gaps(s)=[600.023, 600.045]
-DEBUG ngalert.scheduler 'Alert rules fetched': count=182 gaps(s)=[10.0, 10.0, ..., 10.0] (n_gaps=181, min=9.997, max=10.003)
-DEBUG ngalert.sender.router 'Attempting to sync admin configs': count=31 gaps(s)=[60.005, 60.0, ..., 60.001] (n_gaps=30, min=60.0, max=60.055)
-DEBUG secrets 'Removing expired data keys from cache...': count=30 gaps(s)=[59.999, 60.001, ..., 60.0] (n_gaps=29, min=59.999, max=60.001)
+info1 cleanup 'Completed cleanup jobs':               count=2 gaps(s)=[599.922]
+info1 plugins.update.checker 'Update check succeeded': count=3 gaps(s)=[600.041, 599.992]
+info2 cleanup 'Completed cleanup jobs':               count=2 gaps(s)=[600.0]
+info2 plugins.update.checker 'Update check succeeded': count=3 gaps(s)=[600.024, 600.006]
+debug1 ngalert.scheduler 'Alert rules fetched':        count=133 n_gaps=132 min=9.931 max=10.001 mean=9.999
+debug1 ngalert.multiorg.alertmanager 'Synchronizing Alertmanagers for orgs': count=23 n_gaps=22 min=60.001 max=60.231 mean=60.012
+debug1 ngalert.sender.router 'Attempting to sync admin configs': count=23 n_gaps=22 min=60.0 max=60.156 mean=60.008
+debug1 ngalert.notifier.alertmanager 'Config hasn't changed, skipping configuration sync.': count=22 n_gaps=21 min=60.001 max=60.012 mean=60.002
+debug1 secrets 'Removing expired data keys from cache...': count=22 n_gaps=21 min=59.999 max=60.001 mean=60.0
+debug1 ssosettings.service 'reloading SSO Settings for all providers': count=22 n_gaps=21 min=59.999 max=60.001 mean=60.0
 ```
 
 ### Run-to-run stability / distribution
 
 Across the two independent `info` runs the recurring **set is identical** (`cleanup` +
-`plugins.update.checker`), and every measured gap is within a few tens of milliseconds of
-**600.000 s**. There is no run-to-run variation in _which_ lines recur; only sub-second jitter in
-the exact tick instant (scheduler dispatch + I/O). The `debug` scheduler cadence is likewise
-stable at 10.000 s (181 gaps, min 9.997 s, max 10.003 s over 182 samples).
+`plugins.update.checker`), and every measured 10-minute gap is within a few tens of milliseconds
+of **600.000 s**. Across the two independent `debug` runs the recurring set is likewise identical
+(info1/info2 logged 1336s/1336s spans with 1359/1359 total lines;
+debug1/debug2 logged 1336s/1336s spans with 3250/3250 total lines).
+There is no run-to-run variation in _which_ lines recur; only sub-second jitter in the exact tick
+instant. The `debug` scheduler cadence is stable at 10.000 s (132 gaps, min 9.931s,
+max 10.001s over 133 samples), and each 60 s emitter is stable at 60.000 s.
 
 ### DEBUG periodic emitters (complete)
 
@@ -468,367 +371,389 @@ At `debug` the most frequent recurring emitter is the alerting scheduler, once e
 `rulesCount=0` on an empty instance:
 
 ```text
-logger=ngalert.scheduler t=... level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:49:40.070130805Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
 ```
 
-<details><summary>Complete DEBUG <code>ngalert.scheduler</code> stream — all 182 lines (17:56:00 → 18:26:10)</summary>
+<details><summary>Complete DEBUG <code>ngalert.scheduler</code> stream — all 133 lines</summary>
 
 ```text
-logger=ngalert.scheduler t=2026-07-13T17:56:00.001142859Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:56:10.001238394Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:56:20.001233376Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:56:30.000258431Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:56:40.000221588Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:56:50.000865201Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:57:00.000591617Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:57:10.000464375Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:57:20.00022859Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:57:30.001146186Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:57:40.000768541Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:57:50.001036565Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:58:00.000359105Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:58:10.000242364Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:58:20.000280034Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:58:30.00052732Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:58:40.00078731Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:58:50.000577336Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:59:00.00076392Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:59:10.000398646Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:59:20.000782532Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:59:30.000711391Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:59:40.000541005Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T17:59:50.001042463Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:00:00.000807783Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:00:10.000823297Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:00:20.000765011Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:00:30.000269043Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:00:40.001106968Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:00:50.004267434Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:01:00.001182555Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:01:10.001113119Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:01:20.000822947Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:01:30.001103128Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:01:40.001126565Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:01:50.000977052Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:02:00.001134052Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:02:10.000484062Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:02:20.000920075Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:02:30.000917028Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:02:40.000763725Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:02:50.001027246Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:03:00.000479549Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:03:10.000562355Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:03:20.000394085Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:03:30.00066966Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:03:40.001114214Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:03:50.00116678Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:04:00.000557706Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:04:10.000931344Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:04:20.001132968Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:04:30.001249324Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:04:40.000619638Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:04:50.001102673Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:05:00.001164173Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:05:10.000992033Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:05:20.000357598Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:05:30.000734821Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:05:40.000836486Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:05:50.000590019Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:06:00.001008133Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:06:10.001349597Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:06:20.001066209Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:06:30.000455595Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:06:40.001223064Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:06:50.000490283Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:07:00.000771551Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:07:10.001123241Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:07:20.001215458Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:07:30.000502323Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:07:40.000410675Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:07:50.000379798Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:08:00.001183352Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:08:10.000259215Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:08:20.000779941Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:08:30.00085633Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:08:40.001353754Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:08:50.000618696Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:09:00.000938305Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:09:10.001082872Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:09:20.000811984Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:09:30.000877142Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:09:40.00109449Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:09:50.000528364Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:10:00.000873204Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:10:10.000745304Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:10:20.000632605Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:10:30.000974071Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:10:40.000608881Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:10:50.000986974Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:11:00.00031184Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:11:10.000762141Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:11:20.000822122Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:11:30.001226117Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:11:40.000361636Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:11:50.001197768Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:12:00.000406857Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:12:10.001046964Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:12:20.000396926Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:12:30.00031425Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:12:40.001030619Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:12:50.000450687Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:13:00.000640043Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:13:10.000571393Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:13:20.00093161Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:13:30.000964434Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:13:40.001062684Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:13:50.000989558Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:14:00.000789559Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:14:10.000312818Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:14:20.00124773Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:14:30.000644251Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:14:40.000573969Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:14:50.000981988Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:15:00.001169199Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:15:10.000367115Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:15:20.001108914Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:15:30.000454659Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:15:40.001203425Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:15:50.000546046Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:16:00.000746475Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:16:10.001074012Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:16:20.001098934Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:16:30.001077418Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:16:40.000612469Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:16:50.001003132Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:17:00.001022106Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:17:10.000998525Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:17:20.000759033Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:17:30.000476822Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:17:40.00060416Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:17:50.001023453Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:18:00.001094184Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:18:10.000878532Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:18:20.000993706Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:18:30.001085721Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:18:40.000257035Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:18:50.00035843Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:19:00.000428553Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:19:10.000989826Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:19:20.000955617Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:19:30.000953663Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:19:40.000547236Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:19:50.000361082Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:20:00.001124728Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:20:10.001154425Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:20:20.000489859Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:20:30.000268638Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:20:40.001148102Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:20:50.000498692Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:21:00.00110439Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:21:10.000849235Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:21:20.001164576Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:21:30.001223485Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:21:40.000397428Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:21:50.000505412Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:22:00.000954493Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:22:10.000266703Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:22:20.000593014Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:22:30.001001004Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:22:40.001007761Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:22:50.000484585Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:23:00.000586286Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:23:10.000354149Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:23:20.000233986Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:23:30.001232205Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:23:40.000800487Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:23:50.000541119Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:24:00.000542673Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:24:10.001202415Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:24:20.000224477Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:24:30.000302413Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:24:40.000545726Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:24:50.001026803Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:25:00.000441799Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:25:10.000595265Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:25:20.000678847Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:25:30.001222426Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:25:40.001242267Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:25:50.000721408Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:26:00.001010677Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
-logger=ngalert.scheduler t=2026-07-13T18:26:10.00061964Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:49:40.070130805Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:49:50.000807743Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:50:00.000515316Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:50:10.001152323Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:50:20.000501677Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:50:30.000721267Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:50:40.000490999Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:50:50.00085541Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:51:00.000890216Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:51:10.000860121Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:51:20.000391888Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:51:30.000719864Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:51:40.000417731Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:51:50.001230548Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:52:00.000188523Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:52:10.000630461Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:52:20.000584455Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:52:30.000696237Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:52:40.000723678Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:52:50.000601981Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:53:00.000404671Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:53:10.001064764Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:53:20.000877078Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:53:30.001130384Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:53:40.000805292Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:53:50.000628865Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:54:00.000992027Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:54:10.000368789Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:54:20.001198321Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:54:30.000592254Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:54:40.000205499Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:54:50.00024681Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:55:00.000776449Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:55:10.000997998Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:55:20.0011759Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:55:30.000874664Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:55:40.001059979Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:55:50.000865382Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:56:00.000516118Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:56:10.001062475Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:56:20.000580393Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:56:30.000730575Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:56:40.000243215Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:56:50.00067562Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:57:00.000682669Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:57:10.000745745Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:57:20.000710092Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:57:30.000959103Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:57:40.000875897Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:57:50.001108004Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:58:00.000389992Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:58:10.000677269Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:58:20.000818395Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:58:30.001186699Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:58:40.001134319Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:58:50.000916169Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:59:00.001080101Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:59:10.0002433Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:59:20.001201221Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:59:30.000479428Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:59:40.001108408Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T07:59:50.001040461Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:00:00.000483847Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:00:10.001168301Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:00:20.001074927Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:00:30.000883627Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:00:40.001210962Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:00:50.001083515Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:01:00.000940046Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:01:10.000467317Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:01:20.000746737Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:01:30.000453073Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:01:40.000827366Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:01:50.000421298Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:02:00.000574277Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:02:10.000512772Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:02:20.000464843Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:02:30.000541658Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:02:40.001225981Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:02:50.000236954Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:03:00.001087095Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:03:10.000921009Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:03:20.00068908Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:03:30.001239778Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:03:40.001272703Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:03:50.00103559Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:04:00.001224385Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:04:10.000476596Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:04:20.001231891Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:04:30.000305114Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:04:40.001026145Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:04:50.000763616Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:05:00.000472483Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:05:10.000223517Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:05:20.000971696Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:05:30.000856849Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:05:40.001129133Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:05:50.000479787Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:06:00.000518587Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:06:10.00095368Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:06:20.000745028Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:06:30.000182183Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:06:40.000595451Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:06:50.000530284Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:07:00.001069452Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:07:10.001125162Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:07:20.000302946Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:07:30.000953296Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:07:40.001198587Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:07:50.000996102Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:08:00.000226084Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:08:10.000404388Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:08:20.000872488Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:08:30.001269295Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:08:40.000319045Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:08:50.000210996Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:09:00.000205064Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:09:10.001134853Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:09:20.001144547Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:09:30.000972165Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:09:40.000630945Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:09:50.001132233Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:10:00.000208502Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:10:10.000497564Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:10:20.000269969Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:10:30.000402412Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:10:40.000659835Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:10:50.000678292Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:11:00.000444731Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:11:10.001051171Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:11:20.001165262Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:11:30.001205354Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
+logger=ngalert.scheduler t=2026-07-14T08:11:40.00080595Z level=debug msg="Alert rules fetched" rulesCount=0 foldersCount=0 updatedRules=0
 ```
 
 </details>
 
-Four further emitters fire on a **60 s** cadence. Distinct logger/message counts over the window:
+**Five** further emitters fire on a **60 s** cadence. Distinct logger/message counts over the window:
 
 ```text
-$ sed -E 's/ t=[^ ]+ / /; s/.*logger=([^ ]+).*msg="([^"]+)".*/logger=\1  msg="\2"/' \
-    o1_debug_60s_emitters.txt | sort | uniq -c
-     31 logger=ngalert.multiorg.alertmanager  msg="Synchronizing Alertmanagers for orgs"
-     30 logger=ngalert.notifier.alertmanager  msg="Config hasn't changed, skipping configuration sync."
-     31 logger=ngalert.sender.router  msg="Attempting to sync admin configs"
-     30 logger=secrets  msg="Removing expired data keys from cache..."
+$ grep -E 'Synchronizing Alertmanagers for orgs|Attempting to sync admin configs|"Config hasn.t changed, skipping configuration sync."|Removing expired data keys from cache|reloading SSO Settings for all providers' \
+    debug1/log/grafana.log \
+  | sed -E 's/ t=[^ ]+ / /; s/ org=[0-9]+ / /; s/.*logger=([^ ]+).*msg="([^"]+)".*/\1  msg="\2"/' | sort | uniq -c
+     23 ngalert.multiorg.alertmanager  msg="Synchronizing Alertmanagers for orgs"
+     23 ngalert.sender.router  msg="Attempting to sync admin configs"
+     22 ngalert.notifier.alertmanager  msg="Config hasn't changed, skipping configuration sync."
+     22 secrets  msg="Removing expired data keys from cache..."
+     22 ssosettings.service  msg="reloading SSO Settings for all providers"
 ```
 
-<details><summary>Complete DEBUG 60-second-emitter stream — all 122 lines</summary>
+<details><summary>Complete DEBUG 60-second-emitter stream — all 112 lines (five loggers)</summary>
 
 ```text
-logger=ngalert.multiorg.alertmanager t=2026-07-13T17:55:50.89771878Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.sender.router t=2026-07-13T17:55:50.927954415Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T17:56:50.933287756Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=secrets t=2026-07-13T17:56:50.933317284Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T17:56:50.933413223Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T17:56:50.933864949Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T17:57:50.932741264Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T17:57:50.933627639Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T17:57:50.93492752Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T17:57:50.935356754Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T17:58:50.933693033Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T17:58:50.933827565Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T17:58:50.935909262Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T17:58:50.936443936Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T17:59:50.932729397Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T17:59:50.934987271Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T17:59:50.937073748Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T17:59:50.937481277Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:00:50.933584358Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:00:50.935861572Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:00:50.937913249Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:00:50.938419375Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:01:50.933548003Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:01:50.936726206Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:01:50.938808877Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:01:50.939200228Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:02:50.933239403Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:02:50.937622872Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:02:50.939673381Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:02:50.940120884Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:03:50.933634219Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:03:50.938001555Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:03:50.94111604Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:03:50.941730477Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:04:50.933706481Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:04:50.938952134Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:04:50.943009252Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:04:50.943448544Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:05:50.933259229Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:05:50.944657278Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:05:50.990574293Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=ngalert.sender.router t=2026-07-13T18:05:50.99402138Z level=debug msg="Attempting to sync admin configs" count=0
-logger=secrets t=2026-07-13T18:06:50.932674884Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:06:50.991225634Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:06:50.991737312Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=ngalert.sender.router t=2026-07-13T18:06:50.994497247Z level=debug msg="Attempting to sync admin configs" count=0
-logger=secrets t=2026-07-13T18:07:50.932763065Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:07:50.992477424Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:07:50.992932844Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=ngalert.sender.router t=2026-07-13T18:07:50.994631491Z level=debug msg="Attempting to sync admin configs" count=0
-logger=secrets t=2026-07-13T18:08:50.932998259Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:08:50.993766511Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:08:50.994425937Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=ngalert.sender.router t=2026-07-13T18:08:50.995019017Z level=debug msg="Attempting to sync admin configs" count=0
-logger=secrets t=2026-07-13T18:09:50.933041651Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:09:50.995529628Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.sender.router t=2026-07-13T18:09:50.995664626Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:09:50.996081909Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:10:50.932715603Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:10:50.99616687Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:10:50.997141716Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:10:50.99772772Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:11:50.93299188Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:11:50.996706768Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:11:50.998724322Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:11:50.999249628Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:12:50.933346239Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:12:50.997510831Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:12:51.000499322Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:12:51.001093157Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:13:50.933012812Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:13:50.998231947Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:13:51.002283419Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:13:51.002729088Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:14:50.932778694Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:14:50.998692052Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:14:51.003681336Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:14:51.004205521Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:15:50.932979097Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:15:50.999213867Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:15:51.004613217Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:15:51.005032615Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:16:50.932673961Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:16:50.99967618Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:16:51.005654077Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:16:51.006216227Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:17:50.933026749Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:17:50.999874646Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:17:51.006921392Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:17:51.007388604Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:18:50.932928096Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:18:51.001053564Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:18:51.008115646Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:18:51.008718941Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:19:50.933332747Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:19:51.001412396Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:19:51.009474144Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:19:51.009930421Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:20:50.933248654Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:20:51.002354791Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:20:51.010353059Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:20:51.010843931Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:21:50.932872233Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:21:51.003071975Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:21:51.011080734Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:21:51.011527305Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:22:50.932775016Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:22:51.004075565Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:22:51.012148621Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:22:51.012687922Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:23:50.933032202Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:23:51.004455989Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:23:51.013553395Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:23:51.033410178Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:24:50.932865487Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:24:51.004672073Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:24:51.034312334Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:24:51.034846613Z level=debug msg="Config hasn't changed, skipping configuration sync."
-logger=secrets t=2026-07-13T18:25:50.932858897Z level=debug msg="Removing expired data keys from cache..."
-logger=ngalert.sender.router t=2026-07-13T18:25:51.005422857Z level=debug msg="Attempting to sync admin configs" count=0
-logger=ngalert.multiorg.alertmanager t=2026-07-13T18:25:51.036081977Z level=debug msg="Synchronizing Alertmanagers for orgs"
-logger=ngalert.notifier.alertmanager org=1 t=2026-07-13T18:25:51.036553987Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=ngalert.multiorg.alertmanager t=2026-07-14T07:49:37.135356981Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.sender.router t=2026-07-14T07:49:37.210306407Z level=debug msg="Attempting to sync admin configs" count=0
+logger=secrets t=2026-07-14T07:50:37.363919556Z level=debug msg="Removing expired data keys from cache..."
+logger=ssosettings.service t=2026-07-14T07:50:37.363966742Z level=debug msg="reloading SSO Settings for all providers"
+logger=ngalert.multiorg.alertmanager t=2026-07-14T07:50:37.366146498Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.sender.router t=2026-07-14T07:50:37.366222294Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T07:50:37.366597811Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=ssosettings.service t=2026-07-14T07:51:37.363671003Z level=debug msg="reloading SSO Settings for all providers"
+logger=secrets t=2026-07-14T07:51:37.363690723Z level=debug msg="Removing expired data keys from cache..."
+logger=ngalert.multiorg.alertmanager t=2026-07-14T07:51:37.366913058Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.sender.router t=2026-07-14T07:51:37.367008684Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T07:51:37.367332825Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=secrets t=2026-07-14T07:52:37.36311588Z level=debug msg="Removing expired data keys from cache..."
+logger=ssosettings.service t=2026-07-14T07:52:37.364212872Z level=debug msg="reloading SSO Settings for all providers"
+logger=ngalert.multiorg.alertmanager t=2026-07-14T07:52:37.367516833Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.sender.router t=2026-07-14T07:52:37.367594444Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T07:52:37.367964236Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=secrets t=2026-07-14T07:53:37.363448511Z level=debug msg="Removing expired data keys from cache..."
+logger=ssosettings.service t=2026-07-14T07:53:37.363473528Z level=debug msg="reloading SSO Settings for all providers"
+logger=ngalert.sender.router t=2026-07-14T07:53:37.367923148Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ngalert.multiorg.alertmanager t=2026-07-14T07:53:37.368919798Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T07:53:37.36926077Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=secrets t=2026-07-14T07:54:37.363329061Z level=debug msg="Removing expired data keys from cache..."
+logger=ssosettings.service t=2026-07-14T07:54:37.36335236Z level=debug msg="reloading SSO Settings for all providers"
+logger=ngalert.sender.router t=2026-07-14T07:54:37.368884824Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ngalert.multiorg.alertmanager t=2026-07-14T07:54:37.369875318Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T07:54:37.370337778Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=secrets t=2026-07-14T07:55:37.363888739Z level=debug msg="Removing expired data keys from cache..."
+logger=ssosettings.service t=2026-07-14T07:55:37.363915224Z level=debug msg="reloading SSO Settings for all providers"
+logger=ngalert.sender.router t=2026-07-14T07:55:37.369358783Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ngalert.multiorg.alertmanager t=2026-07-14T07:55:37.370513886Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T07:55:37.370865313Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=secrets t=2026-07-14T07:56:37.36408132Z level=debug msg="Removing expired data keys from cache..."
+logger=ssosettings.service t=2026-07-14T07:56:37.364105188Z level=debug msg="reloading SSO Settings for all providers"
+logger=ngalert.sender.router t=2026-07-14T07:56:37.369500207Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ngalert.multiorg.alertmanager t=2026-07-14T07:56:37.371562217Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T07:56:37.371971051Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=secrets t=2026-07-14T07:57:37.363112264Z level=debug msg="Removing expired data keys from cache..."
+logger=ssosettings.service t=2026-07-14T07:57:37.364010266Z level=debug msg="reloading SSO Settings for all providers"
+logger=ngalert.sender.router t=2026-07-14T07:57:37.370479016Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ngalert.multiorg.alertmanager t=2026-07-14T07:57:37.37253728Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T07:57:37.372943096Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=secrets t=2026-07-14T07:58:37.363170778Z level=debug msg="Removing expired data keys from cache..."
+logger=ssosettings.service t=2026-07-14T07:58:37.363220915Z level=debug msg="reloading SSO Settings for all providers"
+logger=ngalert.sender.router t=2026-07-14T07:58:37.37162064Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ngalert.multiorg.alertmanager t=2026-07-14T07:58:37.373681731Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T07:58:37.374105876Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=secrets t=2026-07-14T07:59:37.363152747Z level=debug msg="Removing expired data keys from cache..."
+logger=ssosettings.service t=2026-07-14T07:59:37.363198898Z level=debug msg="reloading SSO Settings for all providers"
+logger=ngalert.multiorg.alertmanager t=2026-07-14T07:59:37.374645654Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T07:59:37.385698132Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=ngalert.sender.router t=2026-07-14T07:59:37.391062813Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ssosettings.service t=2026-07-14T08:00:37.36351683Z level=debug msg="reloading SSO Settings for all providers"
+logger=secrets t=2026-07-14T08:00:37.363547702Z level=debug msg="Removing expired data keys from cache..."
+logger=ngalert.multiorg.alertmanager t=2026-07-14T08:00:37.386913984Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T08:00:37.387396763Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=ngalert.sender.router t=2026-07-14T08:00:37.392226996Z level=debug msg="Attempting to sync admin configs" count=0
+logger=secrets t=2026-07-14T08:01:37.363744807Z level=debug msg="Removing expired data keys from cache..."
+logger=ssosettings.service t=2026-07-14T08:01:37.363773314Z level=debug msg="reloading SSO Settings for all providers"
+logger=ngalert.multiorg.alertmanager t=2026-07-14T08:01:37.388291007Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T08:01:37.388726349Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=ngalert.sender.router t=2026-07-14T08:01:37.392534817Z level=debug msg="Attempting to sync admin configs" count=0
+logger=secrets t=2026-07-14T08:02:37.363678509Z level=debug msg="Removing expired data keys from cache..."
+logger=ssosettings.service t=2026-07-14T08:02:37.363703779Z level=debug msg="reloading SSO Settings for all providers"
+logger=ngalert.multiorg.alertmanager t=2026-07-14T08:02:37.389221001Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T08:02:37.389683236Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=ngalert.sender.router t=2026-07-14T08:02:37.393486011Z level=debug msg="Attempting to sync admin configs" count=0
+logger=secrets t=2026-07-14T08:03:37.363677258Z level=debug msg="Removing expired data keys from cache..."
+logger=ssosettings.service t=2026-07-14T08:03:37.363695126Z level=debug msg="reloading SSO Settings for all providers"
+logger=ngalert.multiorg.alertmanager t=2026-07-14T08:03:37.390049449Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T08:03:37.390542078Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=ngalert.sender.router t=2026-07-14T08:03:37.393646262Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ssosettings.service t=2026-07-14T08:04:37.364005022Z level=debug msg="reloading SSO Settings for all providers"
+logger=secrets t=2026-07-14T08:04:37.36402777Z level=debug msg="Removing expired data keys from cache..."
+logger=ngalert.multiorg.alertmanager t=2026-07-14T08:04:37.39140856Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T08:04:37.391945209Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=ngalert.sender.router t=2026-07-14T08:04:37.394650649Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ssosettings.service t=2026-07-14T08:05:37.363369428Z level=debug msg="reloading SSO Settings for all providers"
+logger=secrets t=2026-07-14T08:05:37.363385979Z level=debug msg="Removing expired data keys from cache..."
+logger=ngalert.multiorg.alertmanager t=2026-07-14T08:05:37.392758058Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T08:05:37.393195017Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=ngalert.sender.router t=2026-07-14T08:05:37.395102999Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ssosettings.service t=2026-07-14T08:06:37.363819716Z level=debug msg="reloading SSO Settings for all providers"
+logger=secrets t=2026-07-14T08:06:37.363836688Z level=debug msg="Removing expired data keys from cache..."
+logger=ngalert.multiorg.alertmanager t=2026-07-14T08:06:37.394203193Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T08:06:37.394699565Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=ngalert.sender.router t=2026-07-14T08:06:37.395434894Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ssosettings.service t=2026-07-14T08:07:37.363361639Z level=debug msg="reloading SSO Settings for all providers"
+logger=secrets t=2026-07-14T08:07:37.363386842Z level=debug msg="Removing expired data keys from cache..."
+logger=ngalert.multiorg.alertmanager t=2026-07-14T08:07:37.394891538Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T08:07:37.395340875Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=ngalert.sender.router t=2026-07-14T08:07:37.395541452Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ssosettings.service t=2026-07-14T08:08:37.363595777Z level=debug msg="reloading SSO Settings for all providers"
+logger=secrets t=2026-07-14T08:08:37.363621941Z level=debug msg="Removing expired data keys from cache..."
+logger=ngalert.multiorg.alertmanager t=2026-07-14T08:08:37.396182183Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.sender.router t=2026-07-14T08:08:37.396262801Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T08:08:37.396630726Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=ssosettings.service t=2026-07-14T08:09:37.363277801Z level=debug msg="reloading SSO Settings for all providers"
+logger=secrets t=2026-07-14T08:09:37.363304291Z level=debug msg="Removing expired data keys from cache..."
+logger=ngalert.sender.router t=2026-07-14T08:09:37.396458199Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ngalert.multiorg.alertmanager t=2026-07-14T08:09:37.397710302Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T08:09:37.398094798Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=secrets t=2026-07-14T08:10:37.363502524Z level=debug msg="Removing expired data keys from cache..."
+logger=ssosettings.service t=2026-07-14T08:10:37.363534212Z level=debug msg="reloading SSO Settings for all providers"
+logger=ngalert.sender.router t=2026-07-14T08:10:37.397197529Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ngalert.multiorg.alertmanager t=2026-07-14T08:10:37.399246011Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T08:10:37.399769017Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=ssosettings.service t=2026-07-14T08:11:37.363467366Z level=debug msg="reloading SSO Settings for all providers"
+logger=secrets t=2026-07-14T08:11:37.363564792Z level=debug msg="Removing expired data keys from cache..."
+logger=ngalert.sender.router t=2026-07-14T08:11:37.3980435Z level=debug msg="Attempting to sync admin configs" count=0
+logger=ngalert.multiorg.alertmanager t=2026-07-14T08:11:37.400031434Z level=debug msg="Synchronizing Alertmanagers for orgs"
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T08:11:37.400453169Z level=debug msg="Config hasn't changed, skipping configuration sync."
 ```
 
 </details>
+
+The **SSO-settings reload** (`ssosettings.service msg="reloading SSO Settings for all providers"`)
+is the fifth 60 s emitter. Each reload is immediately followed by **7** companion lines
+`msg="No SSO Settings found in the database, using system settings"` — one per configured SSO
+provider — so the companion appears **161** times over the window (7 at startup + 7 per
+reload). One complete reload tick, verbatim:
+
+```text
+logger=ssosettings.service t=2026-07-14T07:50:37.363966742Z level=debug msg="reloading SSO Settings for all providers"
+logger=ssosettings.service t=2026-07-14T07:50:37.36415738Z level=debug msg="No SSO Settings found in the database, using system settings"
+logger=ssosettings.service t=2026-07-14T07:50:37.364193605Z level=debug msg="No SSO Settings found in the database, using system settings"
+logger=ssosettings.service t=2026-07-14T07:50:37.364204917Z level=debug msg="No SSO Settings found in the database, using system settings"
+logger=ssosettings.service t=2026-07-14T07:50:37.364215487Z level=debug msg="No SSO Settings found in the database, using system settings"
+logger=ssosettings.service t=2026-07-14T07:50:37.364223458Z level=debug msg="No SSO Settings found in the database, using system settings"
+logger=ssosettings.service t=2026-07-14T07:50:37.364232167Z level=debug msg="No SSO Settings found in the database, using system settings"
+logger=ssosettings.service t=2026-07-14T07:50:37.364239616Z level=debug msg="No SSO Settings found in the database, using system settings"
+```
+
+Other `debug`-only periodic activity in the window: the **10-minute** cleanup family logs a burst
+of DEBUG companions around each `Completed cleanup jobs` tick (`Starting cleanup jobs`, `Cleaned up
+deleted dashboards`, `Deleted excess annotations`, `Deleted expired images/snapshots`, `Deleted
+old/expired dashboard versions`, `Deleted short urls`, `Deleted stale query history`, `Enforced row
+limit for query_history`/`query_history_star`, `Expired email verifications`, `Expired user
+invites`, and `login_attempt msg="Deleted expired login attempts"`), the `plugins.update.checker`
+DEBUG pair (`Checking for plugin updates` / `Preparing plugins eligible for version check`), and
+the `infra.lockservice` `Start`/`Finish LockAndExecute` pair — all on the same 10-minute cadence.
+The notifier's Alertmanager maintenance (`ngalert.notifier.alertmanager` `Running maintenance` /
+`Maintenance done`) recurs on a longer ~7 min cadence, not 60 s.
+
+**Not idle-recurring (classified for honesty).** The high-volume `migrator` lines
+(`msg="Executing migration"`, `msg="Migration successfully executed"`) all occur within the first
+~3 s — they are the fresh-database startup burst (see O2), not idle recurrence. Likewise
+`local.finder msg="Loading plugin"` and `server msg="Starting background service"` are one-time
+startup lines, and the `server msg="Stopped background service"` + `plugins.deregister
+msg="Plugin unregistered"` bursts occur only at SIGTERM shutdown.
+
+### AAP-named background paths — did each recur? (runtime-classified)
+
+The Agent Action Plan (§0.2.1) names several ticker-driven background services as candidate idle
+emitters. Each was checked against the captured `debug` log; the result for each:
+
+- **`cleanup`** — `pkg/services/cleanup/cleanup.go` `Run():77`, `time.NewTicker(time.Minute*10):80`,
+  `clean():91`, `msg="Completed cleanup jobs":128`. **OBSERVED recurring** at INFO every 10 min
+  (`t0+600 s`, `t0+1200 s`).
+- **`ngalert` scheduler** — `pkg/services/ngalert/schedule/schedule.go` `msg="Starting scheduler":157`,
+  `ticker.New(...):158` (base interval 10 s); message emitted from
+  `pkg/services/ngalert/schedule/fetcher.go:39` (inside `updateSchedulableAlertRules`, `:14`).
+  **OBSERVED recurring** at DEBUG every 10 s (133 ticks).
+- **`ssosettings.service`** — `pkg/services/ssosettings/ssosettingsimpl/service.go` `Run():362`,
+  `time.NewTicker(interval):368`, `doReload():383`, `msg="reloading SSO Settings for all
+  providers":384`, `mergeSSOSettings():412`, `msg="No SSO Settings found...":414`; default
+  interval `1*time.Minute` from `pkg/setting/setting.go:1662` (decl `:275`). **OBSERVED recurring**
+  at DEBUG every 60 s (22 reloads).
+- **`remotecache` DB GC** — `pkg/infra/remotecache/database_storage.go` `Run():29`,
+  `time.NewTicker(time.Minute*10):30`, `internalRunGC():41`. **ACTIVE but SILENT on success** —
+  `internalRunGC` only logs on error (its `logger.Error` path), so despite the default
+  `remote_cache type=database` (`conf/defaults.ini:190`) **no recurring log line is emitted**
+  (grep for a `remotecache` logger over the window returns 0 lines).
+- **auth token cleanup** — `pkg/services/auth/authimpl/token_cleanup.go` `time.NewTicker(time.Hour):11`;
+  `msg="Cleanup of expired auth tokens done":68`. **NOT recurring in the window** — it ran **once**
+  at startup (via `infra.lockservice` action `"cleanup expired auth tokens"`, logging `count=0`),
+  and its **1-hour** period exceeds the 22-minute observation window.
+- **provisioning dashboard poll** — `pkg/services/provisioning/dashboards/file_reader.go`
+  `pollChanges():80`, `time.NewTicker(...):81`. **NEVER STARTED** — no dashboard provisioning
+  provider is configured by default, so the poll goroutine does not start; only the one-time
+  startup lines `provisioning.dashboard msg="starting/finished to provision dashboards"` appear.
 
 ### Responsible code (full repo-root paths)
 
-- **cleanup** — `pkg/services/cleanup/cleanup.go`: `Run()` at `:78-90` runs cleanup once at
-  startup then installs `time.NewTicker(time.Minute*10)` at `:80`; each tick calls `clean()`,
-  which logs `msg="Completed cleanup jobs"` at `:128`. First tick at t+10 min.
-- **plugins.update.checker** — `pkg/services/updatechecker/plugins.go`: `Run()` at `:75-89`
-  checks once at startup then `time.NewTicker(time.Minute*10)` at `:78`; logs
-  `msg="Update check succeeded"` at `:123`.
+- **cleanup** — `pkg/services/cleanup/cleanup.go`: `Run()` at `:77` runs cleanup once at startup
+  then installs `time.NewTicker(time.Minute*10)` at `:80`; each tick calls `clean()` (`:91`),
+  which logs `msg="Completed cleanup jobs"` at `:128`.
+- **plugins.update.checker** — `pkg/services/updatechecker/plugins.go`: `Run()` at `:75` checks
+  once at startup then `time.NewTicker(time.Minute*10)` at `:78`; logs `msg="Update check
+  succeeded"` at `:123`.
 - **grafana.update.checker** — `pkg/services/updatechecker/grafana.go`: `time.NewTicker(time.Hour*24)`
-  at `:63` (so only the startup emission is observed within a 22-min window).
+  at `:63` (so only the startup emission is observed within a 22-min window); msg at `:89`.
 - **ngalert.scheduler** — `pkg/services/ngalert/schedule/schedule.go`: `Run()` logs the one-time
-  `msg="Starting scheduler"` at `:157` and installs the base-interval ticker at `:158`
-  (`ticker.New(sch.clock, sch.baseInterval, ...)`, 10 s default). On each tick, `processTick`
-  calls `sch.updateSchedulableAlertRules(ctx)` at `:239`; that method emits the recurring
-  `msg="Alert rules fetched"` DEBUG line at `pkg/services/ngalert/schedule/fetcher.go:39` (inside
-  `updateSchedulableAlertRules`, defined at `fetcher.go:14`) — i.e. the message is logged from
-  `fetcher.go:39`, not from `schedule.go`.
+  `msg="Starting scheduler"` at `:157` and installs the base-interval ticker at `:158`; on each
+  tick `processTick` (`:235`) calls `sch.updateSchedulableAlertRules(ctx)` (`:239`), which emits
+  the recurring `msg="Alert rules fetched"` DEBUG line at
+  `pkg/services/ngalert/schedule/fetcher.go:39` (method defined at `fetcher.go:14`).
+- **ssosettings.service** — `pkg/services/ssosettings/ssosettingsimpl/service.go`: `Run()` at
+  `:362` installs `time.NewTicker(interval)` at `:368`; each tick calls `doReload()` (`:383`),
+  logging `msg="reloading SSO Settings for all providers"` at `:384`, and `mergeSSOSettings()`
+  (`:412`) logs `msg="No SSO Settings found in the database, using system settings"` at `:414`.
+  The reload interval defaults to `1*time.Minute` (`pkg/setting/setting.go:1662`, decl `:275`).
+- **secrets / ngalert.sender.router / ngalert.multiorg.alertmanager / ngalert.notifier.alertmanager**
+  — the remaining 60 s emitters, launched as background services (below).
+- **remotecache / auth token-cleanup / provisioning dashboard poll** — the AAP-named paths that
+  did **not** produce a recurring line (silent-on-success / 1-hour period / not-configured); see
+  the classification subsection above for exact `file:line`.
 - **background-service launch** — `pkg/server/server.go` `Server.Run()` iterates the
   `BackgroundServiceRegistry` (`pkg/registry/backgroundsvcs/background_services.go`) and starts
   each service as a goroutine; those with tickers are the recurring emitters above.
 
 ### Observed vs inferred
 
-- **Observed:** the 60-s negative result; the two recurring INFO lines and their ~600 s cadence
-  across two runs; the DEBUG 10-s scheduler cadence and the four 60-s emitters; zero inbound
-  requests.
+- **Observed:** the 60-s negative result at `info`; the two recurring INFO lines and their
+  ~600 s cadence across two `info` runs; the DEBUG 10-s scheduler cadence and the **five** 60-s
+  emitters (including `ssosettings.service`) across two `debug` runs; zero inbound requests on all
+  four instances; and the runtime classification of every AAP-named path (cleanup/scheduler/SSO
+  observed; remotecache silent-on-success; auth token-cleanup startup-only; provisioning poll
+  never started).
 - **[INFERRED]** the 24-hour recurrence of `grafana.update.checker` — only its startup emission
-  was seen in the 22-min window; the 24 h period is read from `pkg/services/updatechecker/grafana.go:63`
-  (`time.NewTicker(time.Hour * 24)`).
+  was seen in the 22-min window; the 24 h period is read from
+  `pkg/services/updatechecker/grafana.go:63` (`time.NewTicker(time.Hour * 24)`). The **1-hour**
+  auth-token-cleanup period is likewise read from `token_cleanup.go:11` (only its single startup
+  run was observed within the window).
 
 ## O2 — Database Migration Check
 
@@ -2910,41 +2835,50 @@ logger=resource-migrator t=2026-07-13T17:55:50.929353923Z level=debug msg="Skipp
 
 The API reports the exact version string **`11.5.0-pre`**.
 
-- `GET /api/health` → `"version": "11.5.0-pre"` (with `"commit": "d31e8b6c76"`).
+- `GET /api/health` → `"version": "11.5.0-pre"` (with `"commit": "efc14a8261"`).
 - `GET /api/frontend/settings` → `buildInfo.version = "11.5.0-pre"` and
-  `buildInfo.versionString = "Grafana v11.5.0-pre (d31e8b6c76)"`.
+  `buildInfo.versionString = "Grafana v11.5.0-pre (efc14a8261)"`.
 
 This is the canonically stamped value (from `package.json:6`), not the in-source default
 `9.2.0` — see the non-canonical contrast at the end of this section.
 
+**Capture-commit provenance (labelled).** The version string `11.5.0-pre` is invariant: it is
+stamped from `package.json:6` and does not change between builds of this checkout. The `commit`
+field, by contrast, is the build-time VCS stamp (`-X main.commit=…`, `pkg/build/cmd.go:247`) and
+therefore reflects whichever commit was HEAD when the binary was linked. The values shown in this
+section were captured from a binary built at branch HEAD `efc14a8261`
+(`efc14a82611f80ee3762c889aa26213fa9b7ec1e`); a binary linked at a different HEAD would report the
+same `version` (`11.5.0-pre`) but a different `commit`. Only the `version` string is the answer to
+this question; the `commit` is included as corroborating build metadata.
+
 ### How it was observed
 
-Queried against the running canonical instance on loopback port 3101.
+Queried against the running canonical instance on loopback port 3100.
 
 **`GET /api/health` — raw request/response (`curl -s -i`):**
 
 ```text
-$ curl -s -i http://127.0.0.1:3101/api/health
+$ curl -s -i http://127.0.0.1:3100/api/health
 HTTP/1.1 200 OK
 Cache-Control: no-store
 Content-Type: application/json; charset=UTF-8
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Mon, 13 Jul 2026 17:56:14 GMT
+Date: Tue, 14 Jul 2026 07:49:37 GMT
 Content-Length: 75
 
 {
   "database": "ok",
   "version": "11.5.0-pre",
-  "commit": "d31e8b6c76"
+  "commit": "efc14a8261"
 }
 ```
 
 Extracting the field with `python3` (jq is not installed):
 
 ```text
-$ curl -s http://127.0.0.1:3101/api/health | python3 -c 'import sys,json; print(json.load(sys.stdin)["version"])'
+$ curl -s http://127.0.0.1:3100/api/health | python3 -c 'import sys,json; print(json.load(sys.stdin)["version"])'
 11.5.0-pre
 ```
 
@@ -2953,14 +2887,14 @@ endpoint requires authentication, so an anonymous request returns `401 Unauthori
 observed, not assumed:
 
 ```text
-$ curl -s -i http://127.0.0.1:3101/api/frontend/settings
+$ curl -s -i http://127.0.0.1:3100/api/frontend/settings
 HTTP/1.1 401 Unauthorized
 Cache-Control: no-store
 Content-Type: application/json; charset=UTF-8
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Mon, 13 Jul 2026 17:56:14 GMT
+Date: Tue, 14 Jul 2026 07:49:37 GMT
 Content-Length: 102
 
 {"extra":null,"message":"Unauthorized","messageId":"auth.unauthorized","statusCode":401,"traceID":""}
@@ -2970,14 +2904,14 @@ Content-Length: 102
 the process list). Response header block:
 
 ```text
-$ curl -s -i --netrc-file "$NETRC" http://127.0.0.1:3101/api/frontend/settings
+$ curl -s -i --netrc-file "$NETRC" http://127.0.0.1:3100/api/frontend/settings
 HTTP/1.1 200 OK
 Cache-Control: no-store
 Content-Type: application/json; charset=UTF-8
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Mon, 13 Jul 2026 17:56:30 GMT
+Date: Tue, 14 Jul 2026 07:49:38 GMT
 Transfer-Encoding: chunked
 ```
 
@@ -2994,24 +2928,24 @@ print("top-level keys:", len(body))
 print("appUrl =", body.get("appUrl"))
 PY
 buildInfo.version = '11.5.0-pre'
-buildInfo.versionString = 'Grafana v11.5.0-pre (d31e8b6c76)'
-buildInfo.commit = 'd31e8b6c76'
-buildInfo.commitShort = 'd31e8b6c76'
-buildInfo.buildstamp = 1783963209
+buildInfo.versionString = 'Grafana v11.5.0-pre (efc14a8261)'
+buildInfo.commit = 'efc14a8261'
+buildInfo.commitShort = 'efc14a8261'
+buildInfo.buildstamp = 1783997649
 buildInfo.edition = 'Open Source'
 buildInfo.env = 'production'
 buildInfo.hasUpdate = False
 top-level keys: 103
-appUrl = http://localhost:3101/
+appUrl = http://localhost:3100/
 ```
 
-The body is 29,748 bytes with 103 top-level keys; `appUrl` is `http://localhost:3101/`,
+The body is 29,748 bytes with 103 top-level keys; `appUrl` is `http://localhost:3100/`,
 confirming the loopback instance. The complete, unedited response body follows:
 
 <details><summary>Complete <code>/api/frontend/settings</code> response body (verbatim JSON, 29,748 bytes)</summary>
 
 ```text
-{"defaultDatasource":"-- Grafana --","datasources":{"-- Dashboard --":{"type":"datasource","name":"-- Dashboard --","meta":{"id":"dashboard","type":"datasource","name":"-- Dashboard --","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Uses the result set from another panel in the same dashboard","links":null,"logos":{"small":"public/app/plugins/datasource/dashboard/img/icn-reusequeries.svg","large":"public/app/plugins/datasource/dashboard/img/icn-reusequeries.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"dependencies":{"grafanaDependency":"","grafanaVersion":"*","plugins":[],"extensions":{"exposedComponents":[]}},"includes":null,"category":"","preload":false,"backend":false,"routes":null,"skipDataQuery":false,"autoEnabled":false,"extensions":{"addedLinks":[],"addedComponents":[],"exposedComponents":[],"extensionPoints":[]},"annotations":false,"metrics":true,"alerting":false,"explore":false,"tables":false,"logs":false,"tracing":false,"builtIn":true,"streaming":false,"signature":"internal","module":"core:plugin/dashboard","baseUrl":"public/app/plugins/datasource/dashboard","angular":{"detected":false,"hideDeprecation":false},"multiValueFilterOperators":false,"loadingStrategy":""},"isDefault":false,"preload":false,"jsonData":{},"readOnly":false,"cachingConfig":{"enabled":false,"TTLMs":0}},"-- Grafana --":{"id":-1,"uid":"grafana","type":"datasource","name":"-- Grafana --","meta":{"id":"grafana","type":"datasource","name":"-- Grafana --","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"A built-in data source that generates random walk data and can poll the Testdata data source. This helps you test visualizations and run experiments.","links":null,"logos":{"small":"public/app/plugins/datasource/grafana/img/icn-grafanadb.svg","large":"public/app/plugins/datasource/grafana/img/icn-grafanadb.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"dependencies":{"grafanaDependency":"","grafanaVersion":"*","plugins":[],"extensions":{"exposedComponents":[]}},"includes":null,"category":"","preload":false,"backend":true,"routes":null,"skipDataQuery":false,"autoEnabled":false,"extensions":{"addedLinks":[],"addedComponents":[],"exposedComponents":[],"extensionPoints":[]},"annotations":true,"metrics":true,"alerting":false,"explore":false,"tables":false,"logs":false,"tracing":false,"builtIn":true,"streaming":false,"signature":"internal","module":"core:plugin/grafana","baseUrl":"public/app/plugins/datasource/grafana","angular":{"detected":false,"hideDeprecation":false},"multiValueFilterOperators":false,"loadingStrategy":""},"isDefault":false,"preload":false,"jsonData":{},"readOnly":false,"cachingConfig":{"enabled":false,"TTLMs":0}},"-- Mixed --":{"type":"datasource","name":"-- Mixed --","meta":{"id":"mixed","type":"datasource","name":"-- Mixed --","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Lets you query multiple data sources in the same panel.","links":null,"logos":{"small":"public/app/plugins/datasource/mixed/img/icn-mixeddatasources.svg","large":"public/app/plugins/datasource/mixed/img/icn-mixeddatasources.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"dependencies":{"grafanaDependency":"","grafanaVersion":"*","plugins":[],"extensions":{"exposedComponents":[]}},"includes":null,"category":"","preload":false,"backend":false,"routes":null,"skipDataQuery":false,"autoEnabled":false,"extensions":{"addedLinks":[],"addedComponents":[],"exposedComponents":[],"extensionPoints":[]},"annotations":false,"metrics":true,"alerting":false,"explore":false,"tables":false,"logs":false,"tracing":false,"queryOptions":{"minInterval":true},"builtIn":true,"mixed":true,"streaming":false,"signature":"internal","module":"core:plugin/mixed","baseUrl":"public/app/plugins/datasource/mixed","angular":{"detected":false,"hideDeprecation":false},"multiValueFilterOperators":false,"loadingStrategy":""},"isDefault":false,"preload":false,"jsonData":{},"readOnly":false,"cachingConfig":{"enabled":false,"TTLMs":0}}},"minRefreshInterval":"5s","panels":{"alertlist":{"id":"alertlist","name":"Alert list","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Shows list of alerts and their current status","links":null,"logos":{"small":"public/app/plugins/panel/alertlist/img/icn-singlestat-panel.svg","large":"public/app/plugins/panel/alertlist/img/icn-singlestat-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":15,"skipDataQuery":true,"state":"","baseUrl":"public/app/plugins/panel/alertlist","signature":"internal","module":"core:plugin/alertlist","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"annolist":{"id":"annolist","name":"Annotations list","aliasIds":["ryantxu-annolist-panel"],"info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"List annotations","links":null,"logos":{"small":"public/app/plugins/panel/annolist/img/icn-annolist-panel.svg","large":"public/app/plugins/panel/annolist/img/icn-annolist-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":100,"skipDataQuery":true,"state":"","baseUrl":"public/app/plugins/panel/annolist","signature":"internal","module":"core:plugin/annolist","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"barchart":{"id":"barchart","name":"Bar chart","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Categorical charts with group support","links":null,"logos":{"small":"public/app/plugins/panel/barchart/img/barchart.svg","large":"public/app/plugins/panel/barchart/img/barchart.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":2,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/barchart","signature":"internal","module":"core:plugin/barchart","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"bargauge":{"id":"bargauge","name":"Bar gauge","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Horizontal and vertical gauges","links":null,"logos":{"small":"public/app/plugins/panel/bargauge/img/icon_bar_gauge.svg","large":"public/app/plugins/panel/bargauge/img/icon_bar_gauge.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":5,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/bargauge","signature":"internal","module":"core:plugin/bargauge","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"candlestick":{"id":"candlestick","name":"Candlestick","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Graphical representation of price movements of a security, derivative, or currency.","links":null,"logos":{"small":"public/app/plugins/panel/candlestick/img/candlestick.svg","large":"public/app/plugins/panel/candlestick/img/candlestick.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":["financial","price","currency","k-line"]},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/candlestick","signature":"internal","module":"core:plugin/candlestick","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"canvas":{"id":"canvas","name":"Canvas","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Explicit element placement","links":null,"logos":{"small":"public/app/plugins/panel/canvas/img/icn-canvas.svg","large":"public/app/plugins/panel/canvas/img/icn-canvas.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/canvas","signature":"internal","module":"core:plugin/canvas","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"dashlist":{"id":"dashlist","name":"Dashboard list","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"List of dynamic links to other dashboards","links":null,"logos":{"small":"public/app/plugins/panel/dashlist/img/icn-dashlist-panel.svg","large":"public/app/plugins/panel/dashlist/img/icn-dashlist-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":16,"skipDataQuery":true,"state":"","baseUrl":"public/app/plugins/panel/dashlist","signature":"internal","module":"core:plugin/dashlist","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"flamegraph":{"id":"flamegraph","name":"Flame Graph","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"","links":null,"logos":{"small":"public/app/plugins/panel/flamegraph/img/icn-flamegraph.svg","large":"public/app/plugins/panel/flamegraph/img/icn-flamegraph.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/flamegraph","signature":"internal","module":"core:plugin/flamegraph","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"gauge":{"id":"gauge","name":"Gauge","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Standard gauge visualization","links":null,"logos":{"small":"public/app/plugins/panel/gauge/img/icon_gauge.svg","large":"public/app/plugins/panel/gauge/img/icon_gauge.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":4,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/gauge","signature":"internal","module":"core:plugin/gauge","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"geomap":{"id":"geomap","name":"Geomap","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Geomap panel","links":null,"logos":{"small":"public/app/plugins/panel/geomap/img/icn-geomap.svg","large":"public/app/plugins/panel/geomap/img/icn-geomap.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/geomap","signature":"internal","module":"core:plugin/geomap","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"gettingstarted":{"id":"gettingstarted","name":"Getting Started","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"","links":null,"logos":{"small":"public/app/plugins/panel/gettingstarted/img/icn-dashlist-panel.svg","large":"public/app/plugins/panel/gettingstarted/img/icn-dashlist-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":true,"sort":100,"skipDataQuery":true,"state":"","baseUrl":"public/app/plugins/panel/gettingstarted","signature":"internal","module":"core:plugin/gettingstarted","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"graph":{"id":"graph","name":"Graph (old)","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"The old default graph panel","links":null,"logos":{"small":"public/app/plugins/panel/graph/img/icn-graph-panel.svg","large":"public/app/plugins/panel/graph/img/icn-graph-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":13,"skipDataQuery":false,"state":"deprecated","baseUrl":"public/app/plugins/panel/graph","signature":"internal","module":"core:plugin/graph","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"heatmap":{"id":"heatmap","name":"Heatmap","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Like a histogram over time","links":null,"logos":{"small":"public/app/plugins/panel/heatmap/img/icn-heatmap-panel.svg","large":"public/app/plugins/panel/heatmap/img/icn-heatmap-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":10,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/heatmap","signature":"internal","module":"core:plugin/heatmap","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"histogram":{"id":"histogram","name":"Histogram","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Distribution of values presented as a bar chart.","links":null,"logos":{"small":"public/app/plugins/panel/histogram/img/histogram.svg","large":"public/app/plugins/panel/histogram/img/histogram.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":["distribution","bar chart","frequency","proportional"]},"hideFromList":false,"sort":12,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/histogram","signature":"internal","module":"core:plugin/histogram","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"logs":{"id":"logs","name":"Logs","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"","links":null,"logos":{"small":"public/app/plugins/panel/logs/img/icn-logs-panel.svg","large":"public/app/plugins/panel/logs/img/icn-logs-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/logs","signature":"internal","module":"core:plugin/logs","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"news":{"id":"news","name":"News","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"RSS feed reader","links":null,"logos":{"small":"public/app/plugins/panel/news/img/news.svg","large":"public/app/plugins/panel/news/img/news.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":17,"skipDataQuery":true,"state":"beta","baseUrl":"public/app/plugins/panel/news","signature":"internal","module":"core:plugin/news","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"nodeGraph":{"id":"nodeGraph","name":"Node Graph","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"","links":null,"logos":{"small":"public/app/plugins/panel/nodeGraph/img/icn-node-graph.svg","large":"public/app/plugins/panel/nodeGraph/img/icn-node-graph.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/nodeGraph","signature":"internal","module":"core:plugin/nodeGraph","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"piechart":{"id":"piechart","name":"Pie chart","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"The new core pie chart visualization","links":null,"logos":{"small":"public/app/plugins/panel/piechart/img/icon_piechart.svg","large":"public/app/plugins/panel/piechart/img/icon_piechart.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":8,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/piechart","signature":"internal","module":"core:plugin/piechart","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"stat":{"id":"stat","name":"Stat","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Big stat values \u0026 sparklines","links":null,"logos":{"small":"public/app/plugins/panel/stat/img/icn-singlestat-panel.svg","large":"public/app/plugins/panel/stat/img/icn-singlestat-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":3,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/stat","signature":"internal","module":"core:plugin/stat","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"state-timeline":{"id":"state-timeline","name":"State timeline","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"State changes and durations","links":null,"logos":{"small":"public/app/plugins/panel/state-timeline/img/timeline.svg","large":"public/app/plugins/panel/state-timeline/img/timeline.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":9,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/state-timeline","signature":"internal","module":"core:plugin/state-timeline","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"status-history":{"id":"status-history","name":"Status history","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Periodic status history","links":null,"logos":{"small":"public/app/plugins/panel/status-history/img/status.svg","large":"public/app/plugins/panel/status-history/img/status.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":11,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/status-history","signature":"internal","module":"core:plugin/status-history","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"table":{"id":"table","name":"Table","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Supports many column styles","links":null,"logos":{"small":"public/app/plugins/panel/table/img/icn-table-panel.svg","large":"public/app/plugins/panel/table/img/icn-table-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":6,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/table","signature":"internal","module":"core:plugin/table","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"table-old":{"id":"table-old","name":"Table (old)","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Table Panel for Grafana","links":null,"logos":{"small":"public/app/plugins/panel/table-old/img/icn-table-panel.svg","large":"public/app/plugins/panel/table-old/img/icn-table-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"deprecated","baseUrl":"public/app/plugins/panel/table-old","signature":"internal","module":"core:plugin/table-old","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"text":{"id":"text","name":"Text","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Supports markdown and html content","links":null,"logos":{"small":"public/app/plugins/panel/text/img/icn-text-panel.svg","large":"public/app/plugins/panel/text/img/icn-text-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":14,"skipDataQuery":true,"state":"","baseUrl":"public/app/plugins/panel/text","signature":"internal","module":"core:plugin/text","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"timeseries":{"id":"timeseries","name":"Time series","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Time based line, area and bar charts","links":null,"logos":{"small":"public/app/plugins/panel/timeseries/img/icn-timeseries-panel.svg","large":"public/app/plugins/panel/timeseries/img/icn-timeseries-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":1,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/timeseries","signature":"internal","module":"core:plugin/timeseries","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"traces":{"id":"traces","name":"Traces","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"","links":null,"logos":{"small":"public/app/plugins/panel/traces/img/traces-panel.svg","large":"public/app/plugins/panel/traces/img/traces-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/traces","signature":"internal","module":"core:plugin/traces","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"trend":{"id":"trend","name":"Trend","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Like timeseries, but when x != time","links":null,"logos":{"small":"public/app/plugins/panel/trend/img/trend.svg","large":"public/app/plugins/panel/trend/img/trend.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"beta","baseUrl":"public/app/plugins/panel/trend","signature":"internal","module":"core:plugin/trend","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"welcome":{"id":"welcome","name":"Welcome","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"","links":null,"logos":{"small":"public/app/plugins/panel/welcome/img/icn-dashlist-panel.svg","large":"public/app/plugins/panel/welcome/img/icn-dashlist-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":true,"sort":100,"skipDataQuery":true,"state":"","baseUrl":"public/app/plugins/panel/welcome","signature":"internal","module":"core:plugin/welcome","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"xychart":{"id":"xychart","name":"XY Chart","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Supports arbitrary X vs Y in a graph to visualize the relationship between two variables.","links":null,"logos":{"small":"public/app/plugins/panel/xychart/img/icn-xychart.svg","large":"public/app/plugins/panel/xychart/img/icn-xychart.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":["scatter","plot"]},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/xychart","signature":"internal","module":"core:plugin/xychart","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"}},"apps":{"grafana-lokiexplore-app":{"id":"grafana-lokiexplore-app","path":"public/plugins/grafana-lokiexplore-app/module.js","version":"1.0.10","preload":true,"angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script","extensions":{"addedLinks":[{"targets":["grafana/dashboard/panel/menu","grafana/explore/toolbar/action"],"title":"Open in Grafana Logs Drilldown","description":"Open current query in the Grafana Logs Drilldown view"}],"addedComponents":[],"exposedComponents":[{"id":"grafana-lokiexplore-app/open-in-explore-logs-button/v1","title":"Open in Logs Drilldown button","description":"A button that opens a logs view in the Logs Drilldown app."}],"extensionPoints":[{"id":"grafana-lokiexplore-app/investigation/v1","title":"","description":""},{"id":"grafana-lokiexplore-app/toolbar-open-related/v1","title":"Open related signals like metrics/traces/profiles","description":""}]},"dependencies":{"grafanaDependency":"\u003e=11.3.0","grafanaVersion":"*","plugins":[],"extensions":{"exposedComponents":["grafana-adaptivelogs-app/temporary-exemptions/v1"]}}}},"appUrl":"http://localhost:3101/","appSubUrl":"","allowOrgCreate":true,"authProxyEnabled":false,"ldapEnabled":false,"jwtHeaderName":"","jwtUrlLogin":false,"liveEnabled":true,"autoAssignOrg":true,"verifyEmailEnabled":false,"sigV4AuthEnabled":false,"azureAuthEnabled":false,"rbacEnabled":true,"exploreEnabled":true,"helpEnabled":true,"profileEnabled":true,"newsFeedEnabled":true,"queryHistoryEnabled":true,"googleAnalyticsId":"","googleAnalytics4Id":"","GoogleAnalytics4SendManualPageViews":false,"rudderstackWriteKey":"","rudderstackDataPlaneUrl":"","rudderstackSdkUrl":"","rudderstackConfigUrl":"","rudderstackIntegrationsUrl":"","analyticsConsoleReporting":false,"feedbackLinksEnabled":true,"applicationInsightsConnectionString":"","applicationInsightsEndpointUrl":"","disableLoginForm":false,"disableUserSignUp":true,"loginHint":"","passwordHint":"","externalUserMngInfo":"","externalUserMngLinkUrl":"","externalUserMngLinkName":"","viewersCanEdit":false,"angularSupportEnabled":false,"editorsCanAdmin":false,"disableSanitizeHtml":false,"trustedTypesDefaultPolicyEnabled":false,"cspReportOnlyEnabled":false,"enableFrontendSandboxForPlugins":[""],"exploreDefaultTimeOffset":"1h","auth":{"AuthProxyEnableLoginToken":false,"OAuthSkipOrgRoleUpdateSync":false,"SAMLSkipOrgRoleSync":false,"LDAPSkipOrgRoleSync":false,"GoogleSkipOrgRoleSync":false,"GenericOAuthSkipOrgRoleSync":false,"JWTAuthSkipOrgRoleSync":false,"GrafanaComSkipOrgRoleSync":false,"AzureADSkipOrgRoleSync":false,"GithubSkipOrgRoleSync":false,"GitLabSkipOrgRoleSync":false,"OktaSkipOrgRoleSync":false,"disableLogin":false,"basicAuthStrongPasswordPolicy":false,"passwordlessEnabled":false},"buildInfo":{"hideVersion":false,"version":"11.5.0-pre","versionString":"Grafana v11.5.0-pre (d31e8b6c76)","commit":"d31e8b6c76","commitShort":"d31e8b6c76","buildstamp":1783963209,"edition":"Open Source","latestVersion":"","hasUpdate":false,"env":"production"},"licenseInfo":{"expiry":0,"stateInfo":"","licenseUrl":"/admin/upgrading","edition":"Open Source","enabledFeatures":{}},"featureToggles":{"accessActionSets":true,"accessControlOnCall":true,"addFieldFromCalculationStatFunctions":true,"alertingInsights":true,"alertingNoDataErrorExecution":true,"alertingSimplifiedRouting":true,"alertingUIOptimizeReducer":true,"angularDeprecationUI":true,"annotationPermissionUpdate":true,"awsAsyncQueryCaching":true,"azureMonitorEnableUserAuth":true,"cloudWatchCrossAccountQuerying":true,"cloudWatchNewLabelParsing":true,"cloudWatchRoundUpEndTime":true,"cloudwatchMetricInsightsCrossAccount":true,"correlations":true,"dashboardScene":true,"dashboardSceneForViewers":true,"dashboardSceneSolo":true,"dashgpt":true,"dataplaneFrontendFallback":true,"exploreMetrics":true,"formatString":true,"groupToNestedTableTransformation":true,"influxdbBackendMigration":true,"kubernetesPlaylists":true,"logRowsPopoverMenu":true,"logsContextDatasourceUi":true,"logsExploreTableVisualisation":true,"logsInfiniteScrolling":true,"lokiQueryHints":true,"lokiQuerySplitting":true,"lokiStructuredMetadata":true,"managedPluginsInstall":true,"nestedFolders":true,"newDashboardSharingComponent":true,"newFiltersUI":true,"notificationBanner":true,"openSearchBackendFlowEnabled":true,"panelMonitoring":true,"pinNavItems":true,"preinstallAutoUpdate":true,"promQLScope":true,"prometheusAzureOverrideAudience":true,"prometheusConfigOverhaulAuth":true,"prometheusMetricEncyclopedia":true,"publicDashboardsScene":true,"recordedQueriesMulti":true,"recoveryThreshold":true,"singleTopNav":true,"ssoSettingsApi":true,"tlsMemcached":true,"topnav":true,"transformationsRedesign":true,"transformationsVariableSupport":true,"unifiedRequestLog":true,"zipkinBackendMigration":true},"anonymousEnabled":false,"anonymousDeviceLimit":0,"rendererAvailable":false,"rendererVersion":"","rendererDefaultImageWidth":1000,"rendererDefaultImageHeight":500,"rendererDefaultImageScale":1,"secretsManagerPluginEnabled":false,"http2Enabled":false,"grafanaJavascriptAgent":{"enabled":false,"customEndpoint":"/log-grafana-javascript-agent","allInstrumentationEnabeld":false,"errorInstrumentalizationEnabled":true,"consoleInstrumentalizationEnabled":false,"webVitalsInstrumentalizationEnabled":false,"tracingInstrumentalizationEnabled":false,"internalLoggerLevel":0,"apiKey":""},"pluginCatalogURL":"https://grafana.com/grafana/plugins/","pluginAdminEnabled":true,"pluginAdminExternalManageEnabled":false,"pluginCatalogHiddenPlugins":[],"pluginCatalogManagedPlugins":[],"pluginCatalogPreinstalledPlugins":[{"id":"grafana-lokiexplore-app","version":""}],"expressionsEnabled":true,"awsAllowedAuthProviders":["default","keys","credentials"],"awsAssumeRoleEnabled":true,"supportBundlesEnabled":true,"snapshotEnabled":true,"secureSocksDSProxyEnabled":false,"reportingStaticContext":{},"azure":{"cloud":"AzureCloud"},"caching":{"enabled":true},"recordedQueries":{"enabled":true},"reporting":{"enabled":true},"analytics":{"enabled":true},"unifiedAlertingEnabled":true,"unifiedAlerting":{"minInterval":"10s","alertStateHistoryBackend":"annotations"},"oauth":{},"samlEnabled":false,"samlName":"","tokenExpirationDayLimit":-1,"sharedWithMeFolderUID":"sharedwithme","rootFolderUID":"general","passwordlessEnabled":"","geomapDisableCustomBaseLayer":false,"publicDashboardAccessToken":"","publicDashboardsEnabled":true,"cloudMigrationIsTarget":false,"cloudMigrationFeedbackURL":"https://docs.google.com/forms/d/e/1FAIpQLSeEE33vhbSpR8A8S1A1ocZ1ByVRRwiRl1GZr2FSrEer_tSa8w/viewform?usp=sf_link","cloudMigrationPollIntervalMs":2000,"dateFormats":{"fullDate":"YYYY-MM-DD HH:mm:ss","useBrowserLocale":false,"interval":{"millisecond":"HH:mm:ss.SSS","second":"HH:mm:ss","minute":"HH:mm","hour":"MM/DD HH:mm","day":"MM/DD","month":"YYYY-MM","year":"YYYY"},"defaultTimezone":"browser","defaultWeekStart":"browser"},"namespace":"default","sqlConnectionLimits":{"maxOpenConns":100,"maxIdleConns":100,"connMaxLifetime":14400},"localFileSystemAvailable":true,"listScopesEndpoint":"","listDashboardScopesEndpoint":""}
+{"defaultDatasource":"-- Grafana --","datasources":{"-- Dashboard --":{"type":"datasource","name":"-- Dashboard --","meta":{"id":"dashboard","type":"datasource","name":"-- Dashboard --","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Uses the result set from another panel in the same dashboard","links":null,"logos":{"small":"public/app/plugins/datasource/dashboard/img/icn-reusequeries.svg","large":"public/app/plugins/datasource/dashboard/img/icn-reusequeries.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"dependencies":{"grafanaDependency":"","grafanaVersion":"*","plugins":[],"extensions":{"exposedComponents":[]}},"includes":null,"category":"","preload":false,"backend":false,"routes":null,"skipDataQuery":false,"autoEnabled":false,"extensions":{"addedLinks":[],"addedComponents":[],"exposedComponents":[],"extensionPoints":[]},"annotations":false,"metrics":true,"alerting":false,"explore":false,"tables":false,"logs":false,"tracing":false,"builtIn":true,"streaming":false,"signature":"internal","module":"core:plugin/dashboard","baseUrl":"public/app/plugins/datasource/dashboard","angular":{"detected":false,"hideDeprecation":false},"multiValueFilterOperators":false,"loadingStrategy":""},"isDefault":false,"preload":false,"jsonData":{},"readOnly":false,"cachingConfig":{"enabled":false,"TTLMs":0}},"-- Grafana --":{"id":-1,"uid":"grafana","type":"datasource","name":"-- Grafana --","meta":{"id":"grafana","type":"datasource","name":"-- Grafana --","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"A built-in data source that generates random walk data and can poll the Testdata data source. This helps you test visualizations and run experiments.","links":null,"logos":{"small":"public/app/plugins/datasource/grafana/img/icn-grafanadb.svg","large":"public/app/plugins/datasource/grafana/img/icn-grafanadb.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"dependencies":{"grafanaDependency":"","grafanaVersion":"*","plugins":[],"extensions":{"exposedComponents":[]}},"includes":null,"category":"","preload":false,"backend":true,"routes":null,"skipDataQuery":false,"autoEnabled":false,"extensions":{"addedLinks":[],"addedComponents":[],"exposedComponents":[],"extensionPoints":[]},"annotations":true,"metrics":true,"alerting":false,"explore":false,"tables":false,"logs":false,"tracing":false,"builtIn":true,"streaming":false,"signature":"internal","module":"core:plugin/grafana","baseUrl":"public/app/plugins/datasource/grafana","angular":{"detected":false,"hideDeprecation":false},"multiValueFilterOperators":false,"loadingStrategy":""},"isDefault":false,"preload":false,"jsonData":{},"readOnly":false,"cachingConfig":{"enabled":false,"TTLMs":0}},"-- Mixed --":{"type":"datasource","name":"-- Mixed --","meta":{"id":"mixed","type":"datasource","name":"-- Mixed --","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Lets you query multiple data sources in the same panel.","links":null,"logos":{"small":"public/app/plugins/datasource/mixed/img/icn-mixeddatasources.svg","large":"public/app/plugins/datasource/mixed/img/icn-mixeddatasources.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"dependencies":{"grafanaDependency":"","grafanaVersion":"*","plugins":[],"extensions":{"exposedComponents":[]}},"includes":null,"category":"","preload":false,"backend":false,"routes":null,"skipDataQuery":false,"autoEnabled":false,"extensions":{"addedLinks":[],"addedComponents":[],"exposedComponents":[],"extensionPoints":[]},"annotations":false,"metrics":true,"alerting":false,"explore":false,"tables":false,"logs":false,"tracing":false,"queryOptions":{"minInterval":true},"builtIn":true,"mixed":true,"streaming":false,"signature":"internal","module":"core:plugin/mixed","baseUrl":"public/app/plugins/datasource/mixed","angular":{"detected":false,"hideDeprecation":false},"multiValueFilterOperators":false,"loadingStrategy":""},"isDefault":false,"preload":false,"jsonData":{},"readOnly":false,"cachingConfig":{"enabled":false,"TTLMs":0}}},"minRefreshInterval":"5s","panels":{"alertlist":{"id":"alertlist","name":"Alert list","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Shows list of alerts and their current status","links":null,"logos":{"small":"public/app/plugins/panel/alertlist/img/icn-singlestat-panel.svg","large":"public/app/plugins/panel/alertlist/img/icn-singlestat-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":15,"skipDataQuery":true,"state":"","baseUrl":"public/app/plugins/panel/alertlist","signature":"internal","module":"core:plugin/alertlist","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"annolist":{"id":"annolist","name":"Annotations list","aliasIds":["ryantxu-annolist-panel"],"info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"List annotations","links":null,"logos":{"small":"public/app/plugins/panel/annolist/img/icn-annolist-panel.svg","large":"public/app/plugins/panel/annolist/img/icn-annolist-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":100,"skipDataQuery":true,"state":"","baseUrl":"public/app/plugins/panel/annolist","signature":"internal","module":"core:plugin/annolist","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"barchart":{"id":"barchart","name":"Bar chart","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Categorical charts with group support","links":null,"logos":{"small":"public/app/plugins/panel/barchart/img/barchart.svg","large":"public/app/plugins/panel/barchart/img/barchart.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":2,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/barchart","signature":"internal","module":"core:plugin/barchart","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"bargauge":{"id":"bargauge","name":"Bar gauge","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Horizontal and vertical gauges","links":null,"logos":{"small":"public/app/plugins/panel/bargauge/img/icon_bar_gauge.svg","large":"public/app/plugins/panel/bargauge/img/icon_bar_gauge.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":5,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/bargauge","signature":"internal","module":"core:plugin/bargauge","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"candlestick":{"id":"candlestick","name":"Candlestick","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Graphical representation of price movements of a security, derivative, or currency.","links":null,"logos":{"small":"public/app/plugins/panel/candlestick/img/candlestick.svg","large":"public/app/plugins/panel/candlestick/img/candlestick.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":["financial","price","currency","k-line"]},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/candlestick","signature":"internal","module":"core:plugin/candlestick","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"canvas":{"id":"canvas","name":"Canvas","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Explicit element placement","links":null,"logos":{"small":"public/app/plugins/panel/canvas/img/icn-canvas.svg","large":"public/app/plugins/panel/canvas/img/icn-canvas.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/canvas","signature":"internal","module":"core:plugin/canvas","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"dashlist":{"id":"dashlist","name":"Dashboard list","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"List of dynamic links to other dashboards","links":null,"logos":{"small":"public/app/plugins/panel/dashlist/img/icn-dashlist-panel.svg","large":"public/app/plugins/panel/dashlist/img/icn-dashlist-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":16,"skipDataQuery":true,"state":"","baseUrl":"public/app/plugins/panel/dashlist","signature":"internal","module":"core:plugin/dashlist","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"flamegraph":{"id":"flamegraph","name":"Flame Graph","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"","links":null,"logos":{"small":"public/app/plugins/panel/flamegraph/img/icn-flamegraph.svg","large":"public/app/plugins/panel/flamegraph/img/icn-flamegraph.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/flamegraph","signature":"internal","module":"core:plugin/flamegraph","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"gauge":{"id":"gauge","name":"Gauge","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Standard gauge visualization","links":null,"logos":{"small":"public/app/plugins/panel/gauge/img/icon_gauge.svg","large":"public/app/plugins/panel/gauge/img/icon_gauge.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":4,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/gauge","signature":"internal","module":"core:plugin/gauge","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"geomap":{"id":"geomap","name":"Geomap","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Geomap panel","links":null,"logos":{"small":"public/app/plugins/panel/geomap/img/icn-geomap.svg","large":"public/app/plugins/panel/geomap/img/icn-geomap.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/geomap","signature":"internal","module":"core:plugin/geomap","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"gettingstarted":{"id":"gettingstarted","name":"Getting Started","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"","links":null,"logos":{"small":"public/app/plugins/panel/gettingstarted/img/icn-dashlist-panel.svg","large":"public/app/plugins/panel/gettingstarted/img/icn-dashlist-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":true,"sort":100,"skipDataQuery":true,"state":"","baseUrl":"public/app/plugins/panel/gettingstarted","signature":"internal","module":"core:plugin/gettingstarted","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"graph":{"id":"graph","name":"Graph (old)","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"The old default graph panel","links":null,"logos":{"small":"public/app/plugins/panel/graph/img/icn-graph-panel.svg","large":"public/app/plugins/panel/graph/img/icn-graph-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":13,"skipDataQuery":false,"state":"deprecated","baseUrl":"public/app/plugins/panel/graph","signature":"internal","module":"core:plugin/graph","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"heatmap":{"id":"heatmap","name":"Heatmap","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Like a histogram over time","links":null,"logos":{"small":"public/app/plugins/panel/heatmap/img/icn-heatmap-panel.svg","large":"public/app/plugins/panel/heatmap/img/icn-heatmap-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":10,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/heatmap","signature":"internal","module":"core:plugin/heatmap","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"histogram":{"id":"histogram","name":"Histogram","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Distribution of values presented as a bar chart.","links":null,"logos":{"small":"public/app/plugins/panel/histogram/img/histogram.svg","large":"public/app/plugins/panel/histogram/img/histogram.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":["distribution","bar chart","frequency","proportional"]},"hideFromList":false,"sort":12,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/histogram","signature":"internal","module":"core:plugin/histogram","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"logs":{"id":"logs","name":"Logs","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"","links":null,"logos":{"small":"public/app/plugins/panel/logs/img/icn-logs-panel.svg","large":"public/app/plugins/panel/logs/img/icn-logs-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/logs","signature":"internal","module":"core:plugin/logs","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"news":{"id":"news","name":"News","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"RSS feed reader","links":null,"logos":{"small":"public/app/plugins/panel/news/img/news.svg","large":"public/app/plugins/panel/news/img/news.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":17,"skipDataQuery":true,"state":"beta","baseUrl":"public/app/plugins/panel/news","signature":"internal","module":"core:plugin/news","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"nodeGraph":{"id":"nodeGraph","name":"Node Graph","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"","links":null,"logos":{"small":"public/app/plugins/panel/nodeGraph/img/icn-node-graph.svg","large":"public/app/plugins/panel/nodeGraph/img/icn-node-graph.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/nodeGraph","signature":"internal","module":"core:plugin/nodeGraph","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"piechart":{"id":"piechart","name":"Pie chart","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"The new core pie chart visualization","links":null,"logos":{"small":"public/app/plugins/panel/piechart/img/icon_piechart.svg","large":"public/app/plugins/panel/piechart/img/icon_piechart.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":8,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/piechart","signature":"internal","module":"core:plugin/piechart","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"stat":{"id":"stat","name":"Stat","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Big stat values \u0026 sparklines","links":null,"logos":{"small":"public/app/plugins/panel/stat/img/icn-singlestat-panel.svg","large":"public/app/plugins/panel/stat/img/icn-singlestat-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":3,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/stat","signature":"internal","module":"core:plugin/stat","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"state-timeline":{"id":"state-timeline","name":"State timeline","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"State changes and durations","links":null,"logos":{"small":"public/app/plugins/panel/state-timeline/img/timeline.svg","large":"public/app/plugins/panel/state-timeline/img/timeline.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":9,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/state-timeline","signature":"internal","module":"core:plugin/state-timeline","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"status-history":{"id":"status-history","name":"Status history","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Periodic status history","links":null,"logos":{"small":"public/app/plugins/panel/status-history/img/status.svg","large":"public/app/plugins/panel/status-history/img/status.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":11,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/status-history","signature":"internal","module":"core:plugin/status-history","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"table":{"id":"table","name":"Table","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Supports many column styles","links":null,"logos":{"small":"public/app/plugins/panel/table/img/icn-table-panel.svg","large":"public/app/plugins/panel/table/img/icn-table-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":6,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/table","signature":"internal","module":"core:plugin/table","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"table-old":{"id":"table-old","name":"Table (old)","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Table Panel for Grafana","links":null,"logos":{"small":"public/app/plugins/panel/table-old/img/icn-table-panel.svg","large":"public/app/plugins/panel/table-old/img/icn-table-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"deprecated","baseUrl":"public/app/plugins/panel/table-old","signature":"internal","module":"core:plugin/table-old","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"text":{"id":"text","name":"Text","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Supports markdown and html content","links":null,"logos":{"small":"public/app/plugins/panel/text/img/icn-text-panel.svg","large":"public/app/plugins/panel/text/img/icn-text-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":14,"skipDataQuery":true,"state":"","baseUrl":"public/app/plugins/panel/text","signature":"internal","module":"core:plugin/text","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"timeseries":{"id":"timeseries","name":"Time series","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Time based line, area and bar charts","links":null,"logos":{"small":"public/app/plugins/panel/timeseries/img/icn-timeseries-panel.svg","large":"public/app/plugins/panel/timeseries/img/icn-timeseries-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":1,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/timeseries","signature":"internal","module":"core:plugin/timeseries","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"traces":{"id":"traces","name":"Traces","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"","links":null,"logos":{"small":"public/app/plugins/panel/traces/img/traces-panel.svg","large":"public/app/plugins/panel/traces/img/traces-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/traces","signature":"internal","module":"core:plugin/traces","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"trend":{"id":"trend","name":"Trend","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Like timeseries, but when x != time","links":null,"logos":{"small":"public/app/plugins/panel/trend/img/trend.svg","large":"public/app/plugins/panel/trend/img/trend.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"beta","baseUrl":"public/app/plugins/panel/trend","signature":"internal","module":"core:plugin/trend","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"welcome":{"id":"welcome","name":"Welcome","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"","links":null,"logos":{"small":"public/app/plugins/panel/welcome/img/icn-dashlist-panel.svg","large":"public/app/plugins/panel/welcome/img/icn-dashlist-panel.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":null},"hideFromList":true,"sort":100,"skipDataQuery":true,"state":"","baseUrl":"public/app/plugins/panel/welcome","signature":"internal","module":"core:plugin/welcome","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"},"xychart":{"id":"xychart","name":"XY Chart","info":{"author":{"name":"Grafana Labs","url":"https://grafana.com"},"description":"Supports arbitrary X vs Y in a graph to visualize the relationship between two variables.","links":null,"logos":{"small":"public/app/plugins/panel/xychart/img/icn-xychart.svg","large":"public/app/plugins/panel/xychart/img/icn-xychart.svg"},"build":{},"screenshots":null,"version":"","updated":"","keywords":["scatter","plot"]},"hideFromList":false,"sort":100,"skipDataQuery":false,"state":"","baseUrl":"public/app/plugins/panel/xychart","signature":"internal","module":"core:plugin/xychart","angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script"}},"apps":{"grafana-lokiexplore-app":{"id":"grafana-lokiexplore-app","path":"public/plugins/grafana-lokiexplore-app/module.js","version":"1.0.10","preload":true,"angular":{"detected":false,"hideDeprecation":false},"loadingStrategy":"script","extensions":{"addedLinks":[{"targets":["grafana/dashboard/panel/menu","grafana/explore/toolbar/action"],"title":"Open in Grafana Logs Drilldown","description":"Open current query in the Grafana Logs Drilldown view"}],"addedComponents":[],"exposedComponents":[{"id":"grafana-lokiexplore-app/open-in-explore-logs-button/v1","title":"Open in Logs Drilldown button","description":"A button that opens a logs view in the Logs Drilldown app."}],"extensionPoints":[{"id":"grafana-lokiexplore-app/investigation/v1","title":"","description":""},{"id":"grafana-lokiexplore-app/toolbar-open-related/v1","title":"Open related signals like metrics/traces/profiles","description":""}]},"dependencies":{"grafanaDependency":"\u003e=11.3.0","grafanaVersion":"*","plugins":[],"extensions":{"exposedComponents":["grafana-adaptivelogs-app/temporary-exemptions/v1"]}}}},"appUrl":"http://localhost:3100/","appSubUrl":"","allowOrgCreate":true,"authProxyEnabled":false,"ldapEnabled":false,"jwtHeaderName":"","jwtUrlLogin":false,"liveEnabled":true,"autoAssignOrg":true,"verifyEmailEnabled":false,"sigV4AuthEnabled":false,"azureAuthEnabled":false,"rbacEnabled":true,"exploreEnabled":true,"helpEnabled":true,"profileEnabled":true,"newsFeedEnabled":true,"queryHistoryEnabled":true,"googleAnalyticsId":"","googleAnalytics4Id":"","GoogleAnalytics4SendManualPageViews":false,"rudderstackWriteKey":"","rudderstackDataPlaneUrl":"","rudderstackSdkUrl":"","rudderstackConfigUrl":"","rudderstackIntegrationsUrl":"","analyticsConsoleReporting":false,"feedbackLinksEnabled":true,"applicationInsightsConnectionString":"","applicationInsightsEndpointUrl":"","disableLoginForm":false,"disableUserSignUp":true,"loginHint":"","passwordHint":"","externalUserMngInfo":"","externalUserMngLinkUrl":"","externalUserMngLinkName":"","viewersCanEdit":false,"angularSupportEnabled":false,"editorsCanAdmin":false,"disableSanitizeHtml":false,"trustedTypesDefaultPolicyEnabled":false,"cspReportOnlyEnabled":false,"enableFrontendSandboxForPlugins":[""],"exploreDefaultTimeOffset":"1h","auth":{"AuthProxyEnableLoginToken":false,"OAuthSkipOrgRoleUpdateSync":false,"SAMLSkipOrgRoleSync":false,"LDAPSkipOrgRoleSync":false,"GoogleSkipOrgRoleSync":false,"GenericOAuthSkipOrgRoleSync":false,"JWTAuthSkipOrgRoleSync":false,"GrafanaComSkipOrgRoleSync":false,"AzureADSkipOrgRoleSync":false,"GithubSkipOrgRoleSync":false,"GitLabSkipOrgRoleSync":false,"OktaSkipOrgRoleSync":false,"disableLogin":false,"basicAuthStrongPasswordPolicy":false,"passwordlessEnabled":false},"buildInfo":{"hideVersion":false,"version":"11.5.0-pre","versionString":"Grafana v11.5.0-pre (efc14a8261)","commit":"efc14a8261","commitShort":"efc14a8261","buildstamp":1783997649,"edition":"Open Source","latestVersion":"","hasUpdate":false,"env":"production"},"licenseInfo":{"expiry":0,"stateInfo":"","licenseUrl":"/admin/upgrading","edition":"Open Source","enabledFeatures":{}},"featureToggles":{"accessActionSets":true,"accessControlOnCall":true,"addFieldFromCalculationStatFunctions":true,"alertingInsights":true,"alertingNoDataErrorExecution":true,"alertingSimplifiedRouting":true,"alertingUIOptimizeReducer":true,"angularDeprecationUI":true,"annotationPermissionUpdate":true,"awsAsyncQueryCaching":true,"azureMonitorEnableUserAuth":true,"cloudWatchCrossAccountQuerying":true,"cloudWatchNewLabelParsing":true,"cloudWatchRoundUpEndTime":true,"cloudwatchMetricInsightsCrossAccount":true,"correlations":true,"dashboardScene":true,"dashboardSceneForViewers":true,"dashboardSceneSolo":true,"dashgpt":true,"dataplaneFrontendFallback":true,"exploreMetrics":true,"formatString":true,"groupToNestedTableTransformation":true,"influxdbBackendMigration":true,"kubernetesPlaylists":true,"logRowsPopoverMenu":true,"logsContextDatasourceUi":true,"logsExploreTableVisualisation":true,"logsInfiniteScrolling":true,"lokiQueryHints":true,"lokiQuerySplitting":true,"lokiStructuredMetadata":true,"managedPluginsInstall":true,"nestedFolders":true,"newDashboardSharingComponent":true,"newFiltersUI":true,"notificationBanner":true,"openSearchBackendFlowEnabled":true,"panelMonitoring":true,"pinNavItems":true,"preinstallAutoUpdate":true,"promQLScope":true,"prometheusAzureOverrideAudience":true,"prometheusConfigOverhaulAuth":true,"prometheusMetricEncyclopedia":true,"publicDashboardsScene":true,"recordedQueriesMulti":true,"recoveryThreshold":true,"singleTopNav":true,"ssoSettingsApi":true,"tlsMemcached":true,"topnav":true,"transformationsRedesign":true,"transformationsVariableSupport":true,"unifiedRequestLog":true,"zipkinBackendMigration":true},"anonymousEnabled":false,"anonymousDeviceLimit":0,"rendererAvailable":false,"rendererVersion":"","rendererDefaultImageWidth":1000,"rendererDefaultImageHeight":500,"rendererDefaultImageScale":1,"secretsManagerPluginEnabled":false,"http2Enabled":false,"grafanaJavascriptAgent":{"enabled":false,"customEndpoint":"/log-grafana-javascript-agent","allInstrumentationEnabeld":false,"errorInstrumentalizationEnabled":true,"consoleInstrumentalizationEnabled":false,"webVitalsInstrumentalizationEnabled":false,"tracingInstrumentalizationEnabled":false,"internalLoggerLevel":0,"apiKey":""},"pluginCatalogURL":"https://grafana.com/grafana/plugins/","pluginAdminEnabled":true,"pluginAdminExternalManageEnabled":false,"pluginCatalogHiddenPlugins":[],"pluginCatalogManagedPlugins":[],"pluginCatalogPreinstalledPlugins":[{"id":"grafana-lokiexplore-app","version":""}],"expressionsEnabled":true,"awsAllowedAuthProviders":["default","keys","credentials"],"awsAssumeRoleEnabled":true,"supportBundlesEnabled":true,"snapshotEnabled":true,"secureSocksDSProxyEnabled":false,"reportingStaticContext":{},"azure":{"cloud":"AzureCloud"},"caching":{"enabled":true},"recordedQueries":{"enabled":true},"reporting":{"enabled":true},"analytics":{"enabled":true},"unifiedAlertingEnabled":true,"unifiedAlerting":{"minInterval":"10s","alertStateHistoryBackend":"annotations"},"oauth":{},"samlEnabled":false,"samlName":"","tokenExpirationDayLimit":-1,"sharedWithMeFolderUID":"sharedwithme","rootFolderUID":"general","passwordlessEnabled":"","geomapDisableCustomBaseLayer":false,"publicDashboardAccessToken":"","publicDashboardsEnabled":true,"cloudMigrationIsTarget":false,"cloudMigrationFeedbackURL":"https://docs.google.com/forms/d/e/1FAIpQLSeEE33vhbSpR8A8S1A1ocZ1ByVRRwiRl1GZr2FSrEer_tSa8w/viewform?usp=sf_link","cloudMigrationPollIntervalMs":2000,"dateFormats":{"fullDate":"YYYY-MM-DD HH:mm:ss","useBrowserLocale":false,"interval":{"millisecond":"HH:mm:ss.SSS","second":"HH:mm:ss","minute":"HH:mm","hour":"MM/DD HH:mm","day":"MM/DD","month":"YYYY-MM","year":"YYYY"},"defaultTimezone":"browser","defaultWeekStart":"browser"},"namespace":"default","sqlConnectionLimits":{"maxOpenConns":100,"maxIdleConns":100,"connMaxLifetime":14400},"localFileSystemAvailable":true,"listScopesEndpoint":"","listDashboardScopesEndpoint":""}
 ```
 
 </details>
@@ -3850,7 +3784,7 @@ in the repository (verified in the final `git status`).
 
 | #   | Question                                                         | Answer                                                                                                                                                             | Primary runtime evidence                                                          |
 | --- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------- |
-| O1  | Exact recurring idle log entries after ≥ 60 s, no requests       | **None in first 60 s**; over ≥ 22 min, `cleanup` + `plugins.update.checker` recur every 10 min (INFO); `ngalert.scheduler` every 10 s + four 60 s emitters (DEBUG) | idle logs (2× info runs + 1 debug), python3-measured cadence, zero-request counts |
+| O1  | Exact recurring idle log entries after ≥ 60 s, no requests       | **None in first 60 s**; over ≥ 22 min, `cleanup` + `plugins.update.checker` recur every 10 min (INFO); `ngalert.scheduler` every 10 s + five 60 s emitters incl. `ssosettings.service` (DEBUG) | idle logs (2× info + 2× debug runs), python3-measured cadence, zero-request counts |
 | O2  | Startup output confirming schema is up to date                   | `migrations completed performed=0 skipped=626` (+ `resource-migrator performed=0 skipped=18`)                                                                      | fresh vs restart migrator blocks; 644 debug skip lines                            |
 | O3  | Exact version string reported by the API                         | **`11.5.0-pre`**                                                                                                                                                   | raw `/api/health` (200) + `/api/frontend/settings` (anon 401, authed `buildInfo`) |
 | O4  | Does the picker auto-resolve/display the panel-query datasource? | **YES**                                                                                                                                                            | RTL render of `PanelDataQueriesTab`; picker shows `testDs1`; PASS 2/2             |
@@ -3875,7 +3809,7 @@ in the repository (verified in the final `git status`).
 
 ### Named-item checklist
 
-- **O1 named items:** cleanup ✓, plugins.update.checker ✓, grafana.update.checker (startup + [INFERRED] 24 h) ✓, ngalert.scheduler (10 s) ✓, ngalert.sender.router / ngalert.multiorg.alertmanager / ngalert.notifier.alertmanager / secrets (60 s) ✓, zero-request proof ✓.
+- **O1 named items:** cleanup ✓, plugins.update.checker ✓, grafana.update.checker (startup + [INFERRED] 24 h) ✓, ngalert.scheduler (10 s) ✓, ngalert.multiorg.alertmanager / ngalert.sender.router / ngalert.notifier.alertmanager / secrets / ssosettings.service (60 s, five emitters) ✓, zero-request proof ✓.
 - **O2 named items:** `migrator` ✓, `resource-migrator` ✓, `Starting DB migrations` / `Executing migration` / `Skipping migration: Already executed` / `migrations completed` ✓, `performed=0` confirmation ✓.
 - **O3 named items:** `/api/health` ✓, `/api/frontend/settings` ✓, `version` ✓, `buildInfo.version` / `versionString` ✓, anonymous 401 ✓, non-canonical `9.2.0` ✓.
 - **O4 named items:** `PanelDataQueriesTab` ✓, `loadDataSource` ✓, `queryRunner.state.datasource` ✓, `DataSourcePicker` display ✓, `QueryGroup` `current: options.dataSource` ✓.
