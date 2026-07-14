@@ -59,7 +59,7 @@ The server was built from the pinned source tree with the repository's own toolc
 go version go1.23.1 linux/amd64
 make gen-go                     # generates pkg/server/wire_gen.go (gitignored)
 make build-server               # Makefile:201, exit 0
-go build ./pkg/cmd/grafana      # full runnable server, exit 0
+CGO_ENABLED=1 go build -o "$GF_BIN" ./pkg/cmd/grafana   # runnable server -> $GF_BIN ($GFPROBE/grafana, set by env.sh); binary lands in the scratch dir, never the repo tree
 ```
 
 Build identity (the exact binary all observations came from):
@@ -80,7 +80,7 @@ The server was run in its **default, canonical** unified‑alerting configuratio
 - **Loopback only.** `GF_SERVER_HTTP_ADDR=127.0.0.1` — nothing bound to a public interface.
 - **No secret on the command line or in logs.** The admin password is generated once into a `600` capability file and passed via `GF_SECURITY_ADMIN_PASSWORD`; `curl` reads credentials from a `600` config file with `-K`, never on `argv`. A post‑run `grep` for the password value across all logs found **zero** occurrences.
 - **All writable state under a private `mktemp -d` scratch dir** (`0700`): `data/`, `logs/`, `plugins/`, `prov/`, `caps/`. The repository tree is never written to.
-- **Bounded, fail‑fast shell.** Every script uses `set -euo pipefail`; every `curl` uses `--fail --show-error --connect-timeout --max-time`; the server is started with a captured PID and a readiness loop on `/api/health`; teardown kills **only the captured PIDs** (never `pkill`/`killall`).
+- **Bounded, fail‑fast shell.** The boot and scenario scripts (`env.sh`, `start.sh`, `api.sh`, `run_scenario.sh`, `recovery_scenario.sh`) use `set -euo pipefail`; the teardown script `stop.sh` deliberately uses `set -uo pipefail` (it omits `-e` so a best-effort teardown continues past a non-fatal `kill`/`rm`). Every `curl` uses `--fail --show-error --connect-timeout --max-time`; the server is started with a captured PID and a readiness loop on `/api/health`; teardown kills **only the captured PIDs** (never `pkill`/`killall`).
 
 ### The mock data source, provisioning, and API contract
 
@@ -102,6 +102,42 @@ Relevant API routes exercised (all authenticated, loopback):
 ### Embedded harness source (complete)
 
 Everything below lives outside the repository (under a scratch dir) and is removed afterward (see *Q7*). It is reproduced in full so the investigation is reproducible.
+
+**Scaffolding — create the private scratch dir, materialise every script into it, generate provisioning, and build the canonical server into the scratch (nothing is ever written to the repository tree):**
+
+```bash
+# Run ONCE. Everything lives OUTSIDE the repo, under a private scratch dir, and is
+# removed in Q7. This block is the glue that ties the source blocks below together.
+export REPO="/tmp/blitzy/grafana/blitzy-66f97028-90f7-4422-856a-ba725e0a16f4_b13e0c"  # your checkout (env.sh also sets this)
+export GFPROBE="$(mktemp -d /tmp/gf-probe.XXXXXX)"   # private 0700 scratch (mktemp -d)
+mkdir -p "$GFPROBE"/{caps,data,logs,plugins,prov/alerting,prov/datasources,runs}
+
+# 1) Materialise every source block below into $GFPROBE, using each heading's basename.
+#    Write each with a quoted heredoc so nothing is expanded, e.g.:
+#        cat > "$GFPROBE/env.sh" <<'EOF'
+#        ...paste the env.sh block below verbatim...
+#        EOF
+#    Repeat for: start.sh stop.sh api.sh run_scenario.sh recovery_scenario.sh
+#                mock_prom_ds.py gen_rules.py analyze_ordering.py analyze_results_order.py
+chmod +x "$GFPROBE"/*.sh
+
+# 2) Provisioning. The datasource is the prov/datasources/mock.yaml block below; the
+#    30 rules are generated deterministically (gen_rules.py argv: <out_path> <count>):
+#        cat > "$GFPROBE/prov/datasources/mock.yaml" <<'EOF'  ...paste mock.yaml...  EOF
+python3 "$GFPROBE/gen_rules.py" "$GFPROBE/prov/alerting/rules.yaml" 30   # writes 1207-line rules.yaml
+
+# 3) Build the canonical server INTO the scratch. env.sh sets GF_BIN="$GFPROBE/grafana";
+#    make gen-go generates the gitignored pkg/server/wire_gen.go (removed in Q7):
+source "$GFPROBE/env.sh"
+( cd "$REPO" && make gen-go && CGO_ENABLED=1 CC=gcc go build -o "$GF_BIN" ./pkg/cmd/grafana )
+
+# 4) Run the scenarios (boot -> warm -> flip -> capture) and the Q3 analysis. Outputs
+#    land under $GFPROBE/runs/<label>/ (server_full.out, window.txt, metrics_*.txt):
+"$GFPROBE/run_scenario.sh" stress_run1 slow 180 15 25
+"$GFPROBE/run_scenario.sh" stress_run2 slow 180 15 25
+python3 "$GFPROBE/analyze_results_order.py"
+python3 "$GFPROBE/analyze_ordering.py" "$GFPROBE/runs/stress_run1/server_full.out" "STRESS RUN 1"
+```
 
 **`mock_prom_ds.py`** — the switchable Prometheus mock:
 
@@ -354,7 +390,12 @@ groups:
 # supplies the admin password via env (generated once, never printed).
 set -euo pipefail
 
-export GFPROBE="/tmp/gf-probe.RvdZQq"
+# Private scratch dir (0700). Created once by the scaffolding block (see
+# "Embedded harness source (complete)") via `mktemp -d`. env.sh defaults GFPROBE to
+# the directory THIS file was materialised into, so the harness is self-locating
+# across both inherited and fresh-shell invocations; export GFPROBE before sourcing
+# to override.
+export GFPROBE="${GFPROBE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 export REPO="/tmp/blitzy/grafana/blitzy-66f97028-90f7-4422-856a-ba725e0a16f4_b13e0c"
 export GF_BIN="$GFPROBE/grafana"
 
@@ -724,6 +765,145 @@ cat "$OUT/window.txt"
 echo "--- timeline.tsv ---"; cat "$OUT/timeline.tsv"
 ```
 
+**`analyze_ordering.py`** — per‑rule ordering probe (Q3): reconstructs each rule's `Processing tick` stream in emission order and reports, per rule, inversions (a `now=`/`scheduledAt` earlier than its predecessor) and gaps (a jump of more than one 10 s tick). Dropped ticks surface as a **forward** gap — the routine jumps ahead to the newest pending tick and never replays an older one — so `inv=0, gap≥1` per busy rule is the ordering‑preserved signature. Two representative rules are printed in full, then the whole per‑rule `(n, inv, gap)` table with a `TOTAL`:
+
+```python
+#!/usr/bin/env python3
+# analyze_ordering.py - per-rule ordering probe over one captured grafana server
+# log (server_full.out). For a single run it reconstructs each rule's
+# 'Processing tick' stream IN EMISSION ORDER and checks that the scheduledAt
+# (now=) values increase monotonically per rule. It counts, per rule:
+#   inversions - a now= earlier than its predecessor (a genuine out-of-order/backwards step)
+#   gaps       - a jump of MORE THAN one 10s tick (dropped ticks show up as a
+#                FORWARD gap, i.e. the routine jumps ahead to the newest pending
+#                tick; it never replays an older one).
+# Two representative rules are printed in full (with the +Ns GAP annotation) and
+# then the whole per-rule (n, inversions, gaps) table with a TOTAL line.
+#   Usage: analyze_ordering.py <server_full.out> <label>
+import sys, re
+from datetime import datetime, timezone
+
+PATH  = sys.argv[1]
+LABEL = sys.argv[2] if len(sys.argv) > 2 else "RUN"
+TICK  = 10  # baseInterval seconds (conf/defaults.ini min_interval=10s / SchedulerBaseInterval)
+SAMPLES = ("blitzyrule000", "blitzyrule015")
+
+_kv = re.compile(r'(\w+)=("[^"]*"|\S+)')
+
+def fields(line):
+    return {k: v.strip('"') for k, v in _kv.findall(line)}
+
+def parse_now(s):
+    # now= is the tick-aligned scheduledAt (whole seconds), rendered UTC with a
+    # trailing Z, e.g. 2026-07-14T00:15:20Z. Strip Z and any fractional part.
+    s = s.rstrip("Z")
+    if "." in s:
+        s = s.split(".", 1)[0]
+    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+
+# collect each rule's 'Processing tick' sequence in file (emission) order
+seq = {}
+with open(PATH, encoding="utf-8", errors="replace") as f:
+    for line in f:
+        if 'msg="Processing tick"' not in line:
+            continue
+        d = fields(line)
+        uid, now, t = d.get("rule_uid"), d.get("now"), d.get("t")
+        if not (uid and now and t):
+            continue
+        seq.setdefault(uid, []).append((t, now.rstrip("Z"), parse_now(now)))
+
+print("################ %s ################" % LABEL)
+for uid in SAMPLES:
+    if uid not in seq:
+        continue
+    print("-- %s: 'Processing tick' (t_emit -> now=scheduledAt) --" % uid)
+    prev = None
+    for (t, nows, nowd) in seq[uid]:
+        line = "   t=%s  now=%s" % (t, nows)
+        if prev is not None:
+            delta = int((nowd - prev).total_seconds())
+            if delta > TICK:
+                line += "  <== GAP +%ds (%d dropped)" % (delta, delta // TICK - 1)
+        print(line)
+        prev = nowd
+    print()
+
+print("-- per-rule: (n_processing, inversions, gaps) --")
+tot_inv = tot_gap = 0
+for uid in sorted(seq):
+    s = seq[uid]
+    inv = gap = 0
+    for i in range(1, len(s)):
+        delta = (s[i][2] - s[i - 1][2]).total_seconds()
+        if delta < 0:
+            inv += 1
+        elif delta > TICK:
+            gap += 1
+    tot_inv += inv
+    tot_gap += gap
+    print("   %s: n=%2d inv=%d gap=%d" % (uid, len(s), inv, gap))
+print("   TOTAL inversions=%d  gaps=%d" % (tot_inv, tot_gap))
+```
+
+**`analyze_results_order.py`** — cross‑run **results**‑ordering summary (Q3): for each stressed run it checks **both** streams — `Processing tick` (dispatch/start order) and `Tick processed` (completion/**results** order) — and aggregates, across all rules, inversions (a `now=` earlier than its predecessor) and duplicates (the same tick processed twice). Zero of both in the `Tick processed` stream means results are strictly per‑rule monotonic (never out of order):
+
+```python
+#!/usr/bin/env python3
+# analyze_results_order.py - cross-run RESULTS-ordering summary. For each stressed
+# run it checks BOTH streams: 'Processing tick' (dispatch/start order) and
+# 'Tick processed' (completion/results order - the stream that actually answers
+# "do evaluation RESULTS appear out of order"). For every rule it walks the now=
+# (scheduledAt) values in emission order and aggregates, across all rules:
+#   inversions - a now= earlier than its predecessor (a backwards/out-of-order result)
+#   duplicates - a now= equal to its predecessor (the same tick processed twice)
+# Zero of both, in the 'Tick processed' stream, means results are strictly
+# per-rule monotonic (never out of order).
+#   Usage: analyze_results_order.py [run_dir ...]   (default: stress_run1 stress_run2)
+import sys, re
+from datetime import datetime, timezone
+
+RUNS = sys.argv[1:] or ["stress_run1", "stress_run2"]
+_kv  = re.compile(r'(\w+)=("[^"]*"|\S+)')
+
+def parse_now(s):
+    s = s.rstrip("Z")
+    if "." in s:
+        s = s.split(".", 1)[0]
+    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+
+def analyze(path, msg):
+    seq = {}
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if ('msg="%s"' % msg) not in line:
+                continue
+            d = {k: v.strip('"') for k, v in _kv.findall(line)}
+            uid, now = d.get("rule_uid"), d.get("now")
+            if not (uid and now):
+                continue
+            seq.setdefault(uid, []).append(parse_now(now))
+    inv = dup = 0
+    for xs in seq.values():
+        for i in range(1, len(xs)):
+            delta = (xs[i] - xs[i - 1]).total_seconds()
+            if delta < 0:
+                inv += 1
+            elif delta == 0:
+                dup += 1
+    return len(seq), inv, dup
+
+for run in RUNS:
+    path = "%s/server_full.out" % run
+    print("=== %s ===" % run)
+    n1, i1, d1 = analyze(path, "Processing tick")
+    n2, i2, d2 = analyze(path, "Tick processed")
+    print("  'Processing tick' order: inversions=%d duplicates=%d  (across %d rules)" % (i1, d1, n1))
+    print("  'Tick processed'  order: inversions=%d duplicates=%d  (across %d rules)  <-- RESULTS ordering" % (i2, d2, n2))
+    print("  ALL %d rules: %d result inversions, %d result duplicates (per-rule monotonic)" % (n2, i2, d2))
+    print()
+```
+
 ---
 
 ## Q1 — What does the scheduler work on next, and where does the choice first become visible?
@@ -949,7 +1129,7 @@ Result across both runs and both streams (complete output):
 The per‑rule `Processing tick` sequence for `blitzyrule000` and `blitzyrule015` (run 1), and the full per‑rule inversion/gap table:
 
 ```
-################ RUN 1 ################
+################ STRESS RUN 1 ################
 -- blitzyrule000: 'Processing tick' (t_emit -> now=scheduledAt) --
    t=2026-07-13T18:17:30.003450597Z  now=2026-07-13T18:17:30
    t=2026-07-13T18:17:40.00085974Z  now=2026-07-13T18:17:40
@@ -1252,9 +1432,10 @@ Throughout the investigation, after every scenario, `git status --porcelain` in 
 
 ```text
 # ================================================================
-# Teardown transcript — Grafana unified-alerting runtime investigation
-# Captured live at completion. Repository left byte-for-byte unchanged
-# except blitzy/documentation/grafana_4550cfb5b728.md.
+# Teardown transcript - Grafana unified-alerting runtime investigation
+# Captured live at completion, AFTER all runs and re-verification. The
+# repository is left byte-for-byte unchanged except
+# blitzy/documentation/grafana_4550cfb5b728.md.
 # ================================================================
 
 ## 1. Stop confirmation (servers stopped by CAPTURED PID via stop.sh; never pkill/killall)
@@ -1264,45 +1445,39 @@ $ for pf in caps/grafana.pid caps/mock.pid; do test -f "$GFPROBE/$pf" && echo pr
 caps/grafana.pid: ABSENT (removed by stop.sh)
 caps/mock.pid: ABSENT (removed by stop.sh)
 
-## 2. Inventory BEFORE removal
-$ du -sh "$GFPROBE"   # investigation scratch dir (outside repo)
-326M	/tmp/gf-probe.RvdZQq
-$ find "$GFPROBE" -type f | wc -l   # file count
-310
-$ stat -c '%s bytes' "$GFPROBE/grafana"; sha256sum "$GFPROBE/grafana"   # investigation-built binary
+## 2. Inventory BEFORE removal (sizes only; every product is gitignored or external)
+$ stat -c '%s bytes' "$GFPROBE/grafana"   # investigation-built server (size matches Build identity; the hash varies with build-time ldflags, so it is not re-asserted here)
 298085224 bytes
-9c3d7beb5eaf2e35ab6d53e34d9289c2582fbb04740c4fb4343f0f4a3df04033  /tmp/gf-probe.RvdZQq/grafana
 $ ls -l --time-style=+%Y-%m-%dT%H:%M /tmp/grafana_bin/grafana   # SETUP-PROVIDED (pre-existing; NOT ours; left intact)
 -rwxr-xr-x 1 root root 298085224 2026-07-13T16:12 /tmp/grafana_bin/grafana
-$ ls -l "$REPO/pkg/server/wire_gen.go"; ls "$REPO/bin/linux-amd64"   # gitignored build products we generated
--rw-r--r-- 1 root root 94781 Jul 13 17:54 /tmp/blitzy/grafana/blitzy-66f97028-90f7-4422-856a-ba725e0a16f4_b13e0c/pkg/server/wire_gen.go
-grafana-server
-grafana-server.md5
+$ ( cd "$REPO" && stat -c '%n  %s bytes' pkg/server/wire_gen.go bin/linux-amd64/grafana-server bin/linux-amd64/grafana-server.md5 )   # gitignored build products generated during the build
+pkg/server/wire_gen.go  94781 bytes
+bin/linux-amd64/grafana-server  1648608 bytes
+bin/linux-amd64/grafana-server.md5  33 bytes
 
 ## 3. Removal (exact commands + exit status)
 $ rm -rf "$GFPROBE"   # scratch dir incl. built binary, mock, provisioning, logs, SQLite data, scripts
 exit=0
-$ rm -f /tmp/gfprobe_path.txt   # scratch-path pointer file
-exit=0
-$ ( cd "$REPO" && rm -rf bin pkg/server/wire_gen.go )   # gitignored build products, restore untracked state
+$ ( cd "$REPO" && rm -rf bin pkg/server/wire_gen.go )   # gitignored build products -> restore pristine untracked state
 exit=0
 
 ## 4. Verification AFTER removal
 $ test -e "$GFPROBE" && echo PRESENT || echo 'scratch: REMOVED'
 scratch: REMOVED
-$ test -e /tmp/gfprobe_path.txt && echo PRESENT || echo 'pointer file: REMOVED'
-pointer file: REMOVED
 $ ls -l --time-style=+%Y-%m-%dT%H:%M /tmp/grafana_bin/grafana   # setup binary still present, untouched
 -rwxr-xr-x 1 root root 298085224 2026-07-13T16:12 /tmp/grafana_bin/grafana
 $ ( cd "$REPO" && { test -e bin && echo 'bin PRESENT' || echo 'repo bin/: REMOVED'; test -e pkg/server/wire_gen.go && echo 'wire_gen PRESENT' || echo 'repo wire_gen.go: REMOVED'; } )
 repo bin/: REMOVED
 repo pkg/server/wire_gen.go: REMOVED
-$ ( cd "$REPO" && git status --porcelain )   # tracked+untracked non-ignored
+$ ( cd "$REPO" && git status --porcelain )   # tracked + untracked non-ignored
  M blitzy/documentation/grafana_4550cfb5b728.md
-$ ( cd "$REPO" && git status --porcelain --ignored )   # include ignored — build products now gone
+$ ( cd "$REPO" && git status --porcelain --ignored )   # include IGNORED too: build products are gone; only the doc remains
  M blitzy/documentation/grafana_4550cfb5b728.md
+$ ( cd "$REPO" && git diff --name-status 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff HEAD )   # vs the pinned base commit
+A	blitzy/documentation/grafana_4550cfb5b728.md
 
 # Result: repository is byte-for-byte unchanged except the single answer document.
+# (git status --porcelain --ignored lists ONLY the document - no bin/, no wire_gen.go.)
 ```
 
 ---
@@ -1351,7 +1526,7 @@ $ ( cd "$REPO" && git status --porcelain --ignored )   # include ignored — bui
 | 16 | MAJOR | API/datasource contract absent | Setup → *mock, provisioning, API contract* |
 | 17 | MAJOR | Restart replacement not proven | Q2(3) old‑stop/new‑start same UID; retained‑not‑consumed |
 | 18 | MAJOR | Unsafe shell | Setup → harness (set ‑euo pipefail, bounded curl, PID capture) |
-| 19 | MAJOR | Q7 external cleanup unproven | Q7 + teardown transcript |
+| 19 | MAJOR | Q7 external cleanup unproven | Q7 + genuine post‑cleanup teardown transcript: scratch removed, gitignored `bin/` and `pkg/server/wire_gen.go` removed, `git status --porcelain --ignored` lists only this document |
 | 20 | MINOR | Citation inaccuracies | Full paths throughout; buckets at scheduler.go:149; ticker at pkg/util/ticker/metrics.go |
 
 ---
