@@ -14,21 +14,46 @@ rather than inference.
   **v11.5.0-pre** build. This is the commit whose source answers Q1–Q4.
 - **Documentation commit vs. investigated commit.** This answer file is added as a commit
   *on top of* the investigated commit (which is its parent). At the time of the runs
-  captured below, the branch tip was the documentation commit `033d0bdb14`. Because that
+  captured below, the branch tip was the documentation commit `2704e90389`. Because that
   commit adds **only** this one Markdown file — the source tree is strictly read-only
   (§1.5) — every Q1–Q4 code path is byte-identical to the investigated commit
   `4550cfb5b7`. So "investigated commit" (`4550cfb5b7…`) and "current `git HEAD`"
-  (`033d0bdb14`, the doc commit) are deliberately distinguished throughout.
+  (`2704e90389`, the doc commit) are deliberately distinguished throughout.
 - **Observed version banner (this canonical build):**
-  `Version 11.5.0-pre (commit: 033d0bdb14, branch: blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523)`.
+  `Version 11.5.0-pre (commit: 2704e90389, branch: blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523)`.
   The `commit` field is the **short `git HEAD` at build time** (§1.2), i.e. the doc commit
-  `033d0bdb14` here — *not* the investigated commit; `version` (`11.5.0-pre`) is
+  `2704e90389` here — *not* the investigated commit; `version` (`11.5.0-pre`) is
   VCS-independent (it comes from `package.json`).
-- **Runtime image (canonical environment):**
+- **Canonical build/run environment (observed, not assumed).** The reference environment
+  is the pinned container image
   `ghcr.io/scaleapi/swe-atlas:swe_atlas_QnA_grafana_grafana_1.0`
-  (tag `grafana__grafana__4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`).
-- **Toolchain (observed):** Go `1.23.1`, Node `v22.23.1`, Yarn `4.5.3`, gcc `15.2`
-  (`CGO_ENABLED=1` is required for the `mattn/go-sqlite3` driver), GNU Make `4.4.1`.
+  (tag `grafana__grafana__4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`). Every build/run/observe
+  step below was executed inside a **provisioned instance** of that environment — a Linux
+  container in which the Go / Node / Yarn / gcc / make toolchain is installed **natively**;
+  it is deliberately *not* the raw, unprovisioned base image (which ships without the Go
+  toolchain). Rather than assert the toolchain, it was captured directly with the commands
+  shown, so the values are grounded observations:
+
+  ```bash
+  $ cat /etc/os-release | head -2
+  PRETTY_NAME="Ubuntu 25.10"
+  NAME="Ubuntu"
+  $ go version
+  go version go1.23.1 linux/amd64
+  $ node -v ; npm -v ; yarn -v
+  v22.23.1
+  11.1.0
+  4.5.3
+  $ gcc --version | head -1 ; make --version | head -1
+  gcc (Ubuntu 15.2.0-4ubuntu4) 15.2.0
+  GNU Make 4.4.1
+  $ id ubuntu
+  uid=1000(ubuntu) gid=1000(ubuntu) groups=1000(ubuntu),4(adm),20(dialout),24(cdrom),25(floppy),27(sudo),29(audio),30(dip),44(video),46(plugdev)
+  ```
+
+  Go `1.23.1` matches `go.mod` (`go 1.23.1`); `CGO_ENABLED=1` is required by the
+  `mattn/go-sqlite3` driver. A dedicated **non-root `ubuntu` account (uid 1000)** exists and
+  is the OS user under which the server is launched (§1.3).
 - **Methodology:** run first, then write. The server was **built** (§1.1) and **launched
   as a non-root OS user** (`ubuntu`, uid 1000) via its real entry point (`grafana server`),
   then probed with `curl` and a headless browser; the answers below quote the exact
@@ -87,38 +112,53 @@ driver. Command and **complete** output:
 
 ```bash
 $ CGO_ENABLED=1 go run build.go build-backend
-Version: 11.5.0, Linux Version: 11.5.0, Package Iteration: 1783964456pre
+Version: 11.5.0, Linux Version: 11.5.0, Package Iteration: 1784002619pre
 rm -r dist
 rm -r tmp
 rm -r /root/go/pkg/linux_amd64/github.com/grafana
 building grafana ./pkg/cmd/grafana
 rm -r ./bin/linux-amd64/grafana
 rm -r ./bin/linux-amd64/grafana.md5
-go build -ldflags -w -X main.version=11.5.0-pre -X main.commit=033d0bdb14 -X main.buildstamp=1783962438 -X main.buildBranch=blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523 -o ./bin/linux-amd64/grafana ./pkg/cmd/grafana
+go build -ldflags -w -X main.version=11.5.0-pre -X main.commit=2704e90389 -X main.buildstamp=1783986307 -X main.buildBranch=blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523 -o ./bin/linux-amd64/grafana ./pkg/cmd/grafana
 go version
 go version go1.23.1 linux/amd64
 Targeting linux/amd64
 ```
 
 This produced `./bin/linux-amd64/grafana` (a 246 MB binary). Note the emitted
-`-X main.commit=033d0bdb14` — the commit is the short **git HEAD at build time** (§1.2).
+`-X main.commit=2704e90389` — the commit is the short **git HEAD at build time** (§1.2).
 
-**Frontend assets** (served by the running instance). Command and its **tail** (the full
-log lists all 658 emitted assets; shown here is `tail -4`, which carries the compiler
-result and the Nx summary):
+**Frontend assets** (served by the running instance). The build command and its **tail**
+(`tail -4`, carrying the Nx summary), captured on an already-warm tree so Nx serves the
+results from cache:
 
 ```bash
 $ NODE_OPTIONS=--max_old_space_size=8000 yarn build 2>&1 | tail -4
-webpack 5.95.0 compiled with 2 warnings in 15165 ms
 
  NX   Successfully ran target build for project grafana and 12 tasks it depends on
 
 Nx read the output from the cache instead of running the command for 11 out of 13 tasks.
 ```
 
-The only warnings are two benign webpack *asset-size* advisories (bundle exceeds the
-244 KiB recommendation); the build succeeds (exit `0`) and emits `public/build/`
-(658 files, ~156 MB, including the entry chunk `app.<hash>.js`). `yarn build` resolves to
+The build succeeds (exit `0`); on a **cold** build webpack additionally prints
+`webpack 5.95.0 compiled with 2 warnings in …ms`, the two warnings being benign
+*asset-size* advisories (a bundle exceeds the 244 KiB recommendation). The emitted asset
+count is measured **directly from the output tree** (robust to Nx cache state) rather than
+scraped from the build log:
+
+```bash
+$ find public/build -type f | wc -l               # total emitted assets
+676
+$ find public/build -maxdepth 1 -type f | wc -l   # top-level
+657
+$ find public/build -mindepth 2 -type f | wc -l   # nested (e.g. source-map subdirs)
+19
+$ du -sh public/build | cut -f1
+156M
+```
+
+So `public/build/` holds **676 files** (657 top-level + 19 nested), ~156 MB, including the
+entry chunk `app.<hash>.js`. `yarn build` resolves to
 `NODE_ENV=production nx exec --verbose -- webpack --config scripts/webpack/webpack.prod.js
 --progress` (`package.json`), equivalent to `go run build.go build-frontend`
 (`pkg/build/cmd.go:114-115`).
@@ -133,7 +173,7 @@ Command and **complete** output:
 
 ```bash
 $ ./bin/linux-amd64/grafana server -v
-Version 11.5.0-pre (commit: 033d0bdb14, branch: blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523)
+Version 11.5.0-pre (commit: 2704e90389, branch: blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523)
 ```
 
 The banner string is `Version %s (commit: %s, branch: %s, enterprise-commit: %s)` /
@@ -149,10 +189,10 @@ passed into `commands.ServerCommand(...)` at `pkg/cmd/grafana/main.go:47`.
   (`pkg/cmd/grafana/main.go:17`), but the build **overrides** it via `-X
   main.version=11.5.0-pre` (see the `go build` line in §1.1), sourced from
   `package.json` `"version"`. It is therefore VCS-independent.
-- **`commit` = `033d0bdb14`** — the build stamps `-X main.commit=$(getGitSha())`, and
+- **`commit` = `2704e90389`** — the build stamps `-X main.commit=$(getGitSha())`, and
   `getGitSha()` is literally `git rev-parse --short HEAD` (`pkg/build/git.go:11-12`,
   invoked at `pkg/build/cmd.go:228`). So `commit` is **the short `git HEAD` at build
-  time** — here `033d0bdb14`, the documentation commit — **not** the investigated commit
+  time** — here `2704e90389`, the documentation commit — **not** the investigated commit
   `4550cfb5b7`. (Rebuilding after a further doc commit would stamp that newer HEAD.)
 - **`branch` = `blitzy-29dfbca5-…`** — `getGitBranch()` = `git rev-parse --abbrev-ref
   HEAD` (`pkg/build/git.go:4`, invoked at `pkg/build/cmd.go:241`).
@@ -161,7 +201,7 @@ The same values are echoed in the boot log's first structured line (from canonic
 §1.4):
 
 ```
-logger=settings t=2026-07-13T17:45:34.94371302Z level=info msg="Starting Grafana" version=11.5.0-pre commit=033d0bdb14 branch=blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523 compiled=2026-07-13T17:07:18Z
+logger=settings t=2026-07-14T04:34:48.330078561Z level=info msg="Starting Grafana" version=11.5.0-pre commit=2704e90389 branch=blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523 compiled=2026-07-13T23:45:07Z
 ```
 
 ### 1.3 Run (default, canonical configuration, non-root)
@@ -172,12 +212,18 @@ user** (`ubuntu`, uid 1000) via `runuser`. The default HTTP port `3000` was kept
 unchanged (so the observed listen address is the true canonical value). The **only**
 deviation from a bare `--homepath .` run is that `paths.data`/`paths.logs`/`paths.plugins`
 were redirected to a private temporary directory *outside* the repository — a read-only
-scope measure (§1.5) that has **no effect** on any of the four answers (the listen
-address, health semantics, and background-service set are all independent of the data
-directory's location). The exact invocation:
+scope measure (§1.5). This redirection has **no effect** on any of the four answers (the
+listen address, health semantics, and background-service *set* are all independent of the
+data directory's location); its one observable consequence is that the redirected
+`plugins` dir must be **pre-created empty** for a 0-error boot — exactly the clean-boot
+condition analysed in §5.2. The exact invocation:
 
 ```bash
-# D = a private mktemp -d instance dir owned by ubuntu; HOMEPATH = repo root
+$ HOMEPATH="$PWD"                             # repo root (contains bin/, conf/, public/)
+$ D="$(mktemp -d /tmp/gf_canonical.XXXXXX)"   # private instance dir, OUTSIDE the repo
+$ mkdir -p "$D"/{data,logs,plugins}           # pre-create the redirected dirs; the *empty*
+                                              # plugins dir is what makes the boot 0-error (§5.2)
+$ chown -R ubuntu:ubuntu "$D"
 $ runuser -u ubuntu -- env HOME="$D" "$HOMEPATH/bin/linux-amd64/grafana" server \
     --homepath "$HOMEPATH" \
     cfg:paths.data="$D/data" cfg:paths.logs="$D/logs" cfg:paths.plugins="$D/plugins" \
@@ -188,7 +234,7 @@ $ PID=$!    # exact PID captured for a bounded readiness poll and an exact-PID s
 The boot log confirms the config source is the default file (canonical run A):
 
 ```
-logger=settings t=2026-07-13T17:45:34.944062908Z level=info msg="Config loaded from" file=/tmp/blitzy/grafana/blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523_509fea/conf/defaults.ini
+logger=settings t=2026-07-14T04:34:48.330380593Z level=info msg="Config loaded from" file=/tmp/blitzy/grafana/blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523_509fea/conf/defaults.ini
 ```
 
 Because the process runs **non-root**, the `"Grafana server is running with elevated
@@ -205,18 +251,18 @@ values were stable:
 
 | Metric | Run A | Run B | Stable? |
 |---|---|---|---|
-| Boot → `/api/health` reachable (wall clock) | `2.56 s` | `2.05 s` | consistent (< 3 s) |
-| `"Starting Grafana"` → `"HTTP Server Listen"` (log timestamps) | `2.067 s` | `1.715 s` | consistent |
+| Boot → `/api/health` reachable (wall clock) | `1.868 s` | `1.868 s` | consistent (< 3 s) |
+| `"Starting Grafana"` → `"HTTP Server Listen"` (log timestamps) | `1.720 s` | `1.730 s` | consistent |
 | Q1 listen fields (`address protocol subUrl socket`) | `[::]:3000 http (empty) (empty)` | `[::]:3000 http (empty) (empty)` | **identical** |
 | `level=debug` lines at default `info` level | `0` | `0` | identical |
-| Total boot log lines | `1358` | `1359` | ±1 (ordering jitter) |
-| Version banner | `11.5.0-pre / 033d0bdb14` | `11.5.0-pre / 033d0bdb14` | identical |
+| Total boot log lines | `1352` | `1352` | identical (±1 ordering jitter) |
+| Version banner | `11.5.0-pre / 2704e90389` | `11.5.0-pre / 2704e90389` | identical |
 
 The two edge/secondary runs used later — the Q3 `503` database-failure instance
 (§4.5, unique port) and the Q4 `level=debug` instance (§5.3) — are **not** canonical and
 are labelled as such where they appear. Their own timing/magnitude-sensitive values are
 nonetheless confirmed stable across ≥ 2 runs inside those sections; in particular the
-§5.3 `level=debug` counts (**≈ 1120** while the server is running, **≈ 1375** after a
+§5.3 `level=debug` counts (**≈ 1120** while the server is running, **≈ 1377** after a
 graceful shutdown) were each reproduced across multiple debug boots (see §5.3).
 
 ### 1.5 Read-only scope
@@ -237,7 +283,7 @@ manifest, or generated file is modified.
 | Frontend build | `yarn build` (≡ `build.go build-frontend`) | `pkg/build/cmd.go:114-115`; `package.json` |
 | Binary path | `./bin/linux-amd64/grafana` | `pkg/build/cmd.go:155-170`; build output |
 | Version | `11.5.0-pre` | banner; `package.json`; override `-X main.version` |
-| Commit (= short `git HEAD`) | `033d0bdb14` (doc commit) | banner; `pkg/build/git.go:11-12` |
+| Commit (= short `git HEAD`) | `2704e90389` (doc commit) | banner; `pkg/build/git.go:11-12` |
 | Investigated source commit | `4550cfb5b72886…` | doc-commit parent (read-only source) |
 | Branch | `blitzy-29dfbca5-…` | banner; `pkg/build/git.go:4` |
 | Config source | `conf/defaults.ini` (no `custom.ini`, no `GF_*`) | boot log "Config loaded from" |
@@ -278,10 +324,10 @@ run's private instance directory:
 ```bash
 # Run A
 $ grep -F "HTTP Server Listen" "$D_runA/boot.log"
-logger=http.server t=2026-07-13T17:45:37.010576308Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=
+logger=http.server t=2026-07-14T05:43:56.870681903Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=
 # Run B
 $ grep -F "HTTP Server Listen" "$D_runB/boot.log"
-logger=http.server t=2026-07-13T17:45:58.195013002Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=
+logger=http.server t=2026-07-14T05:44:01.861733826Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=
 ```
 
 Stripped of the per-run `logger=`/`t=` prefix, the two payloads are **byte-identical**
@@ -378,13 +424,19 @@ evaluate_script { function: () => window.grafanaBootData.settings &&
                     ({ ldapEnabled: window.grafanaBootData.settings.ldapEnabled,
                        authProxyEnabled: window.grafanaBootData.settings.authProxyEnabled,
                        disableLoginForm: window.grafanaBootData.settings.disableLoginForm }) }
-take_snapshot                                     # locate username/password/Log in uids
-fill  { uid: <username textbox>, value: "admin" }
-fill  { uid: <password textbox>, value: "admin" }
-click { uid: <"Log in" button> }
+take_snapshot                                     # locate elements by accessible name
+fill  { uid: <textbox "Email or username">, value: "admin" }
+fill  { uid: <textbox "Password">,          value: "admin" }
+click { uid: <button "Log in"> }
 wait_for { text: ["Update your password"] }
 take_snapshot                                     # capture the change-password a11y tree
 ```
+
+(The `uid` values are session-specific — in this run the login form exposed
+`textbox "Email or username"` = `uid=1_6`, `textbox "Password"` = `uid=1_8`, and
+`button "Log in"` = `uid=1_10` — so the elements are addressed here by their **stable
+accessible names** rather than the volatile uids. The login form snapshot also carried the
+footer link `Grafana v11.5.0-pre (2704e90389)`, confirming the canonical build under test.)
 
 The baseline `evaluate_script` returned (default run — both auth modifiers off):
 
@@ -438,7 +490,7 @@ Clicking **Skip** proceeded straight into Grafana **without changing the passwor
 browser navigated to the authenticated home:
 
 ```text
-click { uid: <"Skip" button> }
+click { uid: <button "Skip"> }
 # → URL after click:
 http://localhost:3000/?orgId=1&from=now-6h&to=now&timezone=browser
 ```
@@ -452,7 +504,10 @@ re-displayed the **"Update your password"** interstitial (Skip button present ag
 ```text
 navigate_page { type: "url", url: "http://localhost:3000/logout" }
 navigate_page { type: "url", url: "http://localhost:3000/login" }
-fill …admin / admin…; click "Log in"
+take_snapshot
+fill  { uid: <textbox "Email or username">, value: "admin" }
+fill  { uid: <textbox "Password">,          value: "admin" }
+click { uid: <button "Log in"> }
 wait_for { text: ["Update your password"] }      # ← re-appeared
 ```
 
@@ -481,15 +536,44 @@ material into the record — only method/path/status are needed to prove the cal
 with the cookie jar written to a temp file (never printed) and all `Set-Cookie` **values
 redacted**:
 
+The complete, self-contained harness — it launches an isolated non-root instance, defines
+the cookie jar and a random throwaway password (held only in a `0600` temp file, never
+echoed), then runs the two calls:
+
 ```bash
-# Secrets held only in shell variables / temp files, never echoed:
-#   CJ="$D/cookies.txt"                                  # cookie jar (temp file)
-#   NEWPASS="$(…random…)"                                # throwaway, never printed
-$ curl -sS -D "$CJ.hdr" -o login.body -c "$CJ" \
+# --- self-contained harness: isolated non-root instance on :3021 (default config) ---
+REPO=/tmp/blitzy/grafana/blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523_509fea
+D=$(mktemp -d /tmp/gfqa_run.XXXX)
+mkdir -p "$D"/{data,logs,plugins}; chown -R ubuntu:ubuntu "$D"     # empty plugins dir → clean boot
+runuser -u ubuntu -- env HOME="$D" "$REPO/bin/linux-amd64/grafana" server \
+    --homepath "$REPO" cfg:server.http_port=3021 \
+    cfg:paths.data="$D/data" cfg:paths.logs="$D/logs" cfg:paths.plugins="$D/plugins" \
+    > "$D/boot.log" 2>&1 &
+until curl -s http://localhost:3021/api/health >/dev/null 2>&1; do sleep 0.2; done
+
+CJ="$D/cookies.txt"                                        # cookie jar (temp file, never printed)
+# throwaway replacement password: random, stored only in a 0600 temp file, never echoed
+NEWPASS="Blitzy-$(head -c 12 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')Zz9"
+printf '%s' "$NEWPASS" > "$D/newpass.secret"; chmod 600 "$D/newpass.secret"
+
+# 1) POST /login with the default admin/admin (capture headers; redact Set-Cookie VALUES)
+curl -sS -D "$D/login.hdr" -o "$D/login.body" -c "$CJ" \
     -H 'Content-Type: application/json' \
     --data-binary '{"user":"admin","password":"admin"}' \
     http://localhost:3021/login
-# --- status line + headers (Set-Cookie VALUES redacted) ---
+sed -E 's/(Set-Cookie: [^=]+=)[^;]*/\1<redacted>/' "$D/login.hdr"    # print redacted headers
+cat "$D/login.body"; echo
+
+# 2) PUT /api/user/password (old=admin, new+confirmNew=<throwaway>, cookie from the jar)
+curl -sS -X PUT -H 'Content-Type: application/json' -b "$CJ" \
+    --data-binary "{\"oldPassword\":\"admin\",\"newPassword\":\"$NEWPASS\",\"confirmNew\":\"$NEWPASS\"}" \
+    http://localhost:3021/api/user/password; echo
+```
+
+Actual, unedited output (login status line + headers with `Set-Cookie` **values** redacted,
+then the two response bodies):
+
+```text
 HTTP/1.1 200 OK
 Cache-Control: no-store
 Content-Type: application/json
@@ -498,14 +582,9 @@ Set-Cookie: grafana_session_expiry=<redacted>; Path=/; Max-Age=2592000; SameSite
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Mon, 13 Jul 2026 18:25:09 GMT
+Date: Tue, 14 Jul 2026 05:22:48 GMT
 Content-Length: 41
-# --- body ---
 {"message":"Logged in","redirectUrl":"/"}
-
-$ curl -sS -X PUT -H 'Content-Type: application/json' -b "$CJ" \
-    --data-binary "{\"oldPassword\":\"admin\",\"newPassword\":\"$NEWPASS\",\"confirmNew\":\"$NEWPASS\"}" \
-    http://localhost:3021/api/user/password
 {"message":"User password changed"}
 ```
 
@@ -514,40 +593,111 @@ The body `{"message":"User password changed"}` is exactly the envelope produced 
 
 ### 3.5 Before / after — proof the new hash is finalized
 
-Captured in a single session on a dedicated isolated instance (port 3022) so the throwaway
-password stays in one shell scope and is never printed:
+Continuing in the **same shell session** as §3.4 (same `$D`, `$CJ`, `$NEWPASS`, and the
+isolated instance on port 3021, whose PID is `$PID`), the credential transition and the
+underlying database row were both captured. First, the **HTTP-level proof** — the old
+credential is accepted before the change and rejected after, while the new one is accepted:
 
 ```bash
 # [BEFORE] OLD admin/admin authenticates
-$ curl -sS -w '-> HTTP %{http_code}\n' -c "$CJ" -H 'Content-Type: application/json' \
-    --data-binary '{"user":"admin","password":"admin"}' http://localhost:3022/login
+curl -sS -w '-> HTTP %{http_code}\n' -c "$CJ" -H 'Content-Type: application/json' \
+    --data-binary '{"user":"admin","password":"admin"}' http://localhost:3021/login
+# [CHANGE] PUT /api/user/password (old=admin, new+confirmNew=<throwaway>)
+curl -sS -w '-> HTTP %{http_code}\n' -X PUT -H 'Content-Type: application/json' -b "$CJ" \
+    --data-binary "{\"oldPassword\":\"admin\",\"newPassword\":\"$NEWPASS\",\"confirmNew\":\"$NEWPASS\"}" \
+    http://localhost:3021/api/user/password
+# [AFTER] OLD admin/admin now REJECTED
+curl -sS -w '-> HTTP %{http_code}\n' -H 'Content-Type: application/json' \
+    --data-binary '{"user":"admin","password":"admin"}' http://localhost:3021/login
+# [AFTER] NEW password ACCEPTED
+curl -sS -w '-> HTTP %{http_code}\n' -H 'Content-Type: application/json' \
+    --data-binary "{\"user\":\"admin\",\"password\":\"$NEWPASS\"}" http://localhost:3021/login
+```
+
+Actual, unedited output:
+
+```text
 {"message":"Logged in","redirectUrl":"/"}
 -> HTTP 200
-
-# [CHANGE] PUT /api/user/password (old=admin, new=<throwaway>)
-$ curl -sS -w '-> HTTP %{http_code}\n' -X PUT -H 'Content-Type: application/json' -b "$CJ" \
-    --data-binary "{\"oldPassword\":\"admin\",\"newPassword\":\"$NEWPASS\",\"confirmNew\":\"$NEWPASS\"}" \
-    http://localhost:3022/api/user/password
 {"message":"User password changed"}
 -> HTTP 200
-
-# [AFTER] OLD admin/admin now REJECTED
-$ curl -sS -w '-> HTTP %{http_code}\n' -H 'Content-Type: application/json' \
-    --data-binary '{"user":"admin","password":"admin"}' http://localhost:3022/login
 {"statusCode":401,"messageId":"password-auth.failed","message":"Invalid username or password"}
 -> HTTP 401
-
-# [AFTER] NEW password ACCEPTED
-$ curl -sS -w '-> HTTP %{http_code}\n' -H 'Content-Type: application/json' \
-    --data-binary "{\"user\":\"admin\",\"password\":\"$NEWPASS\"}" http://localhost:3022/login
 {"message":"Logged in","redirectUrl":"/"}
 -> HTTP 200
 ```
 
-The old credential flips from `200` to `401 password-auth.failed` and the new one now
-returns `200`, confirming the finalized state is the **persisted new password hash**
-written by `Service.Update` (`pkg/services/user/userimpl/user.go:265` hash, `:290`
-persist).
+Second, the **database-level proof**. The admin user row in `data/grafana.db` was read
+(read-only) before and after the change with Python's `sqlite3` module (the `sqlite3` CLI
+is not installed in the image). Only **SHA-256 digests truncated to 16 hex chars** of the
+`password` and `salt` columns are shown — never the raw hash or salt:
+
+```bash
+dbdump(){ python3 - "$D/data/grafana.db" "$1" <<'PY'
+import sqlite3,sys,hashlib
+db,tag=sys.argv[1],sys.argv[2]
+c=sqlite3.connect(f"file:{db}?mode=ro",uri=True);cur=c.cursor()
+idv,login,email,ver,pw,salt,upd=cur.execute(
+  "SELECT id,login,email,version,password,salt,updated FROM user WHERE login='admin'").fetchone()
+h=lambda x: hashlib.sha256(x.encode()).hexdigest()[:16]
+n=cur.execute('SELECT count(*) FROM user').fetchone()[0]
+print(f"[{tag}] id={idv} login={login} email={email} version={ver} updated={upd} user_row_count={n}")
+print(f"[{tag}] password_sha256[:16]={h(pw)}  salt_sha256[:16]={h(salt)}")
+PY
+}
+dbdump BEFORE-DB       # before the PUT
+dbdump AFTER-DB        # after the PUT
+```
+
+Actual, unedited output:
+
+```text
+[BEFORE-DB] id=1 login=admin email=admin@localhost version=0 updated=2026-07-14 05:22:46 user_row_count=1
+[BEFORE-DB] password_sha256[:16]=78207f4ee8bae716  salt_sha256[:16]=8aad83eccc13f74a
+[AFTER-DB] id=1 login=admin email=admin@localhost version=0 updated=2026-07-14 05:22:48 user_row_count=1
+[AFTER-DB] password_sha256[:16]=54a0c00037041be2  salt_sha256[:16]=8aad83eccc13f74a
+```
+
+Reading the row directly confirms exactly what `Service.Update` does:
+
+- **`password` digest changed** (`78207f4ee8bae716` → `54a0c00037041be2`) — the stored hash
+  was replaced, matching `cmd.Password = &hashed` (`userimpl/user.go:269`) then
+  `s.store.Update(ctx, cmd)` (`:290`).
+- **`salt` digest unchanged** (`8aad83eccc13f74a` → `8aad83eccc13f74a`) — the **existing**
+  salt was reused, matching `cmd.Password.Hash(usr.Salt)` (`:265`), which hashes with the
+  user's current salt rather than generating a new one.
+- **Identity preserved** — `id=1`, `login=admin`, `email=admin@localhost`, and
+  `user_row_count=1` are all unchanged; the row is updated in place, not replaced.
+- **`updated` advanced** (`05:22:46` → `05:22:48`) while the `version` column stayed `0` —
+  this path bumps the modification timestamp but not the user `version`.
+
+Third, **persistence across a process restart**. The instance was killed and relaunched on
+the **same data dir**, then the row and the credential checks were re-read:
+
+```bash
+# kill + relaunch on the SAME $D/data, then re-check
+kill "$PID"; until curl -s http://localhost:3021/api/health >/dev/null 2>&1; do sleep 0.2; done
+dbdump AFTER-RESTART-DB
+curl -sS -o /dev/null -w 'old admin/admin -> HTTP %{http_code}\n' -H 'Content-Type: application/json' \
+    --data-binary '{"user":"admin","password":"admin"}' http://localhost:3021/login
+curl -sS -o /dev/null -w 'new password    -> HTTP %{http_code}\n' -H 'Content-Type: application/json' \
+    --data-binary "{\"user\":\"admin\",\"password\":\"$NEWPASS\"}" http://localhost:3021/login
+```
+
+Actual, unedited output:
+
+```text
+[AFTER-RESTART-DB] id=1 login=admin email=admin@localhost version=0 updated=2026-07-14 05:22:48 user_row_count=1
+[AFTER-RESTART-DB] password_sha256[:16]=54a0c00037041be2  salt_sha256[:16]=8aad83eccc13f74a
+old admin/admin -> HTTP 401
+new password    -> HTTP 200
+```
+
+The post-restart `password` digest is **identical** to the post-change digest
+(`54a0c00037041be2`), the old credential is still rejected (`401`), and the new one is still
+accepted (`200`) — proving the finalized state is a **durably persisted password hash**,
+written by `Service.Update` (`pkg/services/user/userimpl/user.go:265` hash, `:290` persist)
+and surviving a full process restart.
 
 ### 3.6 Client-side trigger and the finalized backend state (`file:line`)
 
@@ -575,6 +725,25 @@ getBackendSrv().post<LoginDTO>('/login', formModel, { showErrorAlert: false })  
   `{ newPassword, confirmNew, oldPassword: 'admin' }` (`LoginCtrl.tsx:79-83`) and (non-reset
   branch) submits `getBackendSrv().put('/api/user/password', pw)` (`LoginCtrl.tsx:98-99`),
   calling `toGrafana()` on success (`LoginCtrl.tsx:100-101`).
+- **`confirmNew` is a client-only field, ignored by the backend.** The front end sends
+  three keys (`newPassword`, `confirmNew`, `oldPassword`), but the server bind target has
+  only two — no `confirmNew` (`pkg/services/user/model.go:270-273`):
+
+  ```go
+  type ChangeUserPasswordCommand struct {
+  	OldPassword Password `json:"oldPassword"`
+  	NewPassword Password `json:"newPassword"`
+  }
+  ```
+
+  So `web.Bind` deserializes only `oldPassword`/`newPassword` and silently discards
+  `confirmNew`; the new-vs-confirm match is enforced purely in the UI
+  (`ChangePassword.tsx` `handleSubmit(submit)`), not on the server. Confirmed at runtime: the
+  §3.4 `PUT` succeeds (`{"message":"User password changed"}`) with `confirmNew` present, and
+  a separate `PUT` with `confirmNew` **omitted entirely**
+  (`{"oldPassword":"admin","newPassword":"<throwaway>"}`) **equally returned**
+  `{"message":"User password changed"} -> HTTP 200` (new password then authenticated, old
+  rejected) — the backend never inspects `confirmNew`.
 - `public/app/core/components/Login/LoginPage.tsx:84` renders the view only when
   `isChangingPassword && !config.auth.passwordlessEnabled`, passing
   `skipPasswordChange` (which is `toGrafana`, `LoginCtrl.tsx:220`) as the Skip handler:
@@ -631,26 +800,64 @@ The trigger at `LoginCtrl.tsx:117` short-circuits to `toGrafana()` (no prompt) w
 of three conditions holds. All three were exercised through the real front end / entry
 point — none is merely inferred:
 
-1. **Non-default password** (`formModel.password !== 'admin'`). After the change in §3.5,
-   logging in through the browser with the new password navigated **straight to**
-   `http://localhost:3000/?orgId=1&…` — no change-password screen. The server's
-   `POST /login` response is byte-identical for default and non-default passwords
-   (`{"message":"Logged in","redirectUrl":"/"}`), confirming the differentiation is purely
-   client-side.
+1. **Non-default password** (`formModel.password !== 'admin'`). After the §3.5 change, the
+   browser was logged out and signed back in with the **new (non-default)** password. The
+   page navigated **straight to**
+   `http://localhost:3000/?orgId=1&from=now-6h&to=now&timezone=browser`; `evaluate_script`
+   on the landing returned
+   `{ "hasUpdatePasswordHeading": false, "hasDefaultPwWarning": false, "hasWelcomeHome": true }`
+   — no interstitial. The server's `POST /login` body is byte-identical for the default and
+   non-default passwords (`{"message":"Logged in","redirectUrl":"/"}`), confirming the
+   default-vs-non-default differentiation is purely client-side (the `formModel.password !==
+   'admin'` half of `LoginCtrl.tsx:117`).
 
-2. **Auth-proxy enabled** (`config.authProxyEnabled`). A dedicated instance was launched
-   with `cfg:auth.proxy.enabled=true` on port 3012; `evaluate_script` confirmed
-   `{ "authProxyEnabled": true, "ldapEnabled": false }`. Signing in with `admin` / `admin`
-   went **straight to the home page** — the interstitial was skipped despite the default
-   password. Config mapping: `frontendsettings.go:193-194` ← `[auth.proxy] enabled`
-   (`conf/defaults.ini:886`).
+2. **Auth-proxy enabled** (`config.authProxyEnabled`). A dedicated non-root instance was
+   launched with the auth-proxy modifier:
 
-3. **LDAP enabled** (`config.ldapEnabled`). A dedicated instance was launched with
-   `cfg:auth.ldap.enabled=true` on port 3013; `evaluate_script` confirmed
-   `{ "authProxyEnabled": false, "ldapEnabled": true }`. Signing in with `admin` / `admin`
-   went **straight to `http://localhost:3013/`** — again the interstitial was skipped.
-   Config mapping: `LDAPAuthEnabled` (`pkg/setting/setting.go:1361`) ← `[auth.ldap] enabled`
-   (`conf/defaults.ini:921`), surfaced to the front end at `frontendsettings.go:193-194`.
+   ```bash
+   runuser -u ubuntu -- env HOME="$D" ./bin/linux-amd64/grafana server --homepath . \
+       cfg:server.http_port=3042 cfg:auth.proxy.enabled=true \
+       cfg:paths.data="$D/data" cfg:paths.logs="$D/logs" cfg:paths.plugins="$D/plugins"
+   ```
+
+   The boot log confirmed the override (unedited):
+   `logger=settings level=info msg="Config overridden from command line" arg="auth.proxy.enabled=true"`.
+   The `window.grafanaBootData.settings` embedded in the `/login` HTML — the exact object the
+   front-end `config` reads — carried `ldapEnabled=false, authProxyEnabled=true`. Signing in
+   through the browser with `admin` / `admin` went **straight to**
+   `http://localhost:3042/?orgId=1&…`; `evaluate_script` returned
+   `{ "hasUpdatePasswordHeading": false, "hasDefaultPwWarning": false, "hasWelcomeHome": true }`
+   — the interstitial was skipped despite the default password. Config mapping:
+   `AuthProxyEnabled: hs.Cfg.AuthProxy.Enabled` (`pkg/api/frontendsettings.go:193`) ←
+   `[auth.proxy] enabled` (`conf/defaults.ini:887`; section header `:886`). (Note: these two
+   flags are exposed only in the page bootData, not in `/api/frontend/settings`.)
+
+3. **LDAP enabled** (`config.ldapEnabled`). A dedicated non-root instance was launched with
+   the LDAP modifier, pointing `config_file` at the repo's default `conf/ldap.toml`:
+
+   ```bash
+   runuser -u ubuntu -- env HOME="$D" ./bin/linux-amd64/grafana server --homepath . \
+       cfg:server.http_port=3041 cfg:auth.ldap.enabled=true \
+       cfg:auth.ldap.config_file="$PWD/conf/ldap.toml" \
+       cfg:paths.data="$D/data" cfg:paths.logs="$D/logs" cfg:paths.plugins="$D/plugins"
+   ```
+
+   The boot log confirmed both the override and that LDAP actually initialised (unedited):
+
+   ```text
+   logger=settings level=info msg="Config overridden from command line" arg="auth.ldap.enabled=true"
+   logger=ldap level=info msg="LDAP enabled, reading config file" file=<repo>/conf/ldap.toml
+   ```
+
+   The `/login` bootData carried `ldapEnabled=true, authProxyEnabled=false`. Signing in with
+   `admin` / `admin` navigated **straight to** `http://localhost:3041/?orgId=1&…` — the full
+   authenticated home rendered (left nav Home / Dashboards / Explore / Alerting / Connections
+   / Administration; "Welcome to Grafana" getting-started panel) with **no** "Update your
+   password" heading and **no** default-password Alert. Config mapping:
+   `LdapEnabled: hs.Cfg.LDAPAuthEnabled` (`pkg/api/frontendsettings.go:194`) ←
+   `cfg.LDAPAuthEnabled = ldapSec.Key("enabled").MustBool(false)`
+   (`pkg/setting/setting.go:1361`) ← `[auth.ldap] enabled` (`conf/defaults.ini:922`; section
+   header `:921`).
 
 ### 3.8 Official-documentation corroboration (secondary)
 
@@ -710,18 +917,18 @@ Content-Type: application/json; charset=UTF-8
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Mon, 13 Jul 2026 18:34:36 GMT
+Date: Tue, 14 Jul 2026 04:51:41 GMT
 Content-Length: 75
 
 {
   "database": "ok",
   "version": "11.5.0-pre",
-  "commit": "033d0bdb14"
+  "commit": "2704e90389"
 }
 ```
 
 The `commit` value is the **build-time git SHA** (`data.Commit = hs.Cfg.BuildCommit`,
-`pkg/api/http_server.go:721`); this binary was built at HEAD `033d0bdb14` (see §1.2), so
+`pkg/api/http_server.go:721`); this binary was built at HEAD `2704e90389` (see §1.2), so
 that is the value actually emitted — the investigated commit `4550cfb5b728` differs only by
 the addition of this answer document, so all Q3 source is byte-identical between them.
 
@@ -733,12 +940,24 @@ $ curl -sS http://localhost:3031/api/health | od -c
 0000000   {  \n           "   d   a   t   a   b   a   s   e   "   :
 0000020   "   o   k   "   ,  \n           "   v   e   r   s   i   o   n
 0000040   "   :       "   1   1   .   5   .   0   -   p   r   e   "   ,
-0000060  \n           "   c   o   m   m   i   t   "   :       "   0   3
-0000100   3   d   0   b   d   b   1   4   "  \n   }
+0000060  \n           "   c   o   m   m   i   t   "   :       "   2   7
+0000100   0   4   e   9   0   3   8   9   "  \n   }
 0000113
 ```
 
 (`0000113` octal = 75 decimal bytes, matching `Content-Length: 75`.)
+
+**Why the body is exactly 75 bytes (and when it would differ).** The body length is a
+direct function of the **`commit` string's length**: here `commit` is a **10-character**
+abbreviated SHA, because `getGitSha()` runs `git rev-parse --short HEAD`
+(`pkg/build/git.go:11-12`) and Git chose a 10-char abbreviation for this repository. Git
+sizes `--short` **dynamically** to stay unambiguous as the object count grows, so a
+checkout whose objects require an **11-character** abbreviation would emit a **76-byte**
+healthy body (and an **81-byte** failing body, §4.5) with **no code change** — the JSON
+shape, field order, and two-space indentation are identical; only the SHA substring is one
+byte longer. The byte counts reported throughout §4 are therefore exact **for the 10-char
+short SHA observed here** and scale 1:1 with the short-SHA length. (`version` = `11.5.0-pre`
+is fixed by `package.json` and does not vary with VCS state.)
 
 ### 4.3 The response struct and handler (`file:line`)
 
@@ -809,7 +1028,7 @@ Cache-Control: no-store
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Mon, 13 Jul 2026 18:34:44 GMT
+Date: Tue, 14 Jul 2026 04:52:28 GMT
 Content-Length: 2
 Content-Type: text/plain; charset=utf-8
 
@@ -830,7 +1049,7 @@ header is auto-detected by Go's `http` package (the handler does not set it).
 **Difference:** `/healthz` is a pure **liveness** check (is the web server up? — **no DB
 access**), whereas `/api/health` is a DB-aware **readiness** check.
 
-### 4.5 Observed output — failing 503 edge (reversible before / intermediate / after)
+### 4.5 Observed output — failing 503 edge & the 5-second cache (before → cached → expired → cached → recovered)
 
 The failing path was exercised through the **real** `apiHealthHandler → databaseHealthy →
 SELECT 1` code path on a **clearly-labelled secondary edge instance** (port 3032, private
@@ -839,11 +1058,31 @@ tuned so a broken DB file forces a fresh open on the next probe:
 `cfg:database.max_idle_conn=0 cfg:database.conn_max_lifetime=1`. (With the default
 `conn_max_lifetime = 14400` the original SQLite connection stays open and `SELECT 1` — a
 constant expression — never re-touches the file, so it cannot fail.) This is an
-intentional **edge configuration**, not the canonical primary run. The failure was induced
-**reversibly**: the DB file was moved aside and replaced with a *directory* so a reconnect
-cannot open it, then restored afterwards.
+intentional **edge configuration**, not the canonical primary run.
 
-**[BEFORE] — healthy (`curl -sS -i`):**
+Setup (self-contained; `$REPO` = repo root):
+
+```bash
+$ DE="$(mktemp -d /tmp/gf_q3edge.XXXXXX)"     # private edge instance dir, OUTSIDE the repo
+$ mkdir -p "$DE"/{data,logs,plugins}          # empty plugins dir → clean boot (§5.2)
+$ chown -R ubuntu:ubuntu "$DE"
+$ runuser -u ubuntu -- env HOME="$DE" "$REPO/bin/linux-amd64/grafana" server \
+    --homepath "$REPO" cfg:server.http_port=3032 \
+    cfg:paths.data="$DE/data" cfg:paths.logs="$DE/logs" cfg:paths.plugins="$DE/plugins" \
+    cfg:database.max_idle_conn=0 cfg:database.conn_max_lifetime=1 \
+    > "$DE/boot.log" 2>&1 &
+$ DB="$DE/data/grafana.db"                      # the SQLite file that is broken/restored below
+```
+
+The failure is induced **reversibly** — the DB file is moved aside and replaced with a
+*directory* so a reconnect cannot open it, then restored. Because `databaseHealthy` caches
+its result for 5 s (`pkg/api/health.go:23`), the endpoint **lags** the real DB state by up
+to one cache window in *both* directions; the five states below (run 1) capture that lag
+exactly. Every probe is `curl -sS -i http://localhost:3032/api/health`, and the `t=` on
+each heading is the wall-clock instant of that probe.
+
+**[STATE 1] before — healthy (t=04:53:35.457).** The first probe runs the real `SELECT 1`
+and caches `healthy=true` for 5 s:
 
 ```
 HTTP/1.1 200 OK
@@ -852,26 +1091,61 @@ Content-Type: application/json; charset=UTF-8
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Mon, 13 Jul 2026 18:35:15 GMT
+Date: Tue, 14 Jul 2026 04:53:35 GMT
 Content-Length: 75
 
 {
   "database": "ok",
   "version": "11.5.0-pre",
-  "commit": "033d0bdb14"
+  "commit": "2704e90389"
 }
 ```
 
-**Induce failure (reversible), then wait past the 5-second cache:**
+Break the DB (fast — completes well within STATE 1's 5 s cache window):
 
 ```bash
-$ mv "$DB" "$DB.bak"          # DB="…/q3edge/data/grafana.db"
+$ mv "$DB" "$DB.bak"          # move the real SQLite file aside
 $ mkdir "$DB"                 # a directory cannot be opened as a SQLite file
-$ sleep 7                     # 5s health cache + 1s conn_max_lifetime + margin
-# poll: first probe after the wait already returns 503
 ```
 
-**[INTERMEDIATE] — DB unreachable (`curl -sS -i`):**
+**[STATE 2] cached-200-after-break (t=04:53:35.469, +12 ms).** The DB is **already broken**,
+yet the endpoint still returns **200 / `"ok"`** — the cached `true` from STATE 1
+short-circuits `databaseHealthy` before any DB access (`pkg/api/health.go:13-15`):
+
+```
+HTTP/1.1 200 OK
+Cache-Control: no-store
+Content-Type: application/json; charset=UTF-8
+X-Content-Type-Options: nosniff
+X-Frame-Options: deny
+X-Xss-Protection: 1; mode=block
+Date: Tue, 14 Jul 2026 04:53:35 GMT
+Content-Length: 75
+
+{
+  "database": "ok",
+  "version": "11.5.0-pre",
+  "commit": "2704e90389"
+}
+```
+
+That the file is genuinely unopenable during this window is confirmed independently by a
+subsystem that does **not** share the health cache — it hit the directory ~70 ms after the
+break, while `/api/health` kept serving the cached `200`:
+
+```
+logger=sql-resource-server t=2026-07-14T04:53:35.527704325Z level=error msg="get the latest resource version" err="begin: unable to open database file: is a directory"
+```
+
+Wait past the 5 s cache (+ the 1 s `conn_max_lifetime`) so the next probe re-opens the file:
+
+```bash
+$ sleep 7                     # 5s health cache + 1s conn_max_lifetime + margin
+```
+
+**[STATE 3] 503-after-expiry (t=04:53:42.481, +7.0 s from STATE 1).** The cache has expired;
+the probe runs a fresh `SELECT 1`, the reconnect fails to open the directory, so
+`healthy=false` and the endpoint returns **503 / `"failing"`** (and caches `false` for 5 s):
 
 ```
 HTTP/1.1 503 Service Unavailable
@@ -880,13 +1154,13 @@ Content-Type: application/json; charset=UTF-8
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Mon, 13 Jul 2026 18:35:37 GMT
+Date: Tue, 14 Jul 2026 04:53:42 GMT
 Content-Length: 80
 
 {
   "database": "failing",
   "version": "11.5.0-pre",
-  "commit": "033d0bdb14"
+  "commit": "2704e90389"
 }
 ```
 
@@ -898,28 +1172,51 @@ $ curl -sS http://localhost:3032/api/health | od -c
 0000020   "   f   a   i   l   i   n   g   "   ,  \n           "   v   e
 0000040   r   s   i   o   n   "   :       "   1   1   .   5   .   0   -
 0000060   p   r   e   "   ,  \n           "   c   o   m   m   i   t   "
-0000100   :       "   0   3   3   d   0   b   d   b   1   4   "  \n   }
+0000100   :       "   2   7   0   4   e   9   0   3   8   9   "  \n   }
 0000120
 ```
 
 (`0000120` octal = 80 decimal bytes, matching `Content-Length: 80`; the growth from 75 to
-80 is exactly the 5 extra characters of `failing` versus `ok`.) The genuine DB-open failure
-during the window is corroborated by a concurrent subsystem hitting the same broken file in
-the instance log:
+80 is exactly the 5 extra characters of `failing` versus `ok`. Per §4.2, an 11-char short
+SHA would make these 76 and 81.)
 
-```
-logger=sql-resource-server t=2026-07-13T18:35:30.569592864Z level=error msg="get the latest resource version" err="begin: unable to open database file: is a directory"
-```
-
-**Restore (same DB file) and wait past the cache again:**
+Restore the original DB file (fast — within STATE 3's 5 s failing-cache window):
 
 ```bash
 $ rmdir "$DB"                 # remove the directory
-$ mv "$DB.bak" "$DB"          # put the ORIGINAL DB file back
+$ mv "$DB.bak" "$DB"          # put the ORIGINAL SQLite file back
+```
+
+**[STATE 4] cached-503-after-restore (t=04:53:42.494, +13 ms).** The DB is **already healthy
+again**, yet the endpoint still returns **503 / `"failing"`** — the cached `false` from
+STATE 3 wins until it expires:
+
+```
+HTTP/1.1 503 Service Unavailable
+Cache-Control: no-store
+Content-Type: application/json; charset=UTF-8
+X-Content-Type-Options: nosniff
+X-Frame-Options: deny
+X-Xss-Protection: 1; mode=block
+Date: Tue, 14 Jul 2026 04:53:42 GMT
+Content-Length: 80
+
+{
+  "database": "failing",
+  "version": "11.5.0-pre",
+  "commit": "2704e90389"
+}
+```
+
+Wait past the cache again:
+
+```bash
 $ sleep 7                     # cache + conn recycle
 ```
 
-**[AFTER] — recovered (`curl -sS -i`):**
+**[STATE 5] 200-after-recovery (t=04:53:49.506, +7.0 s from STATE 3).** The cache has
+expired; a fresh `SELECT 1` against the restored file succeeds, so the endpoint returns to
+**200 / `"ok"`** with the original 75-byte body — the experiment is fully reversible:
 
 ```
 HTTP/1.1 200 OK
@@ -928,29 +1225,43 @@ Content-Type: application/json; charset=UTF-8
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Mon, 13 Jul 2026 18:35:57 GMT
+Date: Tue, 14 Jul 2026 04:53:49 GMT
 Content-Length: 75
 
 {
   "database": "ok",
   "version": "11.5.0-pre",
-  "commit": "033d0bdb14"
+  "commit": "2704e90389"
 }
 ```
 
-The endpoint returns to **200 / `"ok"`** with the original 75-byte body, proving the
-experiment was fully reversible. Observations: on failure the status is
-**`503 Service Unavailable`**, `"database"` becomes **`"failing"`** (set at
-`pkg/api/http_server.go:728`), and the `Content-Type: application/json; charset=UTF-8`
-header is present on **both** 200 and 503 (set at `pkg/api/http_server.go:729` and `:732`).
-The edge instance was stopped and its private temp directory removed, leaving no residue.
+**Reproducibility (run 2, same unchanged procedure).** The identical five-state sequence was
+observed on a second run — same statuses, same bodies, same ~7 s cadence:
+
+| State | Probe `t=` (run 2) | Δ from prev | Status | `"database"` | Content-Length |
+|---|---|---|---|---|---|
+| 1 before-200 | `04:54:36.849` | — | `200 OK` | `ok` | 75 |
+| 2 cached-200-after-break | `04:54:36.886` | +37 ms | `200 OK` | `ok` | 75 |
+| 3 503-after-expiry | `04:54:43.900` | +7.01 s | `503` | `failing` | 80 |
+| 4 cached-503-after-restore | `04:54:43.914` | +14 ms | `503` | `failing` | 80 |
+| 5 200-after-recovery | `04:54:50.925` | +7.01 s | `200 OK` | `ok` | 75 |
+
+**Observations.** On failure the status is **`503 Service Unavailable`** and `"database"`
+becomes **`"failing"`** (set at `pkg/api/http_server.go:728`); the
+`Content-Type: application/json; charset=UTF-8` header is present on **both** 200 and 503
+(set at `pkg/api/http_server.go:729` and `:732`). States **2** and **4** — cached-200-after-break
+and cached-503-after-restore — are the direct, observable proof of the 5-second `db-healthy`
+cache (`pkg/api/health.go:13-15,23`): `/api/health` reports the DB state as of the *last probe
+within the previous 5 s*, not the instantaneous state, so it can trail reality by up to one
+cache window in either direction. The edge instance was stopped and its private temp directory
+removed, leaving no residue.
 
 ### 4.6 Runtime-value table
 
 | Endpoint | Method | Status | Content-Type | Body | Source `file:line` |
 |---|---|---|---|---|---|
-| `/api/health` (healthy) | GET | `200 OK` | `application/json; charset=UTF-8` | `{ "database": "ok", "version": "11.5.0-pre", "commit": "033d0bdb14" }` (75 B) | `apiHealthHandler` `pkg/api/http_server.go:710-745`; struct `:694-699` |
-| `/api/health` (failing) | GET | `503 Service Unavailable` | `application/json; charset=UTF-8` | `{ "database": "failing", "version": "11.5.0-pre", "commit": "033d0bdb14" }` (80 B) | failing branch `pkg/api/http_server.go:727-730`; probe `pkg/api/health.go:10-24` |
+| `/api/health` (healthy) | GET | `200 OK` | `application/json; charset=UTF-8` | `{ "database": "ok", "version": "11.5.0-pre", "commit": "2704e90389" }` (75 B) | `apiHealthHandler` `pkg/api/http_server.go:710-745`; struct `:694-699` |
+| `/api/health` (failing) | GET | `503 Service Unavailable` | `application/json; charset=UTF-8` | `{ "database": "failing", "version": "11.5.0-pre", "commit": "2704e90389" }` (80 B) | failing branch `pkg/api/http_server.go:727-730`; probe `pkg/api/health.go:10-24` |
 | `/healthz` | GET | `200 OK` | `text/plain; charset=utf-8` (auto) | `Ok` (2 B) | `healthzHandler` `pkg/api/http_server.go:681-691` (writes `:688`) |
 
 ### 4.7 Official-documentation corroboration (secondary)
@@ -1019,21 +1330,45 @@ intact) selected from `runA/boot.log` with the exact command shown:
 
 ```bash
 $ grep -E 'msg="(Envelope encryption|Loading plugins|Live Push Gateway|starting to provision|Storage starting|Starting MultiOrg|Starting scheduler)' runA/boot.log
-logger=secrets t=2026-07-13T17:45:36.853869787Z level=info msg="Envelope encryption state" enabled=true currentprovider=secretKey.v1
-logger=plugin.store t=2026-07-13T17:45:36.907286793Z level=info msg="Loading plugins..."
-logger=live.push_http t=2026-07-13T17:45:36.94551992Z level=info msg="Live Push Gateway initialization"
-logger=provisioning.alerting t=2026-07-13T17:45:37.008525136Z level=info msg="starting to provision alerting"
-logger=grafanaStorageLogger t=2026-07-13T17:45:37.008699796Z level=info msg="Storage starting"
-logger=ngalert.multiorg.alertmanager t=2026-07-13T17:45:37.008911316Z level=info msg="Starting MultiOrg Alertmanager"
-logger=provisioning.dashboard t=2026-07-13T17:45:37.017488625Z level=info msg="starting to provision dashboards"
-logger=ngalert.scheduler t=2026-07-13T17:45:37.076018125Z level=info msg="Starting scheduler" tickInterval=10s maxAttempts=3
+logger=secrets t=2026-07-14T05:34:36.942738532Z level=info msg="Envelope encryption state" enabled=true currentprovider=secretKey.v1
+logger=plugin.store t=2026-07-14T05:34:36.99791797Z level=info msg="Loading plugins..."
+logger=live.push_http t=2026-07-14T05:34:37.036055196Z level=info msg="Live Push Gateway initialization"
+logger=provisioning.alerting t=2026-07-14T05:34:37.149440561Z level=info msg="starting to provision alerting"
+logger=grafanaStorageLogger t=2026-07-14T05:34:37.149765384Z level=info msg="Storage starting"
+logger=ngalert.multiorg.alertmanager t=2026-07-14T05:34:37.149743717Z level=info msg="Starting MultiOrg Alertmanager"
+logger=provisioning.dashboard t=2026-07-14T05:34:37.150006741Z level=info msg="starting to provision dashboards"
+logger=ngalert.scheduler t=2026-07-14T05:34:37.149952205Z level=info msg="Starting scheduler" tickInterval=10s maxAttempts=3
 ```
 
 These info lines **hint at** the components behind the run-list: `live.push_http` →
 `pushGateway`; `secrets` → `secretsService`; `ngalert.*` → `ng`/AlertNG; `provisioning.*`
 → `provisioning`; `grafanaStorageLogger` → `StorageService`; `plugin.store` →
-`pluginStore`. (In these clean canonical runs the error count is **0** — no external
-renderer/plugin errors occurred.)
+`pluginStore`.
+
+**On the `0` error count — the exact condition (plugin-state-dependent).** The clean
+`level=error → 0` above is reproducible, but it depends on the **plugins path being a
+pre-created, empty, readable directory**. The canonical harness creates the redirected
+data/logs/**plugins** dirs *before* launch
+(`mkdir -p "$D"/{data,logs,plugins}; chown -R ubuntu:ubuntu "$D"`), so the plugin loader
+opens an empty-but-existing directory, finds nothing to load, and emits no errors. Varying
+only that one condition confirms the dependency:
+
+- **Redirected + pre-created empty plugins dir → `0` errors** — the canonical clean boot
+  (`grep -c 'level=error' → 0`; `1353` lines; `commit=2704e90389`).
+- **Redirected plugins path that does *not* exist → `3` errors**, all with
+  `error="failed to open plugins path"` (unedited, deduplicated with counts):
+
+  ```text
+  1  logger=plugin.sources   level=error msg="Failed to load external plugins"       error="failed to open plugins path"
+  2  logger=renderer.manager level=error msg="Failed to get renderer plugin sources" error="failed to open plugins path"
+  ```
+
+So "0 errors" is the honest result **for the stated canonical condition** (empty,
+pre-created, readable plugins directory); a missing or unreadable plugins path yields the
+non-zero counts above. (A bare run against the repo's own root-owned `data/plugins` — which
+in this image already contains `grafana-lokiexplore-app` from setup — likewise produces
+permission/plugin errors, which is precisely why the canonical runs redirect `paths.plugins`
+to a fresh empty directory.)
 
 ### 5.3 The generic DEBUG start line reveals the exact launched set
 
@@ -1046,43 +1381,43 @@ unedited capture (all 34 lines) and the exact count command:
 
 ```bash
 $ runuser -u ubuntu -- env HOME=$D ./bin/linux-amd64/grafana server --homepath "$(pwd)" \
-    cfg:server.http_port=3041 cfg:paths.data=$D/data cfg:paths.logs=$D/logs cfg:paths.plugins=$D/plugins \
+    cfg:server.http_port=3053 cfg:paths.data=$D/data cfg:paths.logs=$D/logs cfg:paths.plugins=$D/plugins \
     cfg:log.level=debug > $D/boot.log 2>&1 &
 $ grep -F "Starting background service" $D/boot.log
-logger=server t=2026-07-13T18:41:04.953982714Z level=debug msg="Starting background service" service=*appregistry.Service
-logger=server t=2026-07-13T18:41:04.953997751Z level=debug msg="Starting background service" service=*manager.SecretsService
-logger=server t=2026-07-13T18:41:04.953972292Z level=debug msg="Starting background service" service=*remotecache.RemoteCache
-logger=server t=2026-07-13T18:41:04.953986774Z level=debug msg="Starting background service" service=*rendering.RenderingService
-logger=server t=2026-07-13T18:41:04.954026476Z level=debug msg="Starting background service" service=*statscollector.Service
-logger=server t=2026-07-13T18:41:04.954018369Z level=debug msg="Starting background service" service=*store.standardStorageService
-logger=server t=2026-07-13T18:41:04.954008838Z level=debug msg="Starting background service" service=*updatechecker.PluginsService
-logger=server t=2026-07-13T18:41:04.954043347Z level=debug msg="Starting background service" service=*authimpl.UserAuthTokenService
-logger=server t=2026-07-13T18:41:04.954049244Z level=debug msg="Starting background service" service=*service.UsageStats
-logger=server t=2026-07-13T18:41:04.954059146Z level=debug msg="Starting background service" service=*manager.ServiceAccountsService
-logger=server t=2026-07-13T18:41:04.954077337Z level=debug msg="Starting background service" service=*pluginstore.Service
-logger=server t=2026-07-13T18:41:04.954097394Z level=debug msg="Starting background service" service=*apiserver.service
-logger=server t=2026-07-13T18:41:04.954091879Z level=debug msg="Starting background service" service=*metrics.InternalMetricsService
-logger=server t=2026-07-13T18:41:04.954116224Z level=debug msg="Starting background service" service=*angulardetectorsprovider.Dynamic
-logger=server t=2026-07-13T18:41:04.954127331Z level=debug msg="Starting background service" service=*pluginexternal.Service
-logger=server t=2026-07-13T18:41:04.954148367Z level=debug msg="Starting background service" service=*updatechecker.GrafanaService
-logger=server t=2026-07-13T18:41:04.9541637Z level=debug msg="Starting background service" service=*anonimpl.AnonDeviceService
-logger=server t=2026-07-13T18:41:04.954162337Z level=debug msg="Starting background service" service=*tracing.TracingService
-logger=server t=2026-07-13T18:41:04.954195407Z level=debug msg="Starting background service" service=*ssosettingsimpl.Service
-logger=server t=2026-07-13T18:41:04.954197841Z level=debug msg="Starting background service" service=*supportbundlesimpl.Service
-logger=server t=2026-07-13T18:41:04.954225381Z level=debug msg="Starting background service" service=*loginattemptimpl.Service
-logger=server t=2026-07-13T18:41:04.954218257Z level=debug msg="Starting background service" service=*cleanup.CleanUpService
-logger=server t=2026-07-13T18:41:04.954246961Z level=debug msg="Starting background service" service=*acimpl.Service
-logger=server t=2026-07-13T18:41:04.954243718Z level=debug msg="Starting background service" service=*migrations.SecretMigrationProviderImpl
-logger=server t=2026-07-13T18:41:04.954274134Z level=debug msg="Starting background service" service=*plugininstaller.Service
-logger=server t=2026-07-13T18:41:04.95426905Z level=debug msg="Starting background service" service=*metric.Service
-logger=server t=2026-07-13T18:41:04.954284482Z level=debug msg="Starting background service" service=*notifications.NotificationService
-logger=server t=2026-07-13T18:41:04.954281509Z level=debug msg="Starting background service" service=*dynamic.KeyRetriever
-logger=server t=2026-07-13T18:41:04.954292987Z level=debug msg="Starting background service" service=*pushhttp.Gateway
-logger=server t=2026-07-13T18:41:04.954313164Z level=debug msg="Starting background service" service=*provisioning.ProvisioningServiceImpl
-logger=server t=2026-07-13T18:41:04.954047321Z level=debug msg="Starting background service" service=*store.dummyEntityEventsService
-logger=server t=2026-07-13T18:41:04.95430473Z level=debug msg="Starting background service" service=*live.GrafanaLive
-logger=server t=2026-07-13T18:41:04.954290444Z level=debug msg="Starting background service" service=*ngalert.AlertNG
-logger=server t=2026-07-13T18:41:04.954267909Z level=debug msg="Starting background service" service=*api.HTTPServer
+logger=server t=2026-07-14T05:50:38.832354897Z level=debug msg="Starting background service" service=*appregistry.Service
+logger=server t=2026-07-14T05:50:38.832384436Z level=debug msg="Starting background service" service=*manager.SecretsService
+logger=server t=2026-07-14T05:50:38.832371813Z level=debug msg="Starting background service" service=*remotecache.RemoteCache
+logger=server t=2026-07-14T05:50:38.832407832Z level=debug msg="Starting background service" service=*store.dummyEntityEventsService
+logger=server t=2026-07-14T05:50:38.832390841Z level=debug msg="Starting background service" service=*rendering.RenderingService
+logger=server t=2026-07-14T05:50:38.832424932Z level=debug msg="Starting background service" service=*cleanup.CleanUpService
+logger=server t=2026-07-14T05:50:38.832400321Z level=debug msg="Starting background service" service=*store.standardStorageService
+logger=server t=2026-07-14T05:50:38.832450518Z level=debug msg="Starting background service" service=*pluginstore.Service
+logger=server t=2026-07-14T05:50:38.832447447Z level=debug msg="Starting background service" service=*notifications.NotificationService
+logger=server t=2026-07-14T05:50:38.832459802Z level=debug msg="Starting background service" service=*updatechecker.PluginsService
+logger=server t=2026-07-14T05:50:38.832472456Z level=debug msg="Starting background service" service=*loginattemptimpl.Service
+logger=server t=2026-07-14T05:50:38.832484512Z level=debug msg="Starting background service" service=*supportbundlesimpl.Service
+logger=server t=2026-07-14T05:50:38.832486793Z level=debug msg="Starting background service" service=*ngalert.AlertNG
+logger=server t=2026-07-14T05:50:38.832485069Z level=debug msg="Starting background service" service=*api.HTTPServer
+logger=server t=2026-07-14T05:50:38.832459102Z level=debug msg="Starting background service" service=*live.GrafanaLive
+logger=server t=2026-07-14T05:50:38.832445166Z level=debug msg="Starting background service" service=*manager.ServiceAccountsService
+logger=server t=2026-07-14T05:50:38.832520163Z level=debug msg="Starting background service" service=*authimpl.UserAuthTokenService
+logger=server t=2026-07-14T05:50:38.832511751Z level=debug msg="Starting background service" service=*provisioning.ProvisioningServiceImpl
+logger=server t=2026-07-14T05:50:38.83253651Z level=debug msg="Starting background service" service=*metric.Service
+logger=server t=2026-07-14T05:50:38.832556086Z level=debug msg="Starting background service" service=*ssosettingsimpl.Service
+logger=server t=2026-07-14T05:50:38.83253031Z level=debug msg="Starting background service" service=*anonimpl.AnonDeviceService
+logger=server t=2026-07-14T05:50:38.832569481Z level=debug msg="Starting background service" service=*pluginexternal.Service
+logger=server t=2026-07-14T05:50:38.832430568Z level=debug msg="Starting background service" service=*pushhttp.Gateway
+logger=server t=2026-07-14T05:50:38.83257657Z level=debug msg="Starting background service" service=*tracing.TracingService
+logger=server t=2026-07-14T05:50:38.832503513Z level=debug msg="Starting background service" service=*metrics.InternalMetricsService
+logger=server t=2026-07-14T05:50:38.832597536Z level=debug msg="Starting background service" service=*acimpl.Service
+logger=server t=2026-07-14T05:50:38.832466691Z level=debug msg="Starting background service" service=*migrations.SecretMigrationProviderImpl
+logger=server t=2026-07-14T05:50:38.832584455Z level=debug msg="Starting background service" service=*plugininstaller.Service
+logger=server t=2026-07-14T05:50:38.832524588Z level=debug msg="Starting background service" service=*statscollector.Service
+logger=server t=2026-07-14T05:50:38.832628472Z level=debug msg="Starting background service" service=*dynamic.KeyRetriever
+logger=server t=2026-07-14T05:50:38.832624431Z level=debug msg="Starting background service" service=*apiserver.service
+logger=server t=2026-07-14T05:50:38.832510454Z level=debug msg="Starting background service" service=*updatechecker.GrafanaService
+logger=server t=2026-07-14T05:50:38.832512818Z level=debug msg="Starting background service" service=*service.UsageStats
+logger=server t=2026-07-14T05:50:38.832601222Z level=debug msg="Starting background service" service=*angulardetectorsprovider.Dynamic
 
 $ grep -cF "Starting background service" $D/boot.log
 34
@@ -1107,22 +1442,32 @@ higher:
 ```bash
 $ kill -TERM %1; wait                       # graceful shutdown of the backgrounded server
 $ grep -c 'level=debug' $D/boot.log        # after shutdown
-1375
+1377
 $ wc -l < $D/boot.log
-2734
+2737
 ```
 
 Both `level=debug` counts are **reproducible across ≥ 3 debug runs each** within a tight
 band (running, +15 s after listen: `1119`–`1122`, i.e. ≈ `1120`; after `SIGTERM`:
 `1375`–`1378`); the paired `wc -l` totals track them within the same few-line ordering
 jitter noted in §1.4 (running ≈ `2473`–`2475`; after `SIGTERM` ≈ `2734`–`2738`). The
-≈ `255`-line `level=debug` difference (`1375` − `1120`) is entirely the graceful-shutdown
-burst — dominated by `55`
-`logger=plugins.deregister` lines (`pkg/plugins/manager/pipeline/termination/steps.go:51`)
-plus one `"Stopped background service"` DEBUG line per service (`pkg/server/server.go:171`,
-emitted as each service's `Run` returns on context-cancel after `(s *Server) Shutdown` at
-`pkg/server/server.go:185-188`).
-So the single unqualified count originally reported for a *stopped* server is `1375`, whereas
+≈ `257`-line `level=debug` difference (`1377` − `1120`) is entirely the graceful-shutdown
+burst. Categorizing the full appended burst (≈ `264` lines between the running and stopped
+snapshots, of which ≈ `257` are `level=debug`) shows it is **dominated by per-plugin
+shutdown lines**, not by any single deregister category:
+
+| Lines | Category | Source |
+|---|---|---|
+| ≈ `165` | per-plugin shutdown — **3 lines per plugin** across `55` distinct built-in plugins (`"Stopping plugin"` → `"Stopping plugin process"` → `"Plugin stopped"`), each under its own `logger=plugin.<id>` | plugin backend clients stopping |
+| `55` | `"Plugin unregistered"` — one per plugin, `logger=plugins.deregister` | `pkg/plugins/manager/pipeline/termination/steps.go:51` |
+| `28` | `"Stopped background service"` — one per service as its `Run` returns on context-cancel | `pkg/server/server.go:171` |
+| ≈ `16` | assorted subsystem stop lines (`infra.kvstore.sql`, `ngalert.notifier.alertmanager`, `tracing`, `ticker`, `sqlstore.transactions`, `secrets`, `provisioning`, `http.server`, `grafana-apiserver`) | respective services |
+
+(counts from one representative shutdown; each varies by ±a few lines run-to-run.) The burst
+is triggered by `(s *Server) Shutdown` (`pkg/server/server.go:185-188`), which cancels the
+root context so every service's `Run` returns and logs its `"Stopped background service"`
+DEBUG line (`pkg/server/server.go:171`).
+So the single unqualified count originally reported for a *stopped* server is `1377`, whereas
 a *running* server has emitted ≈ `1120`; the total is thus lifecycle- and duration-sensitive
 (plugin discovery, migrations, and periodic SQL-debug all contribute), which is why the exact
 figure is paired here with a stated window and confirmed stable across runs. Either way the
@@ -1238,7 +1583,7 @@ supervising the process, as in this container) it logs a DEBUG line and **return
 sending anything**. The observed line confirms the no-op:
 
 ```text
-logger=server t=2026-07-13T20:03:07.577418406Z level=debug msg="NOTIFY_SOCKET environment variable empty or unset, can't send systemd notification"
+logger=server t=2026-07-14T05:52:03.452927506Z level=debug msg="NOTIFY_SOCKET environment variable empty or unset, can't send systemd notification"
 ```
 
 **Observed ordering: a non-deterministic race.** The readiness lines and the service-start
@@ -1255,41 +1600,43 @@ the earliest `"Starting background service"` timestamp against the `NOTIFY_SOCKE
 
 ```text
 $ for i in $(seq 1 8); do \
-    ./bin/linux-amd64/grafana server --homepath . \
-      cfg:log.level=debug cfg:server.http_port=$((3040+i)) cfg:paths.data=/tmp/gf_obs/data_$i \
-      > /tmp/gf_obs/boot_$i.log 2>&1 & pid=$!; \
-    until grep -qF "HTTP Server Listen" /tmp/gf_obs/boot_$i.log; do sleep 0.1; done; \
-    sleep 0.5; kill "$pid"; wait "$pid" 2>/dev/null; \
+    d=$(mktemp -d /tmp/gfqa_race.XXXX); mkdir -p "$d"/{data,logs,plugins}; chown -R ubuntu:ubuntu "$d"; \
+    runuser -u ubuntu -- env HOME="$d" ./bin/linux-amd64/grafana server --homepath . \
+      cfg:log.level=debug cfg:server.http_port=$((3070+i)) \
+      cfg:paths.data="$d/data" cfg:paths.logs="$d/logs" cfg:paths.plugins="$d/plugins" \
+      > "$d/boot.log" 2>&1 & pid=$!; \
+    until grep -qF "HTTP Server Listen" "$d/boot.log"; do sleep 0.1; done; \
+    sleep 0.6; kill "$pid"; wait "$pid" 2>/dev/null; \
   done
 run  first "Starting background service"     ordering
- 1   *remotecache.RemoteCache                 readiness-BEFORE-service
- 2   *appregistry.Service                     readiness-BEFORE-service
- 3   *provisioning.ProvisioningServiceImpl    service-BEFORE-readiness
- 4   *api.HTTPServer                          service-BEFORE-readiness
- 5   *appregistry.Service                     readiness-BEFORE-service
- 6   *pushhttp.Gateway                        service-BEFORE-readiness
- 7   *service.UsageStats                      readiness-BEFORE-service
- 8   *notifications.NotificationService       service-BEFORE-readiness
-DISTRIBUTION: service-BEFORE-readiness=4 ; readiness-BEFORE-service=4 ; total=8
+ 1   *appregistry.Service                     readiness-BEFORE-service
+ 2   *tracing.TracingService                  service-BEFORE-readiness
+ 3   *appregistry.Service                     readiness-BEFORE-service
+ 4   *appregistry.Service                     readiness-BEFORE-service
+ 5   *notifications.NotificationService       service-BEFORE-readiness
+ 6   *authimpl.UserAuthTokenService           service-BEFORE-readiness
+ 7   *remotecache.RemoteCache                 readiness-BEFORE-service
+ 8   *appregistry.Service                     readiness-BEFORE-service
+DISTRIBUTION: service-BEFORE-readiness=3 ; readiness-BEFORE-service=5 ; total=8
 ```
 
-*Run 1 — the main goroutine logs first* (`notifySystemd` no-op `:176` → empty-socket branch
+*Run 7 — the main goroutine logs first* (`notifySystemd` no-op `:176` → empty-socket branch
 `:232`, then `"Waiting on services..."` `:178`, then the earliest service goroutine `:162`;
 all three within the same microsecond):
 
 ```text
-logger=server t=2026-07-13T20:03:07.577418406Z level=debug msg="NOTIFY_SOCKET environment variable empty or unset, can't send systemd notification"
-logger=server t=2026-07-13T20:03:07.577424938Z level=debug msg="Waiting on services..."
-logger=server t=2026-07-13T20:03:07.577427499Z level=debug msg="Starting background service" service=*remotecache.RemoteCache
+logger=server t=2026-07-14T05:52:03.452927506Z level=debug msg="NOTIFY_SOCKET environment variable empty or unset, can't send systemd notification"
+logger=server t=2026-07-14T05:52:03.452934029Z level=debug msg="Waiting on services..."
+logger=server t=2026-07-14T05:52:03.452940531Z level=debug msg="Starting background service" service=*remotecache.RemoteCache
 ```
 
-*Run 4 — a service goroutine logs first* (the earliest `"Starting background service"` at
+*Run 6 — a service goroutine logs first* (the earliest `"Starting background service"` at
 `:162` precedes the same two main-goroutine readiness lines, again within one microsecond):
 
 ```text
-logger=server t=2026-07-13T20:03:15.9929271Z level=debug msg="Starting background service" service=*api.HTTPServer
-logger=server t=2026-07-13T20:03:15.992957749Z level=debug msg="NOTIFY_SOCKET environment variable empty or unset, can't send systemd notification"
-logger=server t=2026-07-13T20:03:15.992970011Z level=debug msg="Waiting on services..."
+logger=server t=2026-07-14T05:51:58.543362749Z level=debug msg="Starting background service" service=*authimpl.UserAuthTokenService
+logger=server t=2026-07-14T05:51:58.543390997Z level=debug msg="NOTIFY_SOCKET environment variable empty or unset, can't send systemd notification"
+logger=server t=2026-07-14T05:51:58.543407023Z level=debug msg="Waiting on services..."
 ```
 
 So the "ready" point (`:176`) is reached **concurrently with** the services beginning to run
@@ -1302,9 +1649,13 @@ launched and executing (whether or not each had yet logged its start).
 been **dispatched as concurrent goroutines** and are executing their `Run` methods; the
 HTTP server is **itself** one of them (`*api.HTTPServer`), so its listen line fires from
 within its own goroutine. The full backend — alerting, provisioning, live, plugins,
-secrets, tokens, usage stats, storage, apiserver, etc. — is therefore active behind the
-port the instant the UI is reachable. The UI is **not** a service; it is static frontend
-assets served by that same HTTP server. The systemd `READY=1` notification is a no-op here
+secrets, tokens, usage stats, storage, apiserver, etc. — has therefore been **dispatched and
+is executing its `Run` methods** behind the port the instant the UI is reachable. (As
+qualified above, "dispatched and executing" does **not** assert every service has *finished*
+its own initialization — many `Run` methods block for the process lifetime; the invariant
+proven at runtime is that all 34 goroutines are launched and running by the listen point,
+not that startup is complete.) The UI is **not** a service; it is static frontend assets
+served by that same HTTP server. The systemd `READY=1` notification is a no-op here
 (no `NOTIFY_SOCKET`), so readiness in this environment is defined operationally by the HTTP
 listener accepting connections and `/api/health` returning `200` (Q3), not by a systemd
 signal.
@@ -1366,14 +1717,14 @@ evidence section that captures it.
 | Defaults | `admin_user=admin`, `admin_password=admin`, `disable_initial_admin_creation=false` | `conf/defaults.ini:328`, `:331`, `:325` |
 | Before/after | old → `401 password-auth.failed`, new → `200` — §3.4 | observed |
 | Skip path (non-default pw) | login → straight to home, no prompt — §3.6 | `LoginCtrl.tsx:117-118` |
-| Skip path (LDAP / auth-proxy **on**) | prompt skipped → straight to home; **observed** on ports 3012 (auth-proxy) & 3013 (LDAP) — §3.7 | `LoginCtrl.tsx:117`; `pkg/setting/setting.go:1361`, `conf/defaults.ini:921`/`:886` |
+| Skip path (LDAP / auth-proxy **on**) | prompt skipped → straight to home; **observed** on ports 3041 (LDAP) & 3042 (auth-proxy) — §3.7 | `LoginCtrl.tsx:117`; `pkg/setting/setting.go:1361`, `conf/defaults.ini:922`/`:887` |
 | Official-docs corroboration (secondary) | official *Sign in to Grafana* guide: after `admin`/`admin`, "you will see a prompt to change the password" — §3.8 | secondary to `LoginCtrl.tsx:117-121` |
 
 ### Q3 — `/api/health`
 
 | Item | Value / evidence | `file:line` |
 |---|---|---|
-| Healthy status/body | `200`, `{"database":"ok","version":"11.5.0-pre","commit":"033d0bdb14"}` (75 B; `commit` = build `git HEAD`, §4.2) | `pkg/api/http_server.go:710-745` |
+| Healthy status/body | `200`, `{"database":"ok","version":"11.5.0-pre","commit":"2704e90389"}` (75 B; `commit` = build `git HEAD`, §4.2) | `pkg/api/http_server.go:710-745` |
 | `healthResponse` struct | field order database/version/commit/enterpriseCommit | `pkg/api/http_server.go:694-699` |
 | `apiHealthHandler` | serves `/api/health` | `pkg/api/http_server.go:710-745` |
 | `"database"` derivation | `databaseHealthy()` → `SELECT 1` | `pkg/api/health.go:10-24`, `:18` |
@@ -1381,7 +1732,7 @@ evidence section that captures it.
 | Content-Type | `application/json; charset=UTF-8` | `pkg/api/http_server.go:729`/`:732` |
 | MarshalIndent (2-space) | byte-exact body via `od -c` — §4.2 | `pkg/api/http_server.go:736` |
 | version/commit gating | only when `!HideVersion` | `pkg/api/http_server.go:719-725` |
-| Failing status/body | `503`, `{"database":"failing","version":"11.5.0-pre","commit":"033d0bdb14"}` (80 B) — §4.5 | `pkg/api/http_server.go:727-730` |
+| Failing status/body | `503`, `{"database":"failing","version":"11.5.0-pre","commit":"2704e90389"}` (80 B) — §4.5 | `pkg/api/http_server.go:727-730` |
 | Recovery (before/interm/after) | 200 → 503 → 200 — §4.5 | observed |
 | `/healthz` | `200`, plain `Ok` (2 B), liveness only — §4.4 | `pkg/api/http_server.go:681-691` (writes `:688`) |
 | Middleware registration | `m.Use(healthzHandler)`, `m.Use(apiHealthHandler)` | `pkg/api/http_server.go:633-634` |
