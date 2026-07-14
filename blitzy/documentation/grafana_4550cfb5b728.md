@@ -75,24 +75,259 @@ Result: exit 0; the unified binary `bin/linux-amd64/grafana` is `246579264` byte
 ### 1.3 Frontend build (real command, real output)
 
 ```bash
-$ . /tmp/genv.sh && time yarn build
+# On a fresh checkout the nx build cache is empty, so the FIRST `yarn build` compiles every task
+# from scratch. Here the cache was already warm (populated during environment setup), so it was
+# cleared first to reproduce that canonical cold-cache first build; the plain command a normal
+# user runs is simply `yarn build`:
+$ . /tmp/genv.sh && rm -rf .nx/cache && time yarn build
 ```
 
-Driven by `nx` across the frontend + bundled core plugins; `webpack 5.95.0` compiled successfully (some asset-size **warnings** only — no errors), producing 325 JS assets under `public/build`:
+Driven by `nx` across the frontend plus 12 bundled core-plugin projects and the `grafana` app itself; `webpack 5.95.0` compiled **every** task — the only diagnostics are asset/entrypoint **size-limit warnings** (no errors) — producing the production JS/CSS assets under `public/build`. Wall time `real 0m37.996s`, exit code `0`. The complete transcript follows.
+
+> **Sanitization note.** Two non-substantive rendering artifacts were removed from the transcript below: (1) ANSI color codes, and (2) the 659 non-TTY `webpack.Progress` percentage lines (e.g. `<s> [webpack.Progress] 8% setup compilation…`, emitted by webpack's `ProgressPlugin` when stdout is not a TTY), collapsing the resulting runs of blank lines. **Every substantive line is retained verbatim:** each `> nx run …:build` header, every browserslist notice, every asset/module count, every `WARNING` block, every `webpack 5.95.0 compiled …` line with its timing, the `themes-generate` deprecation warning, the final `NX Successfully ran …` summary, the `time` result, and the `BUILD_EXIT=0` exit code.
+
+<details>
+<summary><code>yarn build</code> — complete transcript (cold nx cache; ANSI codes + progress-meter lines removed)</summary>
 
 ```text
-> nx run @grafana-plugins/zipkin:build  [local cache]
-webpack 5.95.0 compiled successfully in 3213 ms
-[the remaining ~12 per-plugin build lines are elided here; full transcript: build_js.log]
-(asset size limit WARNINGS only; exit 0)
+ NX   Running target build for project grafana and 12 tasks it depends on:
+
+> nx run @grafana-plugins/zipkin:build
+
+Browserslist: browsers data (caniuse-lite) is 21 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+7 assets
+408 modules
+webpack 5.95.0 compiled successfully in 431 ms
+
+> nx run @grafana-plugins/mysql:build
+
+Browserslist: browsers data (caniuse-lite) is 21 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+8 assets
+832 modules
+
+WARNING in asset size limit: The following asset(s) exceed the recommended size limit (244 KiB).
+This can impact web performance.
+Assets: 
+  734.js (649 KiB)
+
+webpack 5.95.0 compiled with 1 warning in 757 ms
+
+> nx run @grafana-plugins/tempo:build
+
+Browserslist: browsers data (caniuse-lite) is 21 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+96 assets
+3232 modules
+
+WARNING in asset size limit: The following asset(s) exceed the recommended size limit (244 KiB).
+This can impact web performance.
+Assets: 
+  2444.js (3.14 MiB)
+
+webpack 5.95.0 compiled with 1 warning in 2232 ms
+
+> nx run @grafana-plugins/grafana-testdata-datasource:build
+
+Browserslist: browsers data (caniuse-lite) is 21 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+7 assets
+274 modules
+webpack 5.95.0 compiled successfully in 331 ms
+
+> nx run grafana:themes-generate
+
+(node:572340) [DEP0060] DeprecationWarning: The `util._extend` API is deprecated. Please use Object.assign() instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+
+> nx run @grafana-plugins/grafana-azure-monitor-datasource:build
+
+Browserslist: browsers data (caniuse-lite) is 21 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+39 assets
+3250 modules
+
+WARNING in asset size limit: The following asset(s) exceed the recommended size limit (244 KiB).
+This can impact web performance.
+Assets: 
+  module.js (305 KiB)
+  img/azure_monitor_cpu.png (253 KiB)
+  img/contoso_loans_grafana_dashboard.png (251 KiB)
+  dashboards/adx.json (281 KiB)
+
+WARNING in entrypoint size limit: The following entrypoint(s) combined asset size exceeds the recommended limit (244 KiB). This can impact web performance.
+Entrypoints:
+  module (305 KiB)
+      module.js
+
+WARNING in webpack performance recommendations: 
+You can limit the size of your bundles by using import() or require.ensure to lazy load some parts of your application.
+For more info visit https://webpack.js.org/guides/code-splitting/
+
+webpack 5.95.0 compiled with 3 warnings in 1554 ms
+
+> nx run @grafana-plugins/grafana-postgresql-datasource:build
+
+Browserslist: browsers data (caniuse-lite) is 21 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+8 assets
+843 modules
+
+WARNING in asset size limit: The following asset(s) exceed the recommended size limit (244 KiB).
+This can impact web performance.
+Assets: 
+  734.js (649 KiB)
+
+webpack 5.95.0 compiled with 1 warning in 782 ms
+
+> nx run @grafana-plugins/grafana-pyroscope-datasource:build
+
+Browserslist: browsers data (caniuse-lite) is 21 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+6 assets
+409 modules
+webpack 5.95.0 compiled successfully in 356 ms
+
+> nx run @grafana-plugins/stackdriver:build
+
+Browserslist: browsers data (caniuse-lite) is 21 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+21 assets
+433 modules
+webpack 5.95.0 compiled successfully in 404 ms
+
+> nx run @grafana-plugins/jaeger:build
+
+Browserslist: browsers data (caniuse-lite) is 21 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+7 assets
+455 modules
+webpack 5.95.0 compiled successfully in 377 ms
+
+> nx run @grafana-plugins/parca:build
+
+Browserslist: browsers data (caniuse-lite) is 21 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+6 assets
+402 modules
+webpack 5.95.0 compiled successfully in 337 ms
+
+> nx run @grafana-plugins/mssql:build
+
+Browserslist: browsers data (caniuse-lite) is 21 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+8 assets
+3407 modules
+
+WARNING in asset size limit: The following asset(s) exceed the recommended size limit (244 KiB).
+This can impact web performance.
+Assets: 
+  module.js (542 KiB)
+  87.js (566 KiB)
+
+WARNING in entrypoint size limit: The following entrypoint(s) combined asset size exceeds the recommended limit (244 KiB). This can impact web performance.
+Entrypoints:
+  module (542 KiB)
+      module.js
+
+webpack 5.95.0 compiled with 2 warnings in 1634 ms
+
+> nx run grafana:build
+
+Browserslist: browsers data (caniuse-lite) is 21 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+assets by status 39.4 MiB [cached] 356 assets
+assets by path . 251 KiB
+  asset assets-manifest.json 227 KiB [compared for emit]
+  asset ../../manifest.json 23.7 KiB [compared for emit]
+Entrypoint app [big] 8.24 MiB (30.9 MiB) = 9 assets 13 auxiliary assets
+Entrypoint swagger [big] 3.43 MiB (9.59 MiB) = 7 assets 6 auxiliary assets
+Entrypoint dark 103 KiB (1.15 MiB) = runtime.b096bb79a2e35eb02db9.js 16.4 KiB grafana.dark.23c5425b7a9e1580d499.css 86 KiB dark.d9196c1e81619cd5ae4f.js 132 bytes 12 auxiliary assets
+Entrypoint light 103 KiB (1.15 MiB) = runtime.b096bb79a2e35eb02db9.js 16.4 KiB grafana.light.53ec5bfb490b0419985b.css 86 KiB light.6f4baca9576edc9c2e5b.js 134 bytes 12 auxiliary assets
+cached modules 101 MiB (javascript) 555 KiB (css/mini-extract) 329 KiB (asset) 55.4 KiB (runtime) [cached] 12281 modules
+javascript modules 2.35 KiB
+  ./public/app/ sync extensions\/index.ts 160 bytes [built]
+  ./public/app/ sync app\/extensions\/locales\/localeExtensions 160 bytes [built]
+  ./public/app/ sync \.html$ 2.04 KiB [built]
+WARNING in asset size limit: The following asset(s) exceed the recommended size limit (244 KiB).
+This can impact web performance.
+Assets: 
+  static/img/fontawesome-webfont.c1e38fd9.svg (434 KiB)
+  app.f832742221a6bf16724b.js (718 KiB)
+  swagger.0700b85beeebf6981fab.js (723 KiB)
+  canvasPanel.9ad593bf5e8b74137148.js (513 KiB)
+  visjs-network.11af2bcc26528bfab7f3.js (449 KiB)
+  5995.00f5f2ca7503ea250b68.js (285 KiB)
+  9044.ae38e3b90205eca14c00.js (758 KiB)
+  4064.46d7801380b29b2e683c.js (436 KiB)
+  2150.09e0e41f00acf475f568.js (4.5 MiB)
+  sql-query-editor.078f7816a8a64e48ebe5.js (478 KiB)
+  1183.d2cb532fd7d264a35e5a.js (894 KiB)
+  brace.4a68600431dfe2b97207.js (363 KiB)
+  7613.6334cff4df12cc157522.js (790 KiB)
+  6029.0549a3fcb50e73c4b256.js (400 KiB)
+  5001.5539502adf38f608859e.js (908 KiB)
+  5912.d0c454cae48086c2b67a.js (2.88 MiB)
+  1100.d70d5d985a12c10474f2.js (1.08 MiB)
+  7396.9e551d6f4e3967c9381c.js (1.84 MiB)
+  8477.5f2b186431c3b4da5d97.js (912 KiB)
+  6765.dc4586792939cc7efbde.js (3.14 MiB)
+  2139.d7cad7e3be11c06d3c97.js (335 KiB)
+  2620.a3a8103cf5992d8b6631.js (487 KiB)
+  3520.cdea059ea546a6ecdb9a.js (7.51 MiB)
+  1724.0b41c1417fb5dcc1c46f.js (611 KiB)
+  4348.7fb3e6b67ffa3f77e31f.js (246 KiB)
+WARNING in entrypoint size limit: The following entrypoint(s) combined asset size exceeds the recommended limit (244 KiB). This can impact web performance.
+Entrypoints:
+  app (8.24 MiB)
+      runtime.b096bb79a2e35eb02db9.js
+      6029.0549a3fcb50e73c4b256.js
+      5001.5539502adf38f608859e.js
+      5912.d0c454cae48086c2b67a.js
+      7836.f17b7c631c5c78bd0765.js
+      2041.db61d9e0bd49170a31de.js
+      6765.dc4586792939cc7efbde.js
+      grafana.app.ad2ed81beeec71531a35.css
+      app.f832742221a6bf16724b.js
+  swagger (3.43 MiB)
+      runtime.b096bb79a2e35eb02db9.js
+      6029.0549a3fcb50e73c4b256.js
+      5001.5539502adf38f608859e.js
+      1100.d70d5d985a12c10474f2.js
+      7836.f17b7c631c5c78bd0765.js
+      grafana.swagger.2733d417270d5dd49373.css
+      swagger.0700b85beeebf6981fab.js
+
+webpack 5.95.0 compiled with 2 warnings in 15484 ms
+
+ NX   Successfully ran target build for project grafana and 12 tasks it depends on
+
+real	0m37.996s
+user	1m8.718s
+sys	0m11.657s
+BUILD_EXIT=0
 ```
 
-(The two representative lines above have their ANSI color codes stripped for readability; the elided lines are the repetitive per-plugin `nx run … [local cache]` / `webpack … compiled` pairs. Exit code 0.)
+</details>
 
 ### 1.4 Run the default OSS server and confirm health
 
 ```bash
-$ . /tmp/genv.sh && GF_LOG_LEVEL=debug GF_SERVER_ROUTER_LOGGING=true \
+$ . /tmp/genv.sh && mkdir -p /tmp/grafana_investigation \
+    && GF_LOG_LEVEL=debug GF_SERVER_ROUTER_LOGGING=true \
     nohup ./bin/linux-amd64/grafana server --homepath="$(pwd)" \
     > /tmp/grafana_investigation/server.log 2>&1 &
 ```
@@ -195,8 +430,8 @@ cookie: grafana_session=<REDACTED>; grafana_session_expiry=<REDACTED>
 ```
 
 ```bash
-$ sha256sum canon_req_body.network-request
-8780faec43e425b9f723027eb170722256707175044babc5c323277f300b8154  (245 bytes)
+$ printf '%s' '{"queries":[{"scenarioId":"random_walk","seriesCount":1,"datasource":{"type":"grafana-testdata-datasource","uid":"efs0ai8c7y41sf"},"refId":"A","datasourceId":1,"intervalMs":30000,"maxDataPoints":783}],"from":"1783939200000","to":"1783960800000"}' | sha256sum
+8780faec43e425b9f723027eb170722256707175044babc5c323277f300b8154  -   # 245 bytes, no trailing newline
 ```
 
 ### 3.2 The frontend code path that produced it
@@ -312,11 +547,10 @@ x-xss-protection: 1; mode=block
 
 There is **no `X-Cache` header** — the OSS build emits none (Section 6). Large bodies are sent `Transfer-Encoding: chunked` (the small-body case in Section 5.3 carries `Content-Length` instead).
 
-The body is `23689` bytes — matching `size=23689` in the paired `Request Completed` log (Section 4.6) — with **720 data points** in one frame. It is too large to inline readably, so the structural excerpt below is extracted from the captured bytes (**labelled excerpt, not the raw bytes**); the raw bytes are pinned by SHA-256:
+The body is `23689` bytes — matching `size=23689` in the paired `Request Completed` log (Section 4.6) — with **720 data points** in one frame. It is too large to inline readably, so the structural excerpt below is extracted from the captured bytes (**labelled excerpt, not the raw bytes**); the raw bytes are pinned by SHA-256 as a **recorded observation** — it was computed at capture time over the full transient response file, which has since been removed per the read-only scope. Because the complete 23689-byte body is not inlined here (only the labelled structural excerpt below), this digest cannot be recomputed from this document and is reported exactly as it was observed at capture time:
 
-```bash
-$ sha256sum canon_resp_body.network-response
-18dff14b2ad17628ab51e8238aa81f2c88f0cdf26d561371f63ba0bf756dfba8  (23689 bytes)
+```text
+sha256(full 23689-byte captured response body, recorded observation) = 18dff14b2ad17628ab51e8238aa81f2c88f0cdf26d561371f63ba0bf756dfba8
 ```
 
 ```text
@@ -341,18 +575,22 @@ Serialization is done backend-side by `toJsonStreamingResponse` (`pkg/api/ds_que
 
 ### 5.3 Full-inline response body (small mirror, byte-complete)
 
-To show a **complete, unedited** body, a curl mirror requested a coarse interval (`intervalMs=2160000` over the 6-hour range → **10 points**). This is a **labelled curl mirror**, not the browser path. Command and full raw response body (693 bytes, byte-complete):
+To show a **complete, unedited** body, a curl mirror requested a coarse interval (`intervalMs=2160000` over the 6-hour range → **10 points**). This is a **labelled, executable curl mirror**, not the browser path. It first resolves the live TestData datasource UID on the running instance (the UID `efs0ai8c7y41sf` seen in the historical capture blocks — e.g. the request body in Section 3.1 — belonged to the original run; a freshly provisioned instance is assigned a different UID), then reuses that `DS_UID` here and in every later mirror (Sections 5.4 and 6.4). Because `random_walk` returns fresh values on every call (Section 6), re-running yields a structurally identical body with different numbers; the body inlined below is the exact 693-byte capture from the original run, pinned by the SHA that follows. Command and full raw response body (693 bytes, byte-complete):
 
 ```bash
+# Resolve the live TestData datasource UID on THIS instance; reused by every mirror below (Sections 5.4, 6.4).
+$ DS_UID=$(curl -s -u admin:admin http://localhost:3000/api/datasources \
+    | python3 -c "import sys,json; print(next(d['uid'] for d in json.load(sys.stdin) if d['type']=='grafana-testdata-datasource'))")
+
 $ curl -s -u admin:admin http://localhost:3000/api/ds/query \
     -H 'Content-Type: application/json' \
-    -d '{"queries":[{"scenarioId":"random_walk","datasource":{"type":"grafana-testdata-datasource","uid":"efs0ai8c7y41sf"},"refId":"A","datasourceId":1,"intervalMs":2160000,"maxDataPoints":10}],"from":"1783939200000","to":"1783960800000"}'
+    -d '{"queries":[{"scenarioId":"random_walk","datasource":{"type":"grafana-testdata-datasource","uid":"'"$DS_UID"'"},"refId":"A","datasourceId":1,"intervalMs":2160000,"maxDataPoints":10}],"from":"1783939200000","to":"1783960800000"}'
 {"results":{"A":{"status":200,"frames":[{"schema":{"refId":"A","meta":{"typeVersion":[0,0],"custom":{"customStat":10}},"fields":[{"name":"time","type":"time","typeInfo":{"frame":"time.Time","nullable":true},"config":{"interval":2160000}},{"name":"A-series","type":"number","typeInfo":{"frame":"float64","nullable":true},"labels":{}}]},"data":{"values":[[1783939200000,1783941360000,1783943520000,1783945680000,1783947840000,1783950000000,1783952160000,1783954320000,1783956480000,1783958640000],[12.184353106478671,11.870903821932657,11.95715633329946,11.558070040228513,11.873716790445178,11.632524499546701,11.399405191000099,11.824278149623977,12.109828848711699,11.670027669803217]]}}]}}}
 ```
 
 ```bash
-$ sha256sum q3_small_body.json
-133aac3716ff06e99024594870119088845f2c38cc683dc452db0a54f013580a  (693 bytes)
+$ printf '%s\n' '{"results":{"A":{"status":200,"frames":[{"schema":{"refId":"A","meta":{"typeVersion":[0,0],"custom":{"customStat":10}},"fields":[{"name":"time","type":"time","typeInfo":{"frame":"time.Time","nullable":true},"config":{"interval":2160000}},{"name":"A-series","type":"number","typeInfo":{"frame":"float64","nullable":true},"labels":{}}]},"data":{"values":[[1783939200000,1783941360000,1783943520000,1783945680000,1783947840000,1783950000000,1783952160000,1783954320000,1783956480000,1783958640000],[12.184353106478671,11.870903821932657,11.95715633329946,11.558070040228513,11.873716790445178,11.632524499546701,11.399405191000099,11.824278149623977,12.109828848711699,11.670027669803217]]}}]}}}' | sha256sum
+133aac3716ff06e99024594870119088845f2c38cc683dc452db0a54f013580a  -   # 693 bytes (server appends a trailing newline)
 ```
 
 Its headers carry `Content-Length: 693` (not chunked):
@@ -381,7 +619,7 @@ The paired backend line confirms the per-query fields were received (`interval=2
 ```bash
 $ curl -s -u admin:admin http://localhost:3000/api/ds/query \
     -H 'Content-Type: application/json' \
-    -d '{"queries":[{"scenarioId":"random_walk_with_error","datasource":{"type":"grafana-testdata-datasource","uid":"efs0ai8c7y41sf"},"refId":"A","datasourceId":1,"intervalMs":2160000,"maxDataPoints":10}],"from":"1783939200000","to":"1783960800000"}'
+    -d '{"queries":[{"scenarioId":"random_walk_with_error","datasource":{"type":"grafana-testdata-datasource","uid":"'"$DS_UID"'"},"refId":"A","datasourceId":1,"intervalMs":2160000,"maxDataPoints":10}],"from":"1783939200000","to":"1783960800000"}'
 {"results":{"A":{"error":"this is an error and it can include URLs http://grafana.com/","errorSource":"plugin","status":500,"frames":[{"schema":{"refId":"A","meta":{"typeVersion":[0,0],"custom":{"customStat":10}},"fields":[{"name":"time","type":"time","typeInfo":{"frame":"time.Time","nullable":true},"config":{"interval":2160000}},{"name":"A-series","type":"number","typeInfo":{"frame":"float64","nullable":true},"labels":{}}]},"data":{"values":[[1783939200000,1783941360000,1783943520000,1783945680000,1783947840000,1783950000000,1783952160000,1783954320000,1783956480000,1783958640000],[25.18493798190126,25.60649979803568,25.18155359875644,25.679890822785445,25.951505168733824,25.69391979256984,25.624387918081595,25.819305613338575,26.222266298110874,26.696694106343624]]}}]}}}
 ```
 
@@ -389,8 +627,11 @@ $ curl -s -u admin:admin http://localhost:3000/api/ds/query \
 HTTP/1.1 400 Bad Request
 Content-Type: application/json
 Content-Length: 784
-$ sha256sum q3_err400_body.json
-4dc9d855877a8fdf43d00bb1fe0f012e411ebd03e3bef0722d0c33356deeeed3
+```
+
+```bash
+$ printf '%s\n' '{"results":{"A":{"error":"this is an error and it can include URLs http://grafana.com/","errorSource":"plugin","status":500,"frames":[{"schema":{"refId":"A","meta":{"typeVersion":[0,0],"custom":{"customStat":10}},"fields":[{"name":"time","type":"time","typeInfo":{"frame":"time.Time","nullable":true},"config":{"interval":2160000}},{"name":"A-series","type":"number","typeInfo":{"frame":"float64","nullable":true},"labels":{}}]},"data":{"values":[[1783939200000,1783941360000,1783943520000,1783945680000,1783947840000,1783950000000,1783952160000,1783954320000,1783956480000,1783958640000],[25.18493798190126,25.60649979803568,25.18155359875644,25.679890822785445,25.951505168733824,25.69391979256984,25.624387918081595,25.819305613338575,26.222266298110874,26.696694106343624]]}}]}}}' | sha256sum
+4dc9d855877a8fdf43d00bb1fe0f012e411ebd03e3bef0722d0c33356deeeed3  -   # 784 bytes (trailing newline)
 ```
 
 Outer HTTP status **400**; per-query `status:500`, `errorSource:"plugin"`, human-readable `error` — yet a full frame is still present. The paired trail shows `status=400 … status_source=downstream`. This exercises the `:90` branch that flips the outer status to 400.
@@ -400,7 +641,7 @@ Outer HTTP status **400**; per-query `status:500`, `errorSource:"plugin"`, human
 ```bash
 $ curl -s -u admin:admin http://localhost:3000/api/ds/query \
     -H 'Content-Type: application/json' \
-    -d '{"queries":[{"scenarioId":"server_error_500","datasource":{"type":"grafana-testdata-datasource","uid":"efs0ai8c7y41sf"},"refId":"A","datasourceId":1,"intervalMs":2160000,"maxDataPoints":10}],"from":"1783939200000","to":"1783960800000"}'
+    -d '{"queries":[{"scenarioId":"server_error_500","datasource":{"type":"grafana-testdata-datasource","uid":"'"$DS_UID"'"},"refId":"A","datasourceId":1,"intervalMs":2160000,"maxDataPoints":10}],"from":"1783939200000","to":"1783960800000"}'
 {"error":"Server Error","message":"Internal Server Error - please inspect Grafana server log for details"}
 ```
 
@@ -408,8 +649,11 @@ $ curl -s -u admin:admin http://localhost:3000/api/ds/query \
 HTTP/1.1 500 Internal Server Error
 Content-Type: application/json; charset=UTF-8
 Content-Length: 107
-$ sha256sum q3_err500_body.json
-048e665d1f3b6b6dd8905acd42837db1fc705e173a739bc0d98d362ffe814496
+```
+
+```bash
+$ printf '%s\n' '{"error":"Server Error","message":"Internal Server Error - please inspect Grafana server log for details"}' | sha256sum
+048e665d1f3b6b6dd8905acd42837db1fc705e173a739bc0d98d362ffe814496  -   # 107 bytes (trailing newline)
 ```
 
 Outer status **500**; note the `charset=UTF-8` suffix on the content type (absent on the 200/400 cases); the trail shows `status=500 … status_source=server`. This panic produced the full middleware stack used in Section 4.4 — i.e. the error path is exactly what makes the runtime middleware order observable.
@@ -488,7 +732,7 @@ Three labelled mirrors, discriminated by distinct `maxDataPoints` so their log l
 ```bash
 $ curl -s -u admin:admin http://localhost:3000/api/ds/query \
     -H 'Content-Type: application/json' -H 'X-Grafana-NoCache: true' \
-    -d '{"queries":[{"scenarioId":"random_walk","datasource":{"uid":"efs0ai8c7y41sf"},"refId":"A","datasourceId":1,"intervalMs":30000,"maxDataPoints":7}],"from":"1783939200000","to":"1783960800000"}' \
+    -d '{"queries":[{"scenarioId":"random_walk","datasource":{"uid":"'"$DS_UID"'"},"refId":"A","datasourceId":1,"intervalMs":30000,"maxDataPoints":7}],"from":"1783939200000","to":"1783960800000"}' \
     -o /dev/null -w "%{http_code}\n"      # repeated once ~1.5s later
 ```
 
