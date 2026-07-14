@@ -673,7 +673,21 @@ $ stat -c%s /tmp/gf_investigation/state_B/data/grafana.db
 1093632
 ```
 
-**The only value that differed across fresh installs was the admin `uid`** — Run 1/2 had `efs48r6smhse8e`, Run 3 had `ffs491gt1uiv4e`. The `uid` is **randomly generated per install** (`util.GenerateShortUID()`, `pkg/services/sqlstore/user.go:L67`); `id` (`1`), `login` (`admin`), `email` (`admin@localhost`), and `isGrafanaAdmin` (`true`) were identical every time, and `grafana.db` was **byte-identical at 1,093,632 bytes**. Confirming the two runs enable the same 56 toggles (only the print order differs):
+**The only value that differed across fresh installs was the admin `uid`** — Run 1/2 had `efs48r6smhse8e`, Run 3 had `ffs491gt1uiv4e`. The `uid` is **randomly generated per install** (`util.GenerateShortUID()`, `pkg/services/sqlstore/user.go:L67`); `id` (`1`), `login` (`admin`), `email` (`admin@localhost`), and `isGrafanaAdmin` (`true`) were identical every time. The two fresh databases were **identical in size (1,093,632 bytes)** — same schema (**76** tables), same migration counts (**626** + **18**), and same seeded identity — but they were **not byte-for-byte identical**. The one *meaningful* difference is the random `uid`; on top of that, incidental per-install bytes are persisted — the seeded `user` row's `created`/`updated` timestamps (`Created: time.Now()`, `pkg/services/sqlstore/user.go:L72`) and SQLite's own 4-byte header **change-counter** (file offset 24, which tracks write transactions). Because those bytes are written into the file, a `cmp` of two fresh installs reports a difference and their `md5` sums differ even though the byte **size** is identical. (The exact first-differing byte is itself install-dependent — it can fall in the header change-counter region near byte 28 or, when the change-counters happen to match, deeper in the seeded-`user` data page.) A byte-level comparison of two fresh installs confirms this (a fresh confirmation pair; all such temporary databases are removed at completion):
+
+```
+$ stat -c%s freshA/data/grafana.db freshB/data/grafana.db      # two fresh installs
+1093632
+1093632
+$ cmp freshA/data/grafana.db freshB/data/grafana.db ; echo "exit=$?"
+freshA/data/grafana.db freshB/data/grafana.db differ: char 4368, line 62
+exit=1
+$ md5sum freshA/data/grafana.db freshB/data/grafana.db
+48c24a77b3ad241a7e607faa6203d6b1  freshA/data/grafana.db
+aaf6578ae4825e7b6f13645f3cd04915  freshB/data/grafana.db
+```
+
+So the durable outcome is deterministic (identical size, schema, migrations, and seeded identity), while the file is *not* a byte-for-byte clone. Confirming the two runs enable the same 56 toggles (only the print order differs):
 
 ```
 $ diff <(grep FeatureToggles run1_console.log | grep -oE '[a-zA-Z0-9]+=true' | sed 's/=true//' | sort) \
@@ -741,7 +755,7 @@ The only change reported (tracked or ignored) is this documentation file; the ge
 - `/api/datasources` = `[]`; `/api/plugins` = 49 (30 panel + 19 datasource, all `internal`); `?type=app` = `[]`.
 - 54 core plugins loaded from the static-root filesystem; the `grafana-lokiexplore-app` remote preinstall failing the version check.
 - Compilation fails with `undefined: Initialize` without Wire — for **both** `go build` and `go run`; both succeed and report the same version after `wire_gen.go` is generated.
-- First-vs-subsequent deltas (Run 2, `performed=0 skipped=626/18`, same persisted `uid`) and determinism (Run 3, byte-identical `grafana.db`, differing random `uid`).
+- First-vs-subsequent deltas (Run 2, `performed=0 skipped=626/18`, same persisted `uid`) and determinism (Run 3, **size-identical** `grafana.db` — 1,093,632 bytes, same schema/migrations/seeded identity — but **not** byte-for-byte identical, due to the differing random `uid`, row timestamps, and SQLite header change-counter; `cmp` differs and `md5` sums differ).
 - Cleanup left the repository tree with no stray or ignored runtime artifacts ([Appendix A](#appendix-a-evidence-index-and-commands)).
 
 **Inferred / documented-but-not-observed (explicitly labeled):**
