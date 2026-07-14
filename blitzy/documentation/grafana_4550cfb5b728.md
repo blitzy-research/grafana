@@ -1472,7 +1472,7 @@ shutdown lines**, not by any single deregister category:
 | Lines | Category | Source |
 |---|---|---|
 | ≈ `165` | per-plugin shutdown — **3 lines per plugin** across `55` distinct built-in plugins (`"Stopping plugin"` → `"Stopping plugin process"` → `"Plugin stopped"`), each under its own `logger=plugin.<id>` | plugin backend clients stopping |
-| `55` | `"Plugin unregistered"` — one per plugin, `logger=plugins.deregister` | `pkg/plugins/manager/pipeline/termination/steps.go:51` |
+| `55` | `"Plugin unregistered"` — one per plugin, `logger=plugins.deregister` | `pkg/plugins/manager/pipeline/termination/steps.go:51-60` |
 | `28` (of `34`) | `"Stopped background service"` — **one per service**, so all `34` services that started emit exactly one stop line; `28` of them return on context-cancel *inside this shutdown burst*, while the `6` short-lived services whose `Run` had already completed during boot (`*acimpl.Service`, `*migrations.SecretMigrationProviderImpl`, `*pluginexternal.Service`, `*plugininstaller.Service`, `*store.dummyEntityEventsService`, `*store.standardStorageService`) logged theirs earlier — so a full-log `grep -c 'Stopped background service'` yields `34`, of which only these `28` fall in the burst | `pkg/server/server.go:171` |
 | ≈ `16` | assorted subsystem stop lines (`infra.kvstore.sql`, `ngalert.notifier.alertmanager`, `tracing`, `ticker`, `sqlstore.transactions`, `secrets`, `provisioning`, `http.server`, `grafana-apiserver`) | respective services |
 
