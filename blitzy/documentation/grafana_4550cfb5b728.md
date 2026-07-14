@@ -246,9 +246,9 @@ instance's log proves the window was request-free:
 ```text
 # Zero-request proof — count access-log ("Request Completed") lines in each idle instance's log.
 # (router_logging=false, so only the request-completion middleware could log inbound calls.)
-$ grep -c 'msg="Request Completed"' <INFO-1 idle log>   # 3101
-$ grep -c 'msg="Request Completed"' <INFO-2 idle log>   # 3102
-$ grep -c 'msg="Request Completed"' <DEBUG  idle log>   # 3103
+$ grep -c 'msg="Request Completed"' "$D1/log/grafana.log"   # INFO-1, port 3101
+$ grep -c 'msg="Request Completed"' "$D2/log/grafana.log"   # INFO-2, port 3102
+$ grep -c 'msg="Request Completed"' "$D3/log/grafana.log"   # DEBUG,  port 3103
 INFO-1 (3101): 1
 INFO-2 (3102): 0
 DEBUG  (3103): 0
@@ -266,8 +266,118 @@ is guarded by `if ctx != nil` (`pkg/middleware/loggermw/logger.go:82-84`).
 
 ### First-60-second window (negative result), analysed
 
+The first-60-second window is analysed with the throwaway Python script below
+(`o1_first60s.py`) — created only for capture and removed afterwards (see the cleanup
+note in the methodology section). It fixes `t0` at the first log line, counts the INFO
+lines and repeated messages inside `[t0, t0+60s]`, and — the load-bearing check — counts
+how many **background-service ticker** lines (`Completed cleanup jobs` /
+`Update check succeeded`) *recur* in that window. It parses both quoted (`msg="a b c"`)
+and bare (`msg=Target`) logfmt message forms so no startup line is mis-bucketed:
+
+```python
+#!/usr/bin/env python3
+"""Analyse the first 60 seconds of a Grafana `info`-level idle log.
+
+Answers O1's primary question: within 60 s of readiness on an idle instance,
+does any BACKGROUND-SERVICE ticker line recur? Prints t0, the first-60 s INFO
+line total, the set of INFO messages that repeat in that window, the count of
+background-ticker recurrences, and (for context) the last startup INFO line and
+the first `Completed cleanup jobs` tick.
+
+Usage:  python3 o1_first60s.py <path-to-grafana.log>
+"""
+import re, sys
+from collections import Counter
+from datetime import datetime, timedelta
+
+TS = re.compile(r' t=([0-9T:.\-]+)Z ')
+LV = re.compile(r' level=(\w+) ')
+# Grafana logfmt writes msg either quoted (msg="a b c") or bare (msg=Target);
+# capture both so no line is mis-bucketed into an empty message.
+MSG = re.compile(r' msg=(?:"([^"]*)"|(\S+))')
+LOGGER = re.compile(r'^logger=(\S+)')
+
+# The ticker-driven background emitters whose recurrence defines the O1 answer.
+TICKER_MSGS = {"Completed cleanup jobs", "Update check succeeded"}
+
+def msg_of(m):
+    return m.group(1) if m.group(1) is not None else m.group(2)
+
+def parse_ts(s):
+    # Grafana stamps nanoseconds; Python datetime supports microseconds -> truncate to 6 dp.
+    if '.' in s:
+        head, frac = s.split('.', 1)
+        frac = (frac + "000000")[:6]
+        s = head + '.' + frac
+        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S.%f")
+    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S")
+
+def main(path):
+    rows = []  # (dt, level, msg, logger)
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            mt, ml, mm = TS.search(line), LV.search(line), MSG.search(line)
+            if not (mt and ml and mm):
+                continue
+            lg = LOGGER.match(line)
+            rows.append((parse_ts(mt.group(1)), ml.group(1),
+                         msg_of(mm), lg.group(1) if lg else ""))
+    if not rows:
+        print("# no parseable log lines"); return
+    t0 = rows[0][0]
+    win_end = t0 + timedelta(seconds=60)
+
+    info_msgs = Counter()
+    seen_ticker = Counter()      # per (logger,msg) occurrences within the window
+    ticker_recurrences = 0
+    total_info = 0
+    for dt, lvl, msg, lg in rows:
+        if t0 <= dt < win_end and lvl == "info":
+            total_info += 1
+            info_msgs[msg] += 1
+            if msg in TICKER_MSGS:
+                seen_ticker[(lg, msg)] += 1
+                if seen_ticker[(lg, msg)] >= 2:   # 2nd+ = a genuine ticker recurrence
+                    ticker_recurrences += 1
+
+    recurring = {m: c for m, c in info_msgs.items() if c > 1}
+
+    # Context (whole log): last startup INFO line = the INFO line just before the
+    # largest inter-INFO gap (the idle gap), and the first cleanup tick.
+    info_rows = [(dt, msg) for dt, lvl, msg, lg in rows if lvl == "info"]
+    last_startup_dt = info_rows[-1][0]
+    max_gap = timedelta(0)
+    for (a, _), (b, _) in zip(info_rows, info_rows[1:]):
+        if b - a > max_gap:
+            max_gap, last_startup_dt = b - a, a
+    first_cleanup = next((dt for dt, lvl, msg, lg in rows
+                          if msg == "Completed cleanup jobs"), None)
+
+    print(f"# O1 first-60s result (INFO level). Server start t0 = {t0.isoformat()}")
+    print(f"# Total INFO lines in first 60s: {total_info} "
+          f"(all are one-time startup lines + one inbound 401 probe).")
+    print(f"# INFO messages that RECUR within the first 60s: {recurring}")
+    verdict = ticker_recurrences if ticker_recurrences else "0 -> NONE"
+    print(f"# Background-service ticker lines (cleanup / update.checker recurrence) "
+          f"in first 60s: {verdict}")
+    ls = (last_startup_dt - t0).total_seconds()
+    if first_cleanup is not None:
+        fc = (first_cleanup - t0).total_seconds()
+        print(f"# Last startup INFO line at +{ls:.3f}s; first recurring "
+              f"'Completed cleanup jobs' at +{fc:.3f}s ({fc/60:.1f} min).")
+    else:
+        print(f"# Last startup INFO line at +{ls:.3f}s; no 'Completed cleanup jobs' "
+              f"tick within the captured window.")
+
+if __name__ == "__main__":
+    main(sys.argv[1])
+```
+
+Running it against the `info` idle log (the `$D1` sample below is the restarted,
+already-migrated instance — see the provenance note after this block) yields:
+
 ```text
-$ python3 <analyse first 60 s of the info idle log>   # (full script in the harness)
+$ python3 o1_first60s.py "$D1/log/grafana.log"   # INFO-1 idle log, port 3101
 # O1 first-60s result (INFO level). Server start t0 = 2026-07-13T17:55:17.569069
 # Total INFO lines in first 60s: 55 (all are one-time startup lines + one inbound 401 probe).
 # INFO messages that RECUR within the first 60s: {'Config overridden from command line': 5, 'Locking database': 2, 'Starting DB migrations': 2, 'migrations completed': 2, 'Unlocking database': 2, 'Update check succeeded': 2}
@@ -749,10 +859,21 @@ The stateful boundary is captured by running twice against the **same** SQLite D
    and **no** `Executing migration` lines. This second run is the up-to-date confirmation.
 
 ```bash
+# INFO level — fresh then restart into ONE data dir. Grafana's file logger APPENDS to
+# grafana.log across restarts, so the combined log holds BOTH the fresh (performed=626/18)
+# and the restart (performed=0) completion lines; the (1)/(2) sections below split them by timestamp.
 D=$(mktemp -d /tmp/gf_cap.XXXXXX)
 PID=$(start_instance 3101 "$D"); wait_ready 3101; stop_instance "$PID"   # (1) fresh -> performed=626/18
 PID=$(start_instance 3101 "$D"); wait_ready 3101; stop_instance "$PID"   # (2) restart -> performed=0
 grep -E 'logger=(migrator|resource-migrator) ' "$D/log/grafana.log"
+
+# DEBUG level — same fresh->restart, but move the fresh log aside between runs so the
+# restart's grafana.log isolates the "already up to date" skip / performed=0 stream used below.
+Ddbg=$(mktemp -d /tmp/gf_cap.XXXXXX)
+PID=$(start_instance 3101 "$Ddbg" cfg:default.log.level=debug); wait_ready 3101; stop_instance "$PID"  # (1) fresh (debug)
+mv "$Ddbg/log/grafana.log" "$Ddbg/log/grafana_fresh.log"                                               # isolate the fresh run
+PID=$(start_instance 3101 "$Ddbg" cfg:default.log.level=debug); wait_ready 3101; stop_instance "$PID"  # (2) restart (debug)
+grep 'msg="Skipping migration: Already executed"' "$Ddbg/log/grafana.log" > o2_debug_skips.txt          # per-migration skip stream
 ```
 
 ### (1) Fresh DB — migrations applied (the "before" state)
@@ -2106,7 +2227,7 @@ $ grep -c '^logger=resource-migrator ' o2_debug_skips.txt  # unified-storage mig
 Debug-run completion lines (again `performed=0`):
 
 ```text
-$ grep 'msg="migrations completed"' <DEBUG restart log>
+$ grep 'msg="migrations completed"' "$Ddbg/log/grafana.log"   # DEBUG restart run (fresh log moved aside in the harness above)
 logger=migrator t=2026-07-13T17:55:50.773371295Z level=info msg="migrations completed" performed=0 skipped=626 duration=3.09297ms
 logger=resource-migrator t=2026-07-13T17:55:50.929369508Z level=info msg="migrations completed" performed=0 skipped=18 duration=128.811µs
 ```
@@ -3379,7 +3500,7 @@ suite reports `Tests: 2 passed, 2 total`.
 
 - `public/app/features/dashboard-scene/panel-edit/PanelDataPane/PanelDataQueriesTab.tsx`:
   - `:60` — on activation, calls `this.loadDataSource()`.
-  - `:71` — `const datasourceToLoad = this.queryRunner.state.datasource;` (the datasource already
+  - `:71` — `let datasourceToLoad = this.queryRunner.state.datasource;` (the datasource already
     defined in the panel's queries).
   - `:77-99` — only when `datasourceToLoad` is empty does it fall back to last-used/default.
   - `:101-107` — otherwise resolves the instance via `getDataSourceSrv().get(...)` and stores it
@@ -3750,7 +3871,7 @@ in the repository (verified in the final `git status`).
 | Include actual, complete, unedited output with the producing command; no `// ...` elision                | All logs/JSON/Jest/test-source embedded verbatim (large ones in `<details>`, nothing elided)                    |
 | Exact and grounded: actual values with `file:line`; name the specific function/method/struct             | Per-claim full repo-root `file:line`; named `apiHealthHandler`, `rulerRuleToFormValues`, `loadDataSource`, etc. |
 | Answer every part and every named item; coverage pass                                                    | All O1–O5 and every named item below addressed                                                                  |
-| Scope: modify no existing file; add only the answer doc; remove temp scripts                             | Only this file added; both throwaway tests deleted; build artifacts removed; `git status` clean otherwise       |
+| Scope: modify no existing file; add only the answer doc; remove temp scripts                             | Only this file added; both throwaway tests deleted; build artifacts are git-ignored (never in the delta); `git status` clean otherwise |
 
 ### Named-item checklist
 
@@ -3765,7 +3886,11 @@ in the repository (verified in the final `git status`).
 - The two throwaway tests (`PanelDataQueriesTab.o4tmp.test.tsx`, `RuleEditorO5.o5tmp.test.tsx`)
   were created only during capture and **deleted** afterwards.
 - Task-created build artifacts (`pkg/server/wire_gen.go`, `bin/linux-amd64/grafana`,
-  `bin/linux-amd64/grafana.md5`) are git-ignored and were removed during finalization.
+  `bin/linux-amd64/grafana.md5`) are **git-ignored** build outputs. They may remain on disk (or be
+  rebuilt on a subsequent run) after the investigation, but because they are git-ignored they never
+  appear in the git delta — `git status` reports only the single new answer file whether or not they
+  are present (verified: `git check-ignore` lists all three; `git status --porcelain` shows only
+  `blitzy/documentation/grafana_4550cfb5b728.md`).
 - A final `git status` shows the working tree unchanged **except** for this single new file,
   `blitzy/documentation/grafana_4550cfb5b728.md`. No repository source, configuration, test, or
   lockfile was modified.
