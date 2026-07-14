@@ -1,6 +1,6 @@
 # What Grafana Does on a Clean-State Startup — A Run-First, Evidence-Grounded Investigation
 
-> **Scope of this document.** This is a factual, *observed-behavior* account of what Grafana (`grafana/grafana`, product version `11.5.0-pre`) actually does when it boots from a **completely clean state**: no `conf/custom.ini`, no `GF_*` environment variables, and an empty data directory. Every behavioral claim below was produced by **building and running the real `server` entry point first**, capturing complete unedited output (stdout/stderr and exit status), and only *then* grounding the explanation in the source with `file:line` references.
+> **Scope of this document.** This is a factual, *observed-behavior* account of what Grafana (`grafana/grafana`, product version `11.5.0-pre`) actually does when it boots from a **completely clean state**: no `conf/custom.ini`, no `GF_*` environment variables, and an empty data directory. Every behavioral claim below was produced by **building and running the real `server` entry point first**, capturing its real output (stdout/stderr, and the exit status wherever it is material), and only *then* grounding the explanation in the source with `file:line` references. Output is shown **complete and unedited wherever practical**; for a few unavoidably long or rotating streams (e.g. the 1300+‑line first‑run log, or a repeated ~40‑frame stack field) a **clearly‑labeled faithful excerpt** is shown instead — the complete head, a complete `grep` of the relevant lines, and/or the complete tail — always alongside the exact producing command, so the full stream is reproducible.
 >
 > **Canonical build/run identity.** All values were produced by the project's own build machinery (`go run build.go build-backend`) and the resulting binary `./bin/grafana`. That binary self-reports `Version 11.5.0-pre (commit: 8bc9b06191, branch: blitzy-d319eda3-6a4f-4f3c-a8c4-70f4da2bbc81)`. The `commit`/`branch` are **naturally derived from the current checkout** (`git rev-parse --short HEAD` / `--abbrev-ref HEAD`), not hand-supplied. The source branch from which this file is named, `grafana_4550cfb5b728`, corresponds to the upstream baseline commit `4550cfb5b7`; this document is added as **one or more commits on top of** that baseline, so HEAD sits *past* `4550cfb5b7`. The `commit: 8bc9b06191` shown here — **and every `commit`/`buildstamp` value throughout this document** — is the value stamped **as of authoring** (the short HEAD at the time the binary used for these observations was built); because committing this document itself advances HEAD, the exact HEAD and the number of commits on top are point-in-time and a rebuild at the *current* HEAD stamps the then-current short commit. The stable, commit-count-independent invariant is that `blitzy/documentation/grafana_4550cfb5b728.md` is the single path added on top of `4550cfb5b7`. Where a reported value depends on how the binary is built, both the **canonical** value and any **non-canonical** fallback are shown and labeled.
 >
@@ -15,13 +15,13 @@
 - **Area 3 — Security posture.** This is **not** a permissive/anonymous mode. Grafana *creates* a real `admin`/`admin` database account (`conf/defaults.ini:328,331`) and, when you sign in with the password still `admin`, the frontend **prompts** a change on an "Update your password" screen — but that prompt is **skippable, not forced** (a **Skip** button renders, gated on `!config.auth.basicAuthStrongPasswordPolicy`, which defaults to *false*; clicking it lands you in the app with the password unchanged). Anonymous access is **disabled by default**, proven with a *discriminating* route (unauthenticated `GET /` → **302 → `/login`**, versus **200** when anonymous access is enabled); self-service sign-up is **disabled** (`allow_sign_up = false`). The feature-toggle registry has **226** flags that split three ways: **56** enabled-by-default (`Expression: "true"`), **12** explicit opt-out (`Expression: "false"`), and **158** with no expression (off unless enabled); the clean runtime reports **57** enabled (the 56 plus the deprecated `topnav` compatibility toggle force-set by the API).
 - **Area 4 — Plugins vs data sources.** Separate **four layers**: (1) **18** core *datasource* **backend clients compiled into the Go binary** (`coreplugin/registry.go:102–121`); (2) **22** frontend *datasource* asset directories and (3) **32** frontend *panel* asset directories under `public/app/plugins` — these are TypeScript/React static assets, **not** compiled into the Go binary (panels have no Go backend at all); (4) runtime visibility — `/api/plugins` returns **50** (**49 `internal` + 1 `valid`**) *after* an asynchronous network **preinstall**, and **49** without it (`preinstall_disabled=true`, proven). The count reconciles as `Plugins loaded 54` (22 ds + 32 panel) − 3 built-in datasources − 2 alpha panels = 49, + 1 preinstalled app = 50. `/api/datasources` returns an **empty `[]`**: a plugin ≠ a configured data source, and the `conf/provisioning` samples ship commented out.
 - **Area 5 — Build dependency.** `pkg/server/wire_gen.go` is **git-ignored** (`.gitignore:194`) and produced by `make gen-go`. Without it the backend **does not compile** (`pkg/server/service.go:31:15: undefined: Initialize`). Running directly with `go run` still requires it. A plain `go build`/`go run` also skips ldflags, so it reports a **non-canonical** `9.2.0` banner; the canonically-built binary (`go run build.go build-backend`) reports **`11.5.0-pre (commit: 8bc9b06191, branch: blitzy-…)`**, both `commit`/`branch` naturally derived from the checkout. The full UI additionally needs `public/build/*` from `yarn build`; without it, index/login fail **HTTP 500** (assets-manifest load failure), not 404.
-- **Read-only guarantee.** The only repository artifact created is *this* document. `git status --porcelain` at the end shows only the new file under `blitzy/`. Zero tracked source files were modified; all runtime state and scratch artifacts live outside the repository tree under `/tmp`. The investigation ran as the container's `root` user (`uid=0`), which is disclosed rather than described as a "normal user".
+- **Read-only guarantee.** The only repository artifact created is *this* document. The **final** `git status --porcelain` is **empty** (this document committed; nothing else outstanding), and the only delta from the upstream baseline `4550cfb5b7` is the **single added path** `blitzy/documentation/grafana_4550cfb5b728.md` (proven via `git diff --name-status` below — a commit-count-independent invariant). Zero tracked source files were modified. **Nearly** all runtime state and scratch artifacts lived outside the repository tree under `/tmp`; the **one exception** was the Area-3 UI screenshots, which were briefly written *inside* the working tree at `blitzy/screenshots/` (a path that is **not** git-ignored) and then removed before commit, leaving no residue — disclosed in full in the appendix cleanup note. The investigation ran as the container's `root` user (`uid=0`), which is disclosed rather than described as a "normal user".
 
 ---
 
 ## Canonical Build & Run Baseline
 
-Everything in the five answer sections was produced with the commands and environment recorded here. The rule is **disclose everything**: where a value depends on the build, both the canonical and non-canonical forms are shown and labeled, and every command is shown with its complete, unedited output and exit status.
+Everything in the five answer sections was produced with the commands and environment recorded here. The rule is **disclose everything**: where a value depends on the build, both the canonical and non-canonical forms are shown and labeled, and every command is shown with its real output (and its exit status wherever that status is material). Output is complete and unedited wherever practical; a few unavoidably long or rotating streams are shown as **clearly-labeled faithful excerpts** (complete head + complete milestone `grep` + complete tail, or a field explicitly stripped and separately named), always with the producing command so the full output is reproducible.
 
 ### Execution identity (disclosed)
 
@@ -301,7 +301,9 @@ On startup the process entry point `pkg/cmd/grafana/main.go` registers a `server
 2. **The `"disabled"/"skipped"` lines are NOT printed by the run loop.** The `registry.IsDisabled` gate in `Server.Run` (`pkg/server/server.go:150`) skips an opted-out service with a bare `continue` — **no log at the gate**. Services that opt out (e.g. `searchV2`, `grpcserver`) therefore disappear *silently*. The only literal `skip`/`Skipping` text in a clean-state info log comes from the **migrator** (individual already-applied migrations and the `skipped=N` counter); the word "disabled" appears only inside migration *names*. At `debug` level one more explanation appears — the secrets kvstore noting the remote plugin is off.
 3. **The `"success"` lines are ordinary info logs from services that *are* enabled** (`migrations completed`, `Update check succeeded`, `HTTP Server Listen`, `app registry initialized`). Not every enabled service logs success — most of the 34 started background services start silently.
 
-### Observed evidence — complete first-run stream
+### Observed evidence — the first-run stream (complete head, complete milestone `grep`, and shutdown tail)
+
+The first-run log is **1358 lines** (mostly the 626 individual migration lines). Rather than paste all 1358, it is presented below as three **complete, verbatim slices**, each with its producing command: the **complete head** (lines 1–24, `sed -n '1,24p'`), a **complete `grep`** of every lifecycle milestone across the whole file, and the **complete shutdown tail** (`awk` from `Shutdown started`). The full log is reproducible from the harness command shown first; nothing between the slices is a claim not covered by one of them.
 
 Command — the safe-lifecycle harness `gf_run.sh` (quoted in full in the Baseline section; `REPO` is the real repository checkout, and `gf_start` launches `"$REPO/bin/grafana" server --homepath="$REPO"` plus the four `cfg:` overrides shown there). It captures the background PID via `$!`, polls `/api/health` for readiness, waits for the async startup to settle, sends a single `SIGTERM`, and `wait`s to report the true exit status. App mode stays the default *production*:
 
@@ -1533,7 +1535,7 @@ All of the above matches the observed 50-plugin catalog (49 internal + 1 valid),
 
 A clean checkout is missing **two generated artifacts** the runtime depends on, in two different ways:
 
-1. **`pkg/server/wire_gen.go` — a hard compile-time dependency.** It is produced by Google Wire dependency-injection code generation (`make gen-go`) and is **git-ignored** (`.gitignore:194` → `**/wire_gen.go`), so it does not exist in a fresh checkout. **The backend does not compile until it exists** — `go build ./pkg/server` fails with `undefined: Initialize` because `Initialize` is the Wire-generated injector. This is true whether you `go build`/install first *or* `go run` directly: `go run ./pkg/cmd/grafana` compiles the very same packages, so it fails **identically** without `wire_gen.go`. Running directly is therefore **not** a way to sidestep the generated-file requirement.
+1. **`pkg/server/wire_gen.go` — a hard compile-time dependency.** It is produced by Google Wire dependency-injection code generation (`make gen-go`) and is **git-ignored** (`.gitignore:194` → `**/wire_gen.go`), so it does not exist in a fresh checkout. **The backend does not compile until it exists** — `go build ./pkg/server` fails with `undefined: Initialize` because `Initialize` is the Wire-generated injector. This is true whether you `go build`/install first *or* `go run` directly: the named `go run ./pkg/cmd/grafana` path was **exercised twice with and twice without** the generated file (A5-2b) and fails **identically** without `wire_gen.go` — it compiles the very same `pkg/server` package before it can run. Running directly is therefore **not** a way to sidestep the generated-file requirement.
 
 2. **`public/build/*` (webpack bundles, including `assets-manifest.json`) — a runtime-render dependency, not a compile dependency.** Produced by `yarn build`. Without them the backend still **compiles, starts, and serves the API** (`/api/health` → `200`), but the HTML entry points **fail with HTTP `500` (not `404`)**: `GET /login` and the authenticated `GET /` call `setIndexViewData` → `webassets.GetWebAssets`, which reads `<static_root_path>/build/assets-manifest.json`; a missing manifest returns an error that becomes `http.StatusInternalServerError`.
 
@@ -1606,6 +1608,50 @@ $ wc -c < pkg/server/wire_gen.go
 ```
 
 `undefined: Initialize` is exact: `pkg/server/service.go:31` calls `Initialize(...)`, whose body is generated **only** in `wire_gen.go`. The hand-written provider set lives in `pkg/server/wire.go`; the injector implementation is the generated file. The identical 94781-byte `wire_gen.go` is produced in both the copy and the real tree, confirming reproducibility. The throwaway copy and tarball were removed afterward (`rm -rf "$WORK"` → `removed /tmp/gf-investigation/a5/archive-exp`); the working tree was never modified.
+
+#### A5-2b — The direct `go run ./pkg/cmd/grafana` path is *exercised*, not merely reasoned
+
+The A5-2 experiment above used `go build ./pkg/server`. Because the question specifically asks whether *running directly* (`go run`) is equivalent to building first, the **named entry point** `go run ./pkg/cmd/grafana` was exercised end-to-end in a second throwaway `git archive HEAD` copy (again materialised **outside** the repo, so `.git` and the git-ignored `wire_gen.go` are both absent). It was run **twice without** the generated file and **twice after** `make gen-go`, using `server -v` each time — a fast, self-terminating invocation that nonetheless compiles the full `pkg/server` dependency graph — plus one `--version` repetition for the CLI banner. The complete, unedited transcript below shows every command with its output, exit status, and elapsed time:
+
+```console
+$ WORK=/tmp/gf-runexp; rm -rf "$WORK"; mkdir -p "$WORK/copy"
+$ git archive --format=tar HEAD > "$WORK/head.tar"; wc -c < "$WORK/head.tar"
+133867520
+$ tar -xf "$WORK/head.tar" -C "$WORK/copy"; find "$WORK/copy" -type f | wc -l; ls "$WORK/copy" | wc -l
+16257
+58
+$ test -e "$WORK/copy/pkg/server/wire_gen.go" && echo PRESENT || echo "wire_gen.go ABSENT (git-ignored => excluded from archive)"
+wire_gen.go ABSENT (git-ignored => excluded from archive)
+$ cd "$WORK/copy"
+# ---- NO WIRE: direct 'go run' of the real entry point, two runs ----
+$ go run ./pkg/cmd/grafana server -v
+# github.com/grafana/grafana/pkg/server
+pkg/server/service.go:31:15: undefined: Initialize
+[exit=1  elapsed=4.1s]
+$ go run ./pkg/cmd/grafana server -v
+# github.com/grafana/grafana/pkg/server
+pkg/server/service.go:31:15: undefined: Initialize
+[exit=1  elapsed=4.0s]
+# ---- GENERATE Wire, then repeat the SAME 'go run', two runs ----
+$ make gen-go 2>&1 | tail -2
+go run  ./pkg/build/wire/cmd/wire/main.go gen -tags "oss" ./pkg/server
+wire: github.com/grafana/grafana/pkg/server: wrote /tmp/gf-runexp/copy/pkg/server/wire_gen.go
+[exit=0  elapsed=30.1s]
+$ wc -c < pkg/server/wire_gen.go
+94781
+[exit=0  elapsed=0.0s]
+$ go run ./pkg/cmd/grafana server -v
+Version 9.2.0 (commit: NA, branch: main)
+[exit=0  elapsed=11.4s]
+$ go run ./pkg/cmd/grafana server -v
+Version 9.2.0 (commit: NA, branch: main)
+[exit=0  elapsed=11.6s]
+$ go run ./pkg/cmd/grafana --version
+grafana version 9.2.0
+[exit=0  elapsed=12.1s]
+```
+
+This confirms the assertion **by observation**, not inference: `go run ./pkg/cmd/grafana` fails **identically** to `go build` — `pkg/server/service.go:31:15: undefined: Initialize`, `exit 1`, stable across both runs — because `go run` compiles the very same `pkg/server` package before it can run anything. After `make gen-go` regenerates the byte-identical **94781-byte** `wire_gen.go` (sha256 `87899e3ddd41801a8ea6815a48bd31d092777f4fa1d04bb34cef162a34aa6e79`, matching the real tree), the *same* `go run` compiles and runs to a clean **exit 0** on both repetitions. Because a plain `go run` carries **no** ldflags, the banner is the **non-canonical** fallback — `Version 9.2.0 (commit: NA, branch: main)` (`server -v`) / `grafana version 9.2.0` (`--version`), i.e. the `pkg/cmd/grafana/main.go:17-20` source literals — **not** the canonical `11.5.0-pre`. So "just running it directly" is neither a shortcut around the generated-file requirement nor a source of the canonical version string. The copy and tarball were removed afterward (`rm -rf /tmp/gf-runexp`); the working tree was never modified.
 
 #### A5-1 — Canonical (ldflags-stamped) vs non-canonical (unstamped) build
 
@@ -1918,7 +1964,7 @@ Content-Length: 343
     <link rel="stylesheet" href="
 ```
 
-The server log pinpoints the origin. Two consecutive `level=error` lines are emitted for each failing request — the manifest-load failure and the resulting template-render error — shown here complete and verbatim (each line also carries a large `stack="..."` field; that field is the same ~40-frame `net/http` + `pkg/web` middleware `ServeHTTP` chain on every request, so it is stripped by the `sed` below and its handler-relevant frames are named as `file:line` grounding immediately after):
+The server log pinpoints the origin. Two consecutive `level=error` lines are emitted for each failing request — the manifest-load failure and the resulting template-render error — shown here verbatim **except for one repetitive field** (each line also carries a large `stack="..."` field; that field is the same ~40-frame `net/http` + `pkg/web` middleware `ServeHTTP` chain on every request, so it is deliberately stripped by the `sed` below — a labeled excerpt — and its handler-relevant frames are named as `file:line` grounding immediately after):
 
 ```
 $ grep -nE 'msg="Failed to get settings"|msg="Request error"' /tmp/gf-investigation/logs/a5-missing-frontend3.log | sed 's/ stack=.*//' | head -2
@@ -1973,7 +2019,7 @@ So: **658 top-level entries** (`ls public/build | wc -l`) — a few of which are
 
 #### Running directly vs. building first
 
-- **Wire (compile) dependency — identical either way.** `go run ./pkg/cmd/grafana` compiles the same `pkg/server` package that `go build` does, so it fails with the same `undefined: Initialize` when `wire_gen.go` is absent, and succeeds once `make gen-go` has run. Running directly is **not** a shortcut around the generated file.
+- **Wire (compile) dependency — identical either way (observed in A5-2b).** `go run ./pkg/cmd/grafana` compiles the same `pkg/server` package that `go build` does, so — as directly exercised in A5-2b — it fails with the same `pkg/server/service.go:31:15: undefined: Initialize` (exit 1) when `wire_gen.go` is absent, and succeeds (exit 0, non-canonical `9.2.0` banner) once `make gen-go` has run. Running directly is **not** a shortcut around the generated file.
 - **Frontend (render) dependency — neither Go path produces it.** Neither `go build` nor `go run` creates `public/build`; that is `yarn build`'s job. So "just running the server" gives you a working backend/API but, without a prior `yarn build`, index/login return `500` (A5-4). The two generated dependencies are independent: `gen-go` unblocks compilation; `yarn build` unblocks the HTML UI.
 
 ### `file:line` grounding
@@ -2073,7 +2119,7 @@ This closing pass confirms that every mechanism, function, condition, file, flag
 | Generated files the runtime depends on | Area 5 — throwaway compile experiment | `pkg/server/wire_gen.go` (Wire) + `public/build/*` (webpack) |
 | `wire_gen.go` is generated & git-ignored | Area 5 (A5-2) | `git check-ignore` → `.gitignore:194`; archive of HEAD lacks it |
 | Backend won't compile without it | Area 5 | compile FAILS `undefined: Initialize` (exit 1) → `make gen-go` (94781 bytes) → compile SUCCEEDS (exit 0) |
-| Running directly **vs** building first | Area 5 | `go run`/`go build` both require the generated Wire file first |
+| Running directly **vs** building first | Area 5 (A5-2b) | `go run ./pkg/cmd/grafana` exercised ×2 without Wire (exit 1 `undefined: Initialize`) and ×2 after `make gen-go` (exit 0, non-canonical `9.2.0`) — identical to `go build` |
 | Which artifacts must exist before code paths work | Area 5 (A5-4) | missing `public/build` manifest → `GET /login` **500** (via `cfg:server.static_root_path`); `/api/health` still 200 |
 | Canonical build command & version stamping | Baseline + Area 5 (A5-1) | `build.go build-backend` → `11.5.0-pre commit=8bc9b06191`; plain `go build` → `9.2.0` |
 | Make/Bra target semantics | Baseline (Make/Bra) + Area 5 (A5-3) | `gen-go`, `build-go`, `build-backend`, `run`(Bra), `run-go`; complete `.bra.toml` |
@@ -2087,9 +2133,9 @@ This closing pass confirms that every mechanism, function, condition, file, flag
 |---|---|
 | Report the **canonical default** build/run values + exact commands | Baseline (both banners) + Area 5 |
 | Label **non-canonical** values (dev flags, plain `go build`, ldflag override) | Baseline (`9.2.0`, `0.0.0-blitzyOverride`); Make/Bra dev-flag note |
-| **Two-run** confirmation of every observation category | build, auth, identity, plugin, datasource, feature-count, directory-count — each shown twice (DQ-2) |
+| **Two-run** confirmation of the repeatable observation categories | server startup, auth/login, identity (`/api/user`), plugin count, datasource list, feature-toggle count, directory counts, missing-frontend `500`, and the `go run` compile-gate (A5-2b) — each shown twice (DQ-2). Inherently one-shot experiments (the explicit ldflag-override demonstration and the single end-of-run cleanup transcript) are non-repeatable by nature and labeled as such rather than claimed twice. |
 | First-run vs subsequent-run against the **same** data dir | Area 2 (isolated `data-a2` pair) |
-| **Complete, unedited** output with the producing command | every fenced block across Areas 1–5 (DQ-1) |
+| **Unedited** output with the producing command — complete wherever practical; long/rotating streams shown as clearly-labeled faithful excerpts | every fenced block across Areas 1–5 (DQ-1); excerpted streams (1358-line first-run log, ~40-frame stack field) are labeled at the point of use |
 | Every **inference** conspicuously labeled | Baseline (git fallbacks, dev-flag mode), Area 1 (offline update-checkers), Area 4 (offline preinstall) (DQ-5) |
 | **Resolvable** official web cross-checks | Areas 2–5 + Baseline: `grafana.com/docs`, `github.com/grafana/grafana`, `github.com/google/wire` (DQ-3) |
 | **External contacts** disclosed (destinations, timing, offline, disable controls) | Area 1 (update checkers) + Area 4 SEC-3 (grafana.com preinstall) |
@@ -2107,7 +2153,7 @@ This appendix records how the investigation was run, the environment it ran in, 
 ### A. Environment (disclosed, canonical)
 
 - **Execution identity:** all commands ran as **root** (`uid=0(root)`, `HOME=/root`) inside the project's Docker container `andrewparkscaleai/coding-agent:grafana__grafana__4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`. Running as root is disclosed because it affects file ownership of engineered directories; it does **not** change any observed Grafana default.
-- **Toolchain (consumed, never changed):** Go `1.23.1`, Node `v22.23.1`, Yarn `4.5.3`, GCC `15.2.0` — matching `go.mod` (`go 1.23.1`), `.nvmrc`/`package.json engines`, and the CGO requirement of the embedded SQLite driver (`mattn/go-sqlite3`).
+- **Toolchain (consumed, never changed):** Go `1.23.1`, Node `v22.23.1`, Yarn `4.5.3`, GCC `15.2.0`. Go `1.23.1` matches `go.mod` (`go 1.23.1`) *exactly*; Node `v22.23.1` **satisfies** `package.json` engines (`"node": ">= 22"`) and is **newer** than the `.nvmrc` pin (`v22.11.0`) — a compatible, forward version rather than an exact match to the pin; Yarn `4.5.3` matches the repo-pinned `packageManager`; and GCC satisfies the CGO requirement of the embedded SQLite driver (`mattn/go-sqlite3`).
 - **Repository:** `grafana/grafana`, product version `11.5.0-pre`, destination branch `blitzy-d319eda3-6a4f-4f3c-a8c4-70f4da2bbc81`, sitting one or more commits past the upstream baseline `4550cfb5b7` (short HEAD `8bc9b06191` **as of authoring**; the HEAD advances with each recommit of this document, while the single-added-path invariant against `4550cfb5b7` is stable).
 - **Clean state engineered per run:** no `conf/custom.ini`, zero `GF_*` environment variables, and an empty/absent data directory redirected under `/tmp` via `cfg:paths.data=…` so no writable state ever touches the repository tree.
 - **Network:** outbound internet was **available** during the investigation, so the update checkers succeeded and the async plugin preinstall (`grafana-lokiexplore-app v1.0.10`) downloaded; offline behavior is labeled **inferred** where it appears (Areas 1 and 4).
