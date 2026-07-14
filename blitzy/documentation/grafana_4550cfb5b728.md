@@ -1,6 +1,6 @@
 # Grafana Runtime Investigation — grafana_4550cfb5b728
 
-This document answers five questions about Grafana's runtime behavior at the scenes-v5.32.0 head commit **`4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`** ("Upgrade scenes to v5.32.0 (#97944)"). All observations were taken on branch head **`b23f15d49d`**, which layers **only** this answer document on top of `4550cfb5b7`; no source file differs between the two, so the observed behavior and every `file:line` citation pertain to the source at `4550cfb5b7`.
+This document answers five questions about Grafana's runtime behavior at the scenes-v5.32.0 head commit **`4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`** ("Upgrade scenes to v5.32.0 (#97944)"). The investigation branch layers **only** this answer document on top of `4550cfb5b7`; no source file differs from that commit, so the observed behavior and every `file:line` citation pertain to the source at `4550cfb5b7`.
 
 It is a **run-first, evidence-grounded** investigation. For every behavioral claim the document shows the exact command that produced it and the **actual captured output** (log lines, HTTP responses, Jest results), then names the responsible code by `file:line` with a cause → effect explanation. Values are reported exactly as observed at runtime; the few statements that can only be derived from reading source (for example, the recurrence period of a timer whose interval exceeds the observation window) are explicitly labelled **inferred**. The investigation is strictly **read-only** with respect to existing source: no existing repository file was modified — this answer document is the sole tracked change — and every temporary observation script was removed on completion (verified with git evidence in the Closing Note).
 
@@ -20,19 +20,17 @@ This document is **run-first**: every behavioral claim below is accompanied by t
 
 ### Baseline and repository integrity
 
-```bash
-$ git rev-parse HEAD
-b23f15d49d194702b2164fc6956e56e21052132a
+The investigation branch layers **only** this answer document on top of the scenes-v5.32.0 head commit `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff` — no existing source file is modified. The two commands below establish that stably: the working tree is clean, and the *only* difference between the investigated base commit and the branch head is the addition of this one document (status `A`). A specific branch-head SHA and an insertion count are intentionally **not** quoted here, because they change every time this document itself is committed; the durable, always-true facts are the clean tree and the single added file.
 
+```bash
 $ git status --porcelain
                       # (empty = clean working tree)
 
-$ git diff --stat 4550cfb5b7 HEAD
- blitzy/documentation/grafana_4550cfb5b728.md | 608 +++++++++++++++++++++++++++
- 1 file changed, 608 insertions(+)
+$ git diff --name-status 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff HEAD
+A	blitzy/documentation/grafana_4550cfb5b728.md
 ```
 
-The investigation runs against branch head `b23f15d49d`, which layers **only** this answer document on top of the scenes-v5.32.0 head `4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff`; no source file differs between the two (the sole tracked delta is the document itself). All runtime observations therefore reflect the exact source at commit `4550cfb5b7`.
+Because the sole delta from `4550cfb5b7` is this document (an addition), no source file differs and all runtime observations — and every `file:line` citation below — reflect the exact source at commit `4550cfb5b7`.
 
 ### Toolchain versions (with the commands that produced them)
 
@@ -81,7 +79,7 @@ Targeting linux/amd64
 real	0m14.264s
 ```
 
-The build orchestrator (`pkg/build/cmd.go:247`) injects the version via ldflags. The observed injected values are therefore `main.version=11.5.0-pre` (from `package.json:6`), `main.commit=b23f15d49d`, and `main.buildstamp=1784060137` — these are the **actual** values for this checkout and are the values reported throughout Q3. (The `main.commit` reflects the branch head `b23f15d49d`, i.e. the document commit sitting atop scenes head `4550cfb5b7`; no source file differs.) Binary self-report:
+The build orchestrator (`pkg/build/cmd.go:247`) injects the version via ldflags. The observed injected values are therefore `main.version=11.5.0-pre` (from `package.json:6`), `main.commit=b23f15d49d`, and `main.buildstamp=1784060137` — the **actual** values captured from this build and reported throughout Q3. (`main.commit=b23f15d49d` is the commit that was `HEAD` when this binary was built — the documentation commit sitting directly atop scenes head `4550cfb5b7`; because no source file differs between them, the version string is identical for either commit.) Binary self-report:
 
 ```bash
 $ ./bin/linux-amd64/grafana --version
@@ -172,7 +170,7 @@ logger=http.server t=2026-07-14T21:02:17.828885974Z level=info msg="HTTP Server 
 
 Zero requests were issued to any of the four instances for their entire lifetime. The idle window is measured from this "HTTP Server Listen" instant (t₀ = 21:02:17).
 
-> **Fresh-database nuance (why the window starts past t₀).** These runs use a fresh SQLite database, so the first ~60 seconds after process start contains a **one-time** schema-migration burst (~100 distinct `Executing migration` lines that merely share the same `msg` text). That burst is **not** periodic recurrence — it never repeats. Q1's steady-state analysis therefore samples a window that begins **after** startup/migration completes (from t₀+120s onward), isolating genuine interval-driven recurrence.
+> **Fresh-database nuance (why the window starts past t₀).** These runs use a fresh SQLite database, so the first few seconds after process start contain a **one-time** schema-migration burst of **644** `Executing migration` info lines (`pkg/services/sqlstore/migrator/migrator.go:356`, logged at Info) — **626** from `logger=migrator` plus **18** from `logger=resource-migrator`, exactly the two migrators' `performed=626` / `performed=18` counts reported in Q2 — that merely share the same `msg` text. That burst is **not** periodic recurrence — it never repeats. Q1's steady-state analysis therefore samples a window that begins **after** startup/migration completes (from t₀+120s onward), isolating genuine interval-driven recurrence.
 
 ### Q1-a — The 60-second idle window at the default level is recurrence-free (observed)
 
@@ -238,7 +236,7 @@ logger=grafana.update.checker t=2026-07-14T21:02:17.864134795Z level=info msg="U
 
 ### Q1-c — The sub-minute recurring set (DEBUG only) — observed twice for stability
 
-Idling at the default `level=info` hides all high-frequency tickers because they log at **Debug**. Running at `level=debug` surfaces them. The two debug runs (`run3`=3102, `run3b`=3103) produced **identical** emitter sets and counts, confirming stability:
+Idling at the default `level=info` hides all high-frequency tickers because they log at **Debug**. Running at `level=debug` surfaces them. The two debug runs (`run3`=3102, `run3b`=3103) produced **identical** emitter sets and counts, confirming stability. The **complete** periodic DEBUG set has **ten** `(logger, msg)` emitters, each recurring on a fixed 10-second or 60-second interval:
 
 | Emitter (logger) | msg | Interval | run3 count | run3b count |
 |---|---|---|---|---|
@@ -246,9 +244,14 @@ Idling at the default `level=info` hides all high-frequency tickers because they
 | `secrets` | `Removing expired data keys from cache...` | 60 s | 3 | 3 |
 | `secrets` | `Removing expired data keys from cache finished successfully` | 60 s | 3 | 3 |
 | `ssosettings.service` | `reloading SSO Settings for all providers` | 60 s | 3 | 3 |
+| `ssosettings.service` † | `No SSO Settings found in the database, using system settings` (per provider) | 60 s | 28 | 28 |
 | `ngalert.multiorg.alertmanager` | `Synchronizing Alertmanagers for orgs` | 60 s | 4 | 4 |
 | `ngalert.multiorg.alertmanager` | `Done synchronizing Alertmanagers for orgs` | 60 s | 4 | 4 |
+| `ngalert.notifier.alertmanager` (`org=1`) † | `Config hasn't changed, skipping configuration sync.` | 60 s | 3 | 3 |
 | `ngalert.sender.router` | `Attempting to sync admin configs` | 60 s | 4 | 4 |
+| `ngalert.sender.router` † | `Finish of admin configuration sync` | 60 s | 4 | 4 |
+
+> **† Enumeration completeness (re-verification).** The three daggered rows complete the periodic DEBUG set. Because they accompany lines already listed — the SSO reload cycle, the multiorg-Alertmanager sync, and the admin-config sync — they are driven by the **same** 60 s tickers and recur identically. They were re-confirmed in two additional debug runs (canonical binary, loopback-only, temp-pathed, ≥236 s idle, **zero** HTTP requests) with **identical** counts across both runs (`28` / `3` / `4` respectively). The 10 s `Alert rules fetched` count scales only with run duration (21 fires in a ~210 s run, 23 in a ~236 s run); every 60 s count is duration-independent within these windows. Verbatim samples for all three daggered emitters appear below.
 
 **Verbatim samples (run3; run3b identical):**
 
@@ -305,6 +308,43 @@ logger=ngalert.sender.router t=2026-07-14T21:03:17.851742911Z level=debug msg="A
 - Timer: `pkg/services/ngalert/sender/router.go:384` (`case <-time.After(d.adminConfigPollInterval)`).
 - Default interval source: `pkg/setting/setting_unified_alerting.go:50` (`schedulerDefaultAdminConfigPollInterval = time.Minute`), applied at `:239` → **60 s**.
 
+**The three additional 60 s emitters (daggered in the table above), captured verbatim in the debug re-verification run (`23:03:32` = t₀; counts identical across both re-verification runs):**
+
+`ssosettings.service` — `No SSO Settings found in the database, using system settings` — a **7-line burst per 60 s reload cycle** (one line per configured SSO provider that has no settings stored in the database), for **28** lines total over four cycles. This is a *different* `msg` from the `reloading SSO Settings for all providers` line already listed above (that one prints once per cycle; this one prints once per provider within the cycle). One complete cycle (t₀+60 s):
+```
+logger=ssosettings.service t=2026-07-14T23:04:32.668838131Z level=debug msg="No SSO Settings found in the database, using system settings"
+logger=ssosettings.service t=2026-07-14T23:04:32.668858607Z level=debug msg="No SSO Settings found in the database, using system settings"
+logger=ssosettings.service t=2026-07-14T23:04:32.668867651Z level=debug msg="No SSO Settings found in the database, using system settings"
+logger=ssosettings.service t=2026-07-14T23:04:32.668878165Z level=debug msg="No SSO Settings found in the database, using system settings"
+logger=ssosettings.service t=2026-07-14T23:04:32.668885895Z level=debug msg="No SSO Settings found in the database, using system settings"
+logger=ssosettings.service t=2026-07-14T23:04:32.668895825Z level=debug msg="No SSO Settings found in the database, using system settings"
+logger=ssosettings.service t=2026-07-14T23:04:32.668919954Z level=debug msg="No SSO Settings found in the database, using system settings"
+```
+- Emit line: `pkg/services/ssosettings/ssosettingsimpl/service.go:414` (`s.logger.Debug("No SSO Settings found in the database, using system settings")`), inside `mergeSSOSettings()` when the database holds no stored settings for the provider.
+- Timer/driver: emitted once per provider inside `doReload()` (`pkg/services/ssosettings/ssosettingsimpl/service.go:383`), which the 60 s reload ticker at `pkg/services/ssosettings/ssosettingsimpl/service.go:368` invokes — the **same** cycle that prints `reloading SSO Settings for all providers` above.
+- Default interval source: `pkg/setting/setting.go:1662` (`SSOSettingsReloadInterval = ... Key("reload_interval").MustDuration(1 * time.Minute)`) → **60 s** → 7 providers × 4 cycles = **28** lines.
+
+`ngalert.notifier.alertmanager` (`org=1`) — `Config hasn't changed, skipping configuration sync.` — every 60 s. This is a **distinct logger** (the per-org Alertmanager) from the `ngalert.multiorg.alertmanager` lines above. It first fires at **t₀+60 s** (not at t₀): the initial config is *applied* at startup, so only the subsequent polls report it unchanged — hence **3** fires in this window versus 4 for the multiorg `Synchronizing` line. All three fires:
+```
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T23:04:32.669107122Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T23:05:32.669919211Z level=debug msg="Config hasn't changed, skipping configuration sync."
+logger=ngalert.notifier.alertmanager org=1 t=2026-07-14T23:06:32.671287636Z level=debug msg="Config hasn't changed, skipping configuration sync."
+```
+- Emit line: `pkg/services/ngalert/notifier/alertmanager.go:340` (`am.logger.Debug("Config hasn't changed, skipping configuration sync.")`), inside `applyConfig()` when the incoming config's hash equals the loaded one.
+- Timer/driver: the multiorg sync poll at `pkg/services/ngalert/notifier/multiorg_alertmanager.go:246` (`case <-time.After(moa.settings.UnifiedAlerting.AlertmanagerConfigPollInterval)`) → `LoadAndSyncAlertmanagersForOrgs` → per-org `applyConfig()` — the **same** 60 s timer as the `ngalert.multiorg.alertmanager` rows.
+- Default interval source: `pkg/setting/setting_unified_alerting.go:24` (`alertmanagerDefaultConfigPollInterval = time.Minute`), applied at `:243` → **60 s**.
+
+`ngalert.sender.router` — `Finish of admin configuration sync` — every 60 s. This is the **paired completion** of the `Attempting to sync admin configs` line above; the two bracket one run of `SyncAndApplyConfigFromDatabase` (start fires at t₀, so both show **4** occurrences). All four fires:
+```
+logger=ngalert.sender.router t=2026-07-14T23:03:32.588518953Z level=debug msg="Finish of admin configuration sync"
+logger=ngalert.sender.router t=2026-07-14T23:04:32.668745701Z level=debug msg="Finish of admin configuration sync"
+logger=ngalert.sender.router t=2026-07-14T23:05:32.669105427Z level=debug msg="Finish of admin configuration sync"
+logger=ngalert.sender.router t=2026-07-14T23:06:32.669845221Z level=debug msg="Finish of admin configuration sync"
+```
+- Emit line: `pkg/services/ngalert/sender/router.go:202` (`d.logger.Debug("Finish of admin configuration sync")`), the last line of `SyncAndApplyConfigFromDatabase`.
+- Timer/driver: `pkg/services/ngalert/sender/router.go:384` (`case <-time.After(d.adminConfigPollInterval)`) → `SyncAndApplyConfigFromDatabase` — the **same** timer as `Attempting to sync admin configs` at `:90`.
+- Default interval source: `pkg/setting/setting_unified_alerting.go:50` (`schedulerDefaultAdminConfigPollInterval = time.Minute`), applied at `:239` → **60 s**.
+
 ### Q1-d — The dashboard provisioner does **not** poll on an idle default server (observed)
 
 A plausible expectation is that the dashboard provisioning poller ticks every 10 s and logs recurringly. **It does not, in the default configuration.** In both debug runs the only `provisioning.dashboard` lines are one-time startup messages — there is no recurring poll/walk output:
@@ -335,7 +375,7 @@ The following interval-driven services are registered but, given their long peri
 
 - **Within 60 s at the default `info` level:** **no recurring entries** (observed empty steady-state window, both runs).
 - **Recurring INFO emitters:** `plugins.update.checker` (10 min), `cleanup` (10 min), `grafana.update.checker` (24 h) — all observed (10-min pair observed to recur twice; 24-h fire observed once at startup).
-- **Recurring DEBUG emitters (hidden at default level):** `ngalert.scheduler` (10 s); and at 60 s: `secrets` (paired), `ssosettings.service`, `ngalert.multiorg.alertmanager` (paired), `ngalert.sender.router` — all observed identically across two debug runs.
+- **Recurring DEBUG emitters (hidden at default level) — ten in total:** `ngalert.scheduler` (`Alert rules fetched`, 10 s); and at 60 s: `secrets` (paired enter/finish), `ssosettings.service` (`reloading SSO Settings…` once per cycle **plus** a per-provider `No SSO Settings found…` burst), `ngalert.multiorg.alertmanager` (paired `Synchronizing…`/`Done synchronizing…`), `ngalert.notifier.alertmanager` `org=1` (`Config hasn't changed…`), and `ngalert.sender.router` (paired `Attempting…`/`Finish of admin configuration sync`) — all observed identically across debug runs.
 - **Provisioner:** no recurrence in default config (observed; zero providers → zero readers → no ticker).
 - **Long-interval/silent services:** token cleanup (1 h), anon cleanup (2 h), remote-cache GC (10 min, silent), grafana update-check recurrence (24 h) — intervals inferred from source, not observed to recur.
 
@@ -444,7 +484,7 @@ On boot, `(*Migrator).run` iterates its registered migration list. For each migr
 
 **Direct answer: the running canonical instance reports the version string `11.5.0-pre`.** The exact value is returned identically by `GET /api/health` (`"version": "11.5.0-pre"`), by `GET /api/frontend/settings` (`buildInfo.version = "11.5.0-pre"`, `versionString = "Grafana v11.5.0-pre (b23f15d49d)"`), and by the startup banner (`version=11.5.0-pre`). The value is **build-method dependent**: the canonical build (`make build-backend`, ldflag `-X main.version=11.5.0-pre`) yields `11.5.0-pre`; a bare `go run ./pkg/cmd/grafana` (no ldflags) yields the fallback literal `9.2.0`. The canonical `11.5.0-pre` is the reported answer.
 
-> Build provenance: the canonical binary is built at the current branch `HEAD` (`b23f15d49d`), which is the documentation commit layered directly on top of the investigated source head `4550cfb5b7` (“Upgrade scenes to v5.32.0”); no source file differs between them (see the Closing Note). Consequently the build injects `main.commit=b23f15d49d`, and the API/banner report `commit=b23f15d49d`. The **version string** — the subject of this question — is sourced from `package.json` and is `11.5.0-pre` regardless of which of the two commits is checked out.
+> Build provenance: the canonical binary was built with the documentation commit `b23f15d49d` as `HEAD` — the commit layered directly on top of the investigated source head `4550cfb5b7` (“Upgrade scenes to v5.32.0”); no source file differs between them (see the Closing Note). Consequently the build injected `main.commit=b23f15d49d`, and the API/banner reported `commit=b23f15d49d`. The **version string** — the subject of this question — is sourced from `package.json` and is `11.5.0-pre` regardless of which of the two commits is checked out.
 
 ### `GET /api/health` (public; loopback)
 
@@ -869,20 +909,20 @@ When the edit view opens for an existing Grafana-managed rule, `formValuesFromEx
 
 ## Closing Note — read-only integrity and cleanup
 
-This investigation is read-only with respect to existing source; the only tracked change is this document. The verification (stable evidence — counts of the document's own diff are omitted because they change as this note is written):
+This investigation is read-only with respect to existing source; the only tracked change is this document. The verification uses **stable facts only** — a specific branch-head SHA and the document's own diff line-count are intentionally omitted, because both change every time this document is committed:
 
 ```bash
-$ git rev-parse HEAD
-b23f15d49d194702b2164fc6956e56e21052132a
-
 $ git status --porcelain
- M blitzy/documentation/grafana_4550cfb5b728.md
+                      # (empty = clean working tree once this document is committed)
+
+$ git diff --name-status 4550cfb5b72886782d9a3e6cf995f8dbd57ca4ff HEAD
+A	blitzy/documentation/grafana_4550cfb5b728.md
 
 $ git diff --check
                       # (no output = no trailing-whitespace or blank-EOF errors)
 ```
 
-- **Sole tracked change.** `git status --porcelain` reports only `M blitzy/documentation/grafana_4550cfb5b728.md` — no other modified tracked file and no untracked (`??`) file. No existing repository source file was modified.
+- **Sole tracked change.** The only difference between the investigated base commit `4550cfb5b7` and the branch head is the **addition** (status `A`) of `blitzy/documentation/grafana_4550cfb5b728.md`; once that file is committed `git status --porcelain` is empty — no other modified tracked file and no untracked (`??`) file. No existing repository source file was modified.
 - **Temporary observation artifacts removed.** The temporary Jest spec used for Q5 (`public/app/features/alerting/unified/utils/rule-form.blitzytmp.test.ts`, whose complete source is embedded verbatim in Q5) was deleted immediately after its output was captured; all other observation scripts and captured logs were kept **outside** the repository (under `/tmp`) and removed on completion.
 - **Task build/run byproducts removed.** The build/run outputs produced or refreshed during the investigation were deleted so no build cache lingers in the tree: the compiled backend binary and its checksum (`bin/linux-amd64/grafana`, `bin/linux-amd64/grafana.md5`), the `bin/linux-amd64/grafana-server` pair, the generated `pkg/server/wire_gen.go`, and the runtime `data/` log directory. None of these are tracked by git, so their removal does not alter the committed source.
 - **Pre-provisioned environment left intact.** The gitignored dependency caches that remain (`node_modules/`, `.yarn/`, `.nx/`, `public/mockServiceWorker.js`) are the pre-provisioned build/test environment — not repository source — and are unrelated to this investigation.
