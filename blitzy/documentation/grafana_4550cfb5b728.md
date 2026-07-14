@@ -18,7 +18,20 @@ rather than inference.
   commit adds **only** this one Markdown file — the source tree is strictly read-only
   (§1.5) — every Q1–Q4 code path is byte-identical to the investigated commit
   `4550cfb5b7`. So "investigated commit" (`4550cfb5b7…`) and "current `git HEAD`"
-  (`2704e90389`, the doc commit) are deliberately distinguished throughout.
+  (`2704e90389`, the doc commit) are deliberately distinguished throughout. Because the
+  banner's `commit` is resolved by `git rev-parse --short HEAD` **at build time** (§1.2),
+  each further documentation-only commit advances the branch tip, so a rebuild stamps that
+  newer tip: the build re-run while addressing the review findings was compiled at the later
+  doc commit `0aaa35460c` and accordingly emits `commit: 0aaa35460c` in its banner and
+  `"commit": "0aaa35460c"` in `/api/health`; every subsequent doc-only commit (including the
+  one that lands these very review fixes) advances `git HEAD` again, so a fresh rebuild simply
+  stamps whatever the newest short SHA is. This drift is **purely textual** — because every
+  such abbreviated SHA is **10 characters**, the JSON shape and every byte-length reported
+  below are unchanged (§4.2's healthy body stays **75 bytes**, §4.5's failing body **80
+  bytes**, §4.4's `/healthz` **2 bytes**; they scale 1:1 with the short-SHA length per §4.2).
+  The `2704e90389` captures shown throughout are the **verbatim, unedited** output from the
+  runs at that tip and are deliberately **not** retro-relabelled; to read any of them against
+  a newer build, substitute the equal-length current SHA (e.g. `0aaa35460c`) for `2704e90389`.
 - **Observed version banner (this canonical build):**
   `Version 11.5.0-pre (commit: 2704e90389, branch: blitzy-29dfbca5-c37c-4c07-9bac-2d27dcb04523)`.
   The `commit` field is the **short `git HEAD` at build time** (§1.2), i.e. the doc commit
@@ -93,7 +106,7 @@ i.e. `./bin/linux-amd64/grafana`.
 > (`pkg/build/cmd.go:86-94`; that wrapper merely re-execs `grafana server`). And
 > `go run build.go build-js` is **not a valid command** — `build.go` has no `build-js`
 > case, so it falls through to `default → "Unknown command"` and exits `1`
-> (`pkg/build/cmd.go:128-131`). The frontend command is `build-frontend`
+> (`pkg/build/cmd.go:125-127`). The frontend command is `build-frontend`
 > (`pkg/build/cmd.go:114-115`, which runs `yarn run build`), or simply `yarn build`.
 
 **Prerequisite — generate the Wire graph.** `pkg/server/wire_gen.go` is git-ignored and
@@ -1301,7 +1314,7 @@ assembled by the **background-service registry**
 is provided to the DI graph by `backgroundsvcs.ProvideBackgroundServiceRegistry`
 (`pkg/server/wireexts_oss.go:74`, bound to the `registry.BackgroundServiceRegistry`
 interface at `:75`) and assembled through `wire.Build(wireExtsSet)`
-(`pkg/server/wire.go:444`, inside `Initialize`). The registry run-list contains **36
+(`pkg/server/wire.go:445`, inside `Initialize` at `:444`). The registry run-list contains **36
 services**; in the default run **34** of them actually start — the other **2** are
 feature-disabled and skipped.
 
@@ -1460,13 +1473,15 @@ shutdown lines**, not by any single deregister category:
 |---|---|---|
 | ≈ `165` | per-plugin shutdown — **3 lines per plugin** across `55` distinct built-in plugins (`"Stopping plugin"` → `"Stopping plugin process"` → `"Plugin stopped"`), each under its own `logger=plugin.<id>` | plugin backend clients stopping |
 | `55` | `"Plugin unregistered"` — one per plugin, `logger=plugins.deregister` | `pkg/plugins/manager/pipeline/termination/steps.go:51` |
-| `28` | `"Stopped background service"` — one per service as its `Run` returns on context-cancel | `pkg/server/server.go:171` |
+| `28` (of `34`) | `"Stopped background service"` — **one per service**, so all `34` services that started emit exactly one stop line; `28` of them return on context-cancel *inside this shutdown burst*, while the `6` short-lived services whose `Run` had already completed during boot (`*acimpl.Service`, `*migrations.SecretMigrationProviderImpl`, `*pluginexternal.Service`, `*plugininstaller.Service`, `*store.dummyEntityEventsService`, `*store.standardStorageService`) logged theirs earlier — so a full-log `grep -c 'Stopped background service'` yields `34`, of which only these `28` fall in the burst | `pkg/server/server.go:171` |
 | ≈ `16` | assorted subsystem stop lines (`infra.kvstore.sql`, `ngalert.notifier.alertmanager`, `tracing`, `ticker`, `sqlstore.transactions`, `secrets`, `provisioning`, `http.server`, `grafana-apiserver`) | respective services |
 
 (counts from one representative shutdown; each varies by ±a few lines run-to-run.) The burst
 is triggered by `(s *Server) Shutdown` (`pkg/server/server.go:185-188`), which cancels the
-root context so every service's `Run` returns and logs its `"Stopped background service"`
-DEBUG line (`pkg/server/server.go:171`).
+root context so each **still-running** service's `Run` returns and logs its
+`"Stopped background service"` DEBUG line (`pkg/server/server.go:171`); together with the `6`
+short-lived services that had already logged theirs during boot, all `34` services emit exactly
+one such line across the lifecycle (one per service).
 So the single unqualified count originally reported for a *stopped* server is `1377`, whereas
 a *running* server has emitted ≈ `1120`; the total is thus lifecycle- and duration-sensitive
 (plugin discovery, migrations, and periodic SQL-debug all contribute), which is why the exact
@@ -1754,7 +1769,7 @@ evidence section that captures it.
 | READY signal (no-op here) | `notifySystemd("READY=1")` after dispatch — a **NO-OP** in this env (`NOTIFY_SOCKET` unset; observed DEBUG `"NOTIFY_SOCKET environment variable empty or unset, can't send systemd notification"`) — §5.5 | dispatch `pkg/server/server.go:176`; no-op branch `:229-234` |
 | Init sequence | PID `:122`, roles `:130`, provisioners `:134` | `pkg/server/server.go:113-135` |
 | "backend active, UI is static assets" | readiness characterization — §5.5 | observed + `pkg/server/server.go:139-179` |
-| DI graph (context) | `wire.Build` assembles `Server` | `pkg/server/wire.go:444` |
+| DI graph (context) | `wire.Build` assembles `Server` | `pkg/server/wire.go:445` |
 | Info-level component hints | ngalert, provisioning, live, secrets, storage, plugins, update checkers, usage stats, apiserver, app-registry — §5.2 | observed |
 
 ### Methodology checklist
