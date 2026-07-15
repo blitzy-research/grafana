@@ -275,9 +275,15 @@ $ curl -s -u admin:<LOCAL_ADMIN_PASSWORD> http://localhost:3000/api/datasources 
   "typeName": "TestData",
   "access": "proxy",
   "isDefault": true,
-  "readOnly": false
+  "readOnly": true
 }
 ```
+
+`readOnly` is **`true`** because the YAML above omits `editable`: provisioning sets
+`ReadOnly: !ds.Editable` (`pkg/services/provisioning/datasources/types.go:224`) and the
+`Editable` bool defaults to `false` when unset, so `ReadOnly = !false = true`. This is the
+expected behaviour for any file-provisioned data source (it is managed by config, hence not
+editable in the UI); adding `editable: true` to the YAML would flip it to `false`.
 
 This `uid=blitzytestdata01` is the correlation key that appears in every layer below
 (request headers, debug logs, and the response).
@@ -429,11 +435,17 @@ because the panel was on a `now-6h … now` range (the referer in §3.4 confirms
 
 `DataSourceWithBackend` sets a family of `X-*` **plugin request headers**
 (`DataSourceWithBackend.ts:79-88`) that carry the panel/datasource identity through the
-backend. The complete set of request headers observed on `SQR100` — the only modification is
-the `cookie` value, redacted for security; all correlation identifiers are preserved:
+backend. Those **plugin/correlation headers** observed on `SQR100` are shown first, in group
+**(a)** — the only redaction is the `cookie` value; every correlation identifier is preserved
+verbatim. They are the R3/R7-relevant subset, but they are **not** the entire request: the
+real browser request captured on the wire carried **21 headers in total**, so the remaining
+generic browser/transport headers the user agent attaches automatically (plus the Grafana
+device id) are listed in group **(b)** for completeness:
 
 ```text
 # Request headers on POST /api/ds/query?...&requestId=SQR100  (DevTools reqid 113)
+
+# (a) Plugin/correlation headers set by DataSourceWithBackend (the R3/R7-relevant subset):
 content-type:        application/json
 x-datasource-uid:    blitzytestdata01
 x-plugin-id:         grafana-testdata-datasource
@@ -442,13 +454,32 @@ x-panel-id:          1
 x-panel-plugin-id:   timeseries
 x-grafana-org-id:    1
 cookie:              grafana_session=<REDACTED>
+
+# (b) Remaining headers also present on the same request — generic browser/transport
+#     metadata (+ the Grafana device id); redactions: cookie is in (a), device id below.
+#     user-agent version shown as "…" because it varies by browser build:
+x-grafana-device-id: <REDACTED_DEVICE_ID>
+referer:             http://localhost:3000/d/blitzyqadash01/blitzy-qa-testdata?from=now-6h&to=now
+user-agent:          Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/… Safari/537.36
+accept:              application/json, text/plain, */*
+accept-encoding:     gzip, deflate, br, zstd
+accept-language:     en-US,en;q=0.9
+host:                localhost:3000
+origin:              http://localhost:3000
+connection:          keep-alive
+content-length:      247
+sec-fetch-dest:      empty
+sec-fetch-mode:      cors
+sec-fetch-site:      same-origin
 ```
 
-These headers are exactly the processing metadata the question asks about: they identify
-the datasource (`x-datasource-uid=blitzytestdata01`), the plugin
+The group **(a)** headers are exactly the processing metadata the question asks about: they
+identify the datasource (`x-datasource-uid=blitzytestdata01`), the plugin
 (`x-plugin-id`/`x-panel-plugin-id`), the originating dashboard/panel
 (`x-dashboard-uid=blitzyqadash01`, `x-panel-id=1`), and the org. On an expression query an
-additional `x-grafana-from-expr: true` appears (see §5.5).
+additional `x-grafana-from-expr: true` appears (see §5.5). The group **(b)** headers, by
+contrast, are the ordinary browser/transport metadata (and the device id) that ride along on
+any `fetch()` from the page — present on the wire, but not what drives query processing.
 
 ### 2.4 `curl` supplement — raw header bytes (labelled; not the browser entry point)
 
@@ -594,7 +625,7 @@ POST /api/ds/query?ds_type=grafana-testdata-datasource&requestId=SQR100  reqid=1
 logger=datasources   t=…T21:29:15.206Z level=debug msg="Querying for data source via SQL store" uid=blitzytestdata01 orgId=1
 
 # (3) query_data  — the query service records the processed query
-logger=query_data    t=…T21:29:15.207Z level=debug msg="Processed metrics query" ref_id=A from=1784042953039 to=1784064553039 interval=30000 max_data_points=783 scenarioId=random_walk
+logger=query_data    t=…T21:29:15.207Z level=debug msg="Processed metrics query" ref_id=A from=1784042953039 to=1784064553039 interval=30000 max_data_points=783 query="{\"datasource\":{\"type\":\"grafana-testdata-datasource\",\"uid\":\"blitzytestdata01\"},\"datasourceId\":1,\"intervalMs\":30000,\"maxDataPoints\":783,\"refId\":\"A\",\"scenarioId\":\"random_walk\",\"seriesCount\":1}"
 
 # (4) secrets.kvstore — decrypt datasource secure settings
 logger=secrets.kvstore t=…T21:29:15.208Z level=debug msg="got secret value" namespace=TestData
@@ -613,6 +644,14 @@ resolved by uid **(2)** → the query service processes `ref_id=A` over the exac
 bytes, `status_source=server`, and the `referer` proving this came from dashboard
 `blitzyqadash01` on a `now-6h…now` range **(6)**. The `size=23444` here equals the response
 `content-length` in §4 — same request, same bytes.
+
+The scenario identifier surfaces in **two distinct places**, and it is worth being precise
+about which is which: on layer (3) it is *nested inside* the `query="{…}"` payload — the
+emitted field name there is `query` (the serialized query model from
+`pkg/services/query/query.go:332-338`, whose fields are `ref_id`, `from`, `to`, `interval`,
+`max_data_points`, `query`), **not** a top-level `scenarioId` field. The standalone
+`scenario=random_walk` field appears only on layer (5)'s `logger=tsdb.testdata` line, which
+is where the built-in datasource backend records which scenario it actually ran.
 
 ### 3.5 Request metrics (with the scrape command that produced them)
 
