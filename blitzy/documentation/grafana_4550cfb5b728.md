@@ -479,15 +479,21 @@ processor under `AsZero`.
   injected by the Go backend into the served HTML, so its default state is environment-dependent; either way
   it does not change the answer. [INFERRED — from how the toggle is read; the Go injection was not exercised]
 
-- **Mixed value types coerce the pivoted output toward string.** [INFERRED — from source] The output field's
-  `type` is copied verbatim from the value field (`groupingToMatrix.ts:133`); if the value field is `number`
-  but a missing cell is `''`, the field is already type-inconsistent, and any consumer that concatenates (as
-  the raw sum path does) will produce strings. This compounds the perceived inconsistency.
+- **The transform does not re-coerce values to a common type; it only fills missing cells.** [INFERRED — the
+  copy mechanism, from source at `groupingToMatrix.ts:133`; the consequence OBSERVED in captures **A1** and
+  **B**] The output field's `type` is copied **verbatim** from the value field (`:133`), and every _present_
+  value keeps its own original runtime type — the transform performs no numeric↔string conversion of its own.
+  Capture **A1** shows the `number`-declared `C2` holding `[5, '']`: the present `5` stays a `number`, and it
+  is only the _missing_ cell that receives the injected `''`. There is therefore no transform-side coercion of
+  the column "toward string." That single injected `''` is what makes an otherwise-numeric field
+  type-inconsistent, so a raw consumer that adds with `+` (the sum path, capture **B**) **concatenates** rather
+  than sums. The 'string-like' behavior thus originates from the injected placeholder meeting `+`, not from any
+  type conversion inside the transform — which is what compounds the perceived inconsistency.
 
 - **The Gauge cell renderer degrades gracefully on the missing value.** [OBSERVED] `BarGaugeCell` is the
   **Gauge** cell type (`packages/grafana-ui/src/components/Table/BarGaugeCell.tsx`); like `DefaultCell` it
   computes `field.display!(cell.value)` (`:28`), so it receives the same `DisplayValue` (`numeric = NaN`,
-  base fallback color). Its bar length comes from `getValuePercent(displayValue.numeric, min, max)`
+  base fallback color). Its bar length comes from `getValuePercent(value.numeric, minValue, maxValue)`
   (used at `BarGauge.tsx:494`), which is defined to return `0` for a `NaN` ratio
   (`BarGauge.tsx:479-483`, `return isNaN(valueRatio) ? 0 : valueRatio;`):
 
@@ -523,8 +529,9 @@ emitting `''`; and the two JSON nuances.
 **[INFERRED]** (reasoned from source, not directly rendered): that `getCellColors`/`DefaultCell` paint the
 cell background from `DisplayValue.color` (a DOM table was not mounted); that a value **mapping** would be
 needed to show a literal `0` in the cell body; that in production the Go backend injects the boot-data toggle
-(its _effect on the emit_ was observed to be none); that mixed value types coerce output toward string; and
-that the sum reducer's `emptyInputResult: 0` governs only the empty-input case.
+(its _effect on the emit_ was observed to be none); that the transform copies the value field's declared type
+verbatim (`:133`) and performs no value re-coercion of its own; and that the sum reducer's
+`emptyInputResult: 0` governs only the empty-input case.
 
 ### 6.2 JSON serialization nuances
 
@@ -545,7 +552,10 @@ Both were confirmed at runtime, and explain why some raw values above print as `
 
 The harness is created inside a **unique, private temporary directory outside the checkout** so the source
 repository is never touched and no predictable, world-writable path is used for executable config. Recreate
-it exactly as follows.
+it exactly as follows — each numbered block is copy-paste runnable from the repository root, in order, and
+together they reproduce the output in [§6.4](#64-complete-captured-output) byte-for-byte. Every heredoc uses
+a **quoted** delimiter (`'CFG'`, `'OBSERVE'`, `'TOGGLE'`) so the shell performs no expansion and the
+template literals, `${…}` interpolations, and `process.env.*` references are written to disk verbatim.
 
 **1) Create a private working directory (unique name, owner-only permissions), outside the repo:**
 
@@ -555,10 +565,11 @@ HARNESS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gtm_harness.XXXXXXXX")"
 chmod 700 "$HARNESS_DIR"                                 # owner-only; not shared/predictable
 ```
 
-**2) `"$HARNESS_DIR/harness.jest.config.js"` — reuse the repo's canonical Jest config, redirect discovery to
-the private dir:**
+**2) Create `harness.jest.config.js` — reuse the repo's canonical Jest config, then redirect test discovery
+to the private dir:**
 
-```js
+```bash
+cat > "$HARNESS_DIR/harness.jest.config.js" <<'CFG'
 // Reuse the repo's canonical Jest config verbatim (transforms, moduleNameMapper, resolver, setup),
 // then point test discovery at this private, owner-only dir OUTSIDE the repo.
 const base = require(process.env.REPO + '/jest.config.js');
@@ -570,52 +581,450 @@ module.exports = {
   testRegex: undefined,
   modulePaths: [process.env.REPO + '/node_modules'], // so 'tslib' etc. resolve from outside the repo
 };
+CFG
 ```
 
-**3) `"$HARNESS_DIR/observe.test.ts"` — the main suite.** It registers the real transformer and drives the
-real pipeline; output is appended to a file (the repo's Jest setup fails any test that logs to the console
-via `jest-fail-on-console`). Key steps:
+**3) Create `observe.test.ts` — the main suite (captures A–L).** It registers the real transformer and
+drives the real pipeline (`reduceField`, `getActiveThreshold`, `getScaleCalculator`, `getDisplayProcessor`),
+plus the real table footer (`getFooterItems`) and gauge (`getValuePercent`) helpers. Output is **appended to
+`out.txt`**, never written to the console — the repo's Jest setup enables `jest-fail-on-console` under CI, so
+any `console.*` call would fail the run. Every capture carries a strict, type-sensitive assertion, so the
+pasted values are genuinely produced by the real pipeline: changing `expect(s2).toBe('05')` to `toBe(5)` was
+confirmed to fail the run with a non-zero exit and `Expected: 5 / Received: "05"`.
 
-- Build the sparse frame `Column=['C1','C1','C2']`, `Row=['R1','R2','R1']`, `Temp=[1,4,5]` (so `(C2,R2)` is
-  missing) and run
-  `await lastValueFrom(transformDataFrame([{ id:'groupingToMatrix', options:{columnField:'Column',rowField:'Row',valueField:'Temp'} }], [frame]))`;
-  vary `options.emptyValue` over the default, `Null`, `False`, `True`, `Empty` (capture **A**).
-- Reduce crafted orderings `[5,'']`, `['',5]`, `['',2]`, `[2,'']`, `['','']`, `['',1,2,3]` with
-  `reduceField(..., [ReducerID.sum])` (capture **B**), and run the **real footer** path
-  `getFooterItems([{id:'0',field}], [values], {show:true, reducer:[ReducerID.sum]}, theme)` for `[5,'']`,
-  `['',5]`, `['',1,2,3]` (capture **C**).
-- Call `getActiveThreshold(value, [{value:-Infinity,color:'green'},{value:3,color:'red'}])` for
-  `value ∈ {5,0,'',null}` (capture **D**).
-- Call `getScaleCalculator(field{min:0,max:10}, createTheme())(value)` for `value ∈ {5,0,''}` (capture **E**).
-- Call `getDisplayProcessor({field{min:0,max:10}, theme})(value)` for `value ∈ {5,0,'',null}` and read the
-  **full** `DisplayValue` — once with no thresholds (capture **F**) and once with
-  `thresholds:{mode:'absolute',steps:[{value:-Infinity,color:'green'},{value:-1,color:'blue'},{value:3,color:'red'}]}`
-  (capture **G**).
-- Recipe (capture **H**): reduce `[5,null]` and `[5,'']`/`['',5]` with `config.nullValueMode` set to
-  `Ignore` vs `AsZero`, and run `getDisplayProcessor(field{nullValueMode:AsZero})(null)`.
-- `getValuePercent(NaN,0,10)`, `(5,0,10)`, `(0,0,10)` (capture **I**); duplicate `(R1,C1)=[10,20]` (capture
-  **J**); toggle default value (capture **K**); `JSON.stringify(-Infinity)` / `JSON.stringify(NaN)` (capture
-  **L**).
-- Every case has a strict, type-sensitive assertion (e.g. `expect(sum).toBe('05')`,
-  `expect(typeof def.values[1]).toBe('string')`, `expect(disp('').color).toBe(gc('green'))`). A deliberately
-  false assertion was confirmed to fail the run with a non-zero exit (`Expected: 5 / Received: "05"`), so the
-  assertions genuinely gate the output.
+```bash
+cat > "$HARNESS_DIR/observe.test.ts" <<'OBSERVE'
+/**
+ * observe.test.ts — main observation suite.
+ *
+ * Registers the REAL groupingToMatrix transformer and drives the REAL downstream
+ * pipeline (reduceField / getActiveThreshold / getScaleCalculator / getDisplayProcessor),
+ * plus the REAL table footer (getFooterItems) and gauge (getValuePercent) helpers.
+ *
+ * The repo's Jest setup (public/test/setupTests.ts) enables jest-fail-on-console
+ * under CI, so this suite writes to a file (out.txt) instead of console.*.
+ * Every capture has a strict, type-sensitive assertion so the pasted output is
+ * genuinely produced by the real pipeline (a false assertion fails the run).
+ */
+import * as fs from 'fs';
+
+import { lastValueFrom } from 'rxjs';
+
+import {
+  toDataFrame,
+  FieldType,
+  SpecialValue,
+  NullValueMode,
+  ThresholdsMode,
+  reduceField,
+  ReducerID,
+  getActiveThreshold,
+  getScaleCalculator,
+  getDisplayProcessor,
+  createTheme,
+  transformDataFrame,
+} from '@grafana/data';
+import { mockTransformationsRegistry } from '@grafana/data/src/utils/tests/mockTransformationsRegistry';
+import { groupingToMatrixTransformer } from '@grafana/data/src/transformations/transformers/groupingToMatrix';
+import { DataTransformerID } from '@grafana/data/src/transformations/transformers/ids';
+import { getFooterItems } from '@grafana/ui/src/components/Table/utils';
+import { getValuePercent } from '@grafana/ui/src/components/BarGauge/BarGauge';
+
+const OUT = process.env.HARNESS_DIR + '/out.txt';
+const emit = (s: string) => fs.appendFileSync(OUT, s + '\n');
+const j = (x: unknown) => JSON.stringify(x);
+const typeofs = (arr: unknown[]) => '[' + arr.map((v) => typeof v).join(',') + ']';
+const theme = createTheme();
+
+// A number-declared field carrying the given values (config optional).
+const numField = (values: unknown[], config: Record<string, unknown> = {}) =>
+  ({ name: 'C2', type: FieldType.number, values, config } as any);
+
+// The sparse dataset from the project's own spec: (C2,R2) never appears.
+async function pivot(extra: Record<string, unknown> = {}) {
+  const frame = toDataFrame({
+    name: 'A',
+    fields: [
+      { name: 'Column', type: FieldType.string, values: ['C1', 'C1', 'C2'] },
+      { name: 'Row', type: FieldType.string, values: ['R1', 'R2', 'R1'] },
+      { name: 'Temp', type: FieldType.number, values: [1, 4, 5] },
+    ],
+  });
+  const cfg = {
+    id: DataTransformerID.groupingToMatrix,
+    options: { columnField: 'Column', rowField: 'Row', valueField: 'Temp', ...extra },
+  };
+  const out = await lastValueFrom(transformDataFrame([cfg as any], [frame]));
+  return out[0].fields;
+}
+
+const sum = (vals: unknown[]) =>
+  reduceField({ field: numField(vals), reducers: [ReducerID.sum] })[ReducerID.sum];
+
+describe('observe', () => {
+  beforeAll(() => {
+    mockTransformationsRegistry([groupingToMatrixTransformer]);
+  });
+
+  it('A - emit boundary by emptyValue', async () => {
+    let f = await pivot();
+    emit('=== A1 DEFAULT (options={} apart from field names) rows=R1,R2,R1 -> (C2,R2) missing ===');
+    emit(`@@@ field ${f[0].name} type=${f[0].type} => ${j(f[0].values)}  typeof=${typeofs(f[0].values)}`);
+    emit(`@@@ field ${f[1].name} type=${f[1].type} => ${j(f[1].values)}  typeof=${typeofs(f[1].values)}`);
+    emit(`@@@ field ${f[2].name} type=${f[2].type} => ${j(f[2].values)}  typeof=${typeofs(f[2].values)}`);
+    expect(f[2].type).toBe(FieldType.number);
+    expect(f[2].values[0]).toBe(5);
+    expect(f[2].values[1]).toBe('');
+    expect(typeof f[2].values[1]).toBe('string');
+
+    f = await pivot({ emptyValue: SpecialValue.Null });
+    emit('=== A2 emptyValue=Null rows=R1,R2,R1 -> (C2,R2) missing ===');
+    emit(`@@@ field ${f[2].name} type=${f[2].type} => ${j(f[2].values)}  typeof=${typeofs(f[2].values)}`);
+    expect(f[2].values[1]).toBeNull();
+
+    f = await pivot({ emptyValue: SpecialValue.False });
+    emit('=== A3 emptyValue=False rows=R1,R2,R1 -> (C2,R2) missing ===');
+    emit(`@@@ field ${f[2].name} type=${f[2].type} => ${j(f[2].values)}  typeof=${typeofs(f[2].values)}`);
+    expect(f[2].values[1]).toBe(false);
+
+    f = await pivot({ emptyValue: SpecialValue.True });
+    emit('=== A4 emptyValue=True rows=R1,R2,R1 -> (C2,R2) missing ===');
+    emit(`@@@ field ${f[2].name} type=${f[2].type} => ${j(f[2].values)}  typeof=${typeofs(f[2].values)}`);
+    expect(f[2].values[1]).toBe(true);
+
+    f = await pivot({ emptyValue: SpecialValue.Empty });
+    emit('=== A5 emptyValue=Empty (explicit) rows=R1,R2,R1 -> (C2,R2) missing ===');
+    emit(`@@@ field ${f[2].name} type=${f[2].type} => ${j(f[2].values)}  typeof=${typeofs(f[2].values)}`);
+    expect(f[2].values[1]).toBe('');
+  });
+
+  it('B - raw SUM totals (position sensitivity / string concat)', () => {
+    emit('=== B SUM totals (raw reduceField; position sensitivity / string concat) ===');
+    const trailing = [5, ''];
+    const leading = ['', 5];
+    emit(`@@@ C2 trailing-empty values => ${j(trailing)}  typeof=${typeofs(trailing)}`);
+    emit(`@@@ C2 leading-empty values => ${j(leading)}  typeof=${typeofs(leading)}`);
+    const s1 = sum([5, '']);
+    const s2 = sum(['', 5]);
+    const s3 = sum(['', 2]);
+    const s4 = sum([2, '']);
+    const s5 = sum(['', '']);
+    const s6 = sum(['', 1, 2, 3]);
+    emit(`@@@ SUM(trailing [5,empty]) = ${j(s1)} typeof=${typeof s1}`);
+    emit(`@@@ SUM(leading [empty,5]) = ${j(s2)} typeof=${typeof s2}`);
+    emit(`@@@ SUM([empty,2]) = ${j(s3)} typeof=${typeof s3}`);
+    emit(`@@@ SUM([2,empty]) = ${j(s4)} typeof=${typeof s4}`);
+    emit(`@@@ SUM([empty,empty]) = ${j(s5)} typeof=${typeof s5}`);
+    emit(`@@@ SUM([empty,1,2,3]) = ${j(s6)} typeof=${typeof s6}`);
+    expect(s1).toBe('5');
+    expect(s2).toBe('05');
+    expect(s3).toBe('02');
+    expect(s4).toBe('2');
+    expect(s5).toBe('0');
+    expect(s6).toBe('0123');
+  });
+
+  it('C - actual table footer vs raw reduceField', () => {
+    emit('=== C ACTUAL FOOTER getFooterItems(reducer=sum) vs raw reduceField ===');
+    const cases: unknown[][] = [
+      [5, ''],
+      ['', 5],
+      ['', 1, 2, 3],
+    ];
+    const footers: unknown[] = [];
+    for (const vals of cases) {
+      const raw = sum(vals);
+      const field = numField(vals);
+      const footer = getFooterItems(
+        [{ id: '0', field }],
+        [vals] as any,
+        { show: true, reducer: [ReducerID.sum] },
+        theme
+      )[0];
+      footers.push(footer);
+      emit(
+        `@@@ values=${j(vals)}  raw reduceField=${j(raw)} (${typeof raw})  ACTUAL footer=${j(footer)} (${typeof footer})`
+      );
+    }
+    expect(footers[0]).toBe('5');
+    expect(footers[1]).toBe('5');
+    expect(footers[2]).toBe('123');
+  });
+
+  it('D - thresholds getActiveThreshold', () => {
+    emit('=== D THRESHOLDS getActiveThreshold(value, steps=[{-Infinity,green},{3,red}]) ===');
+    const steps = [
+      { value: -Infinity, color: 'green' },
+      { value: 3, color: 'red' },
+    ];
+    const t = (v: unknown) => getActiveThreshold(v as any, steps as any);
+    emit(`@@@ threshold(5) = ${j(t(5))}`);
+    emit(`@@@ threshold(0) = ${j(t(0))}`);
+    emit(`@@@ threshold(empty) = ${j(t(''))}`);
+    emit(`@@@ threshold(null) = ${j(t(null))}`);
+    expect(t(5).value).toBe(3);
+    expect(t(0).color).toBe('green');
+    expect(t('').color).toBe('green');
+    expect(t(null).color).toBe('green');
+  });
+
+  it('E - color scale getScaleCalculator', () => {
+    emit('=== E COLOR SCALE getScaleCalculator(field{min:0,max:10}) ===');
+    const field = numField([5, ''], { min: 0, max: 10 });
+    const calc = getScaleCalculator(field, theme);
+    emit(`@@@ scale(5) = ${j(calc(5))}`);
+    emit(`@@@ scale(0) = ${j(calc(0))}`);
+    emit(`@@@ scale(empty) = ${j(calc('' as any))}`);
+    expect(calc(5).percent).toBe(0.5);
+    expect(calc(0).percent).toBe(0);
+    expect(calc('' as any).percent).toBe(0);
+  });
+
+  it('F - per-cell display, no thresholds', () => {
+    emit('=== F PER-CELL DISPLAY getDisplayProcessor(field type=number, min0/max10, no thresholds) FULL DisplayValue ===');
+    const field = numField([5, ''], { min: 0, max: 10 });
+    const disp = getDisplayProcessor({ field, theme });
+    const show = (label: string, v: unknown) => {
+      const d = disp(v);
+      emit(
+        `@@@ display(${label}) = {text:${j(d.text)}, numeric=${Number.isNaN(d.numeric) ? 'NaN' : d.numeric}, color:${j(
+          d.color
+        )}, percent:${d.percent}}  isNaN(numeric)=${Number.isNaN(d.numeric)}`
+      );
+      return d;
+    };
+    show('5', 5);
+    show('0', 0);
+    show('empty', '');
+    show('null', null);
+    expect(disp(5).text).toBe('5');
+    expect(disp(5).numeric).toBe(5);
+    expect(Number.isNaN(disp('').numeric)).toBe(true);
+    expect(disp('').text).toBe('');
+    expect(disp(null).text).toBe('');
+  });
+
+  it('G - per-cell display, with thresholds ladder', () => {
+    emit('=== G PER-CELL DISPLAY WITH thresholds [-Inf=green,-1=blue,3=red] ===');
+    const green = theme.visualization.getColorByName('green');
+    const blue = theme.visualization.getColorByName('blue');
+    const red = theme.visualization.getColorByName('red');
+    emit(`@@@ theme colors: green=${green} blue=${blue} red=${red}`);
+    const field = numField([5, ''], {
+      min: 0,
+      max: 10,
+      thresholds: {
+        mode: ThresholdsMode.Absolute,
+        steps: [
+          { value: -Infinity, color: 'green' },
+          { value: -1, color: 'blue' },
+          { value: 3, color: 'red' },
+        ],
+      },
+    });
+    const disp = getDisplayProcessor({ field, theme });
+    const show = (label: string, v: unknown) => {
+      const d = disp(v);
+      emit(
+        `@@@ display(${label}) = {text:${j(d.text)}, numeric=${Number.isNaN(d.numeric) ? 'NaN' : d.numeric}, color:${j(
+          d.color
+        )}, percent:${d.percent}}`
+      );
+      return d;
+    };
+    show('5', 5);
+    show('0', 0);
+    show('empty', '');
+    show('null', null);
+    expect(green).toBe('#73BF69');
+    expect(blue).toBe('#5794F2');
+    expect(red).toBe('#F2495C');
+    expect(disp(5).color).toBe(red);
+    expect(disp(0).color).toBe(blue);
+    expect(disp('').color).toBe(green);
+    expect(disp(null).color).toBe(green);
+  });
+
+  it('H - recipe: emptyValue=Null + nullValueMode', async () => {
+    emit('=== H RECIPE emptyValue=Null + nullValueMode ===');
+    const f = await pivot({ emptyValue: SpecialValue.Null });
+    emit(`@@@ C2 (emptyValue=Null) values => ${j(f[2].values)}  typeof=${typeofs(f[2].values)}`);
+
+    const calc = (vals: unknown[], mode: NullValueMode, ids: ReducerID[]) =>
+      reduceField({ field: numField(vals, { nullValueMode: mode }), reducers: ids });
+
+    let r = calc([5, null], NullValueMode.Ignore, [ReducerID.sum, ReducerID.mean]);
+    emit(`@@@ Null+Ignore  sum=${r[ReducerID.sum]} (${typeof r[ReducerID.sum]}) mean=${r[ReducerID.mean]}`);
+    expect(r[ReducerID.sum]).toBe(5);
+    expect(r[ReducerID.mean]).toBe(5);
+
+    r = calc([5, null], NullValueMode.AsZero, [ReducerID.sum, ReducerID.mean]);
+    emit(`@@@ Null+AsZero  sum=${r[ReducerID.sum]} (${typeof r[ReducerID.sum]}) mean=${r[ReducerID.mean]}`);
+    expect(r[ReducerID.sum]).toBe(5);
+    expect(r[ReducerID.mean]).toBe(2.5);
+
+    r = calc([5, ''], NullValueMode.AsZero, [ReducerID.sum, ReducerID.mean]);
+    emit(`@@@ Empty+AsZero [5,empty] sum=${j(r[ReducerID.sum])} (${typeof r[ReducerID.sum]}) mean=${r[ReducerID.mean]}`);
+    expect(r[ReducerID.sum]).toBe('5');
+    expect(r[ReducerID.mean]).toBe(2.5);
+
+    r = calc(['', 5], NullValueMode.AsZero, [ReducerID.sum, ReducerID.mean]);
+    emit(`@@@ Empty+AsZero [empty,5] sum=${j(r[ReducerID.sum])} (${typeof r[ReducerID.sum]}) mean=${r[ReducerID.mean]}`);
+    expect(r[ReducerID.sum]).toBe('05');
+    expect(r[ReducerID.mean]).toBe(2.5);
+
+    const disp = getDisplayProcessor({
+      field: numField([], { min: 0, max: 10, nullValueMode: NullValueMode.AsZero }),
+      theme,
+    });
+    const d = disp(null);
+    emit(
+      `@@@ Null+AsZero display(null) = {text:${j(d.text)}, numeric=${Number.isNaN(d.numeric) ? 'NaN' : d.numeric}, color:${j(
+        d.color
+      )}, percent:${d.percent}}  isNaN=${Number.isNaN(d.numeric)}`
+    );
+    expect(Number.isNaN(d.numeric)).toBe(true);
+  });
+
+  it('I - gauge getValuePercent (NaN clamped to 0)', () => {
+    emit('=== I GAUGE CELL getValuePercent (BarGaugeCell consumes DisplayValue.numeric) ===');
+    emit(`@@@ getValuePercent(NaN,0,10) = ${getValuePercent(NaN, 0, 10)}`);
+    emit(`@@@ getValuePercent(5,0,10)   = ${getValuePercent(5, 0, 10)}`);
+    emit(`@@@ getValuePercent(0,0,10)   = ${getValuePercent(0, 0, 10)}`);
+    expect(getValuePercent(NaN, 0, 10)).toBe(0);
+    expect(getValuePercent(5, 0, 10)).toBe(0.5);
+    expect(getValuePercent(0, 0, 10)).toBe(0);
+  });
+
+  it('J - duplicate (row,column) last-value-wins', async () => {
+    emit('=== J EDGE duplicate (row,column) last-value-wins (input [10,20] for (R1,C1)) ===');
+    const frame = toDataFrame({
+      name: 'A',
+      fields: [
+        { name: 'Column', type: FieldType.string, values: ['C1', 'C1'] },
+        { name: 'Row', type: FieldType.string, values: ['R1', 'R1'] },
+        { name: 'Temp', type: FieldType.number, values: [10, 20] },
+      ],
+    });
+    const cfg = {
+      id: DataTransformerID.groupingToMatrix,
+      options: { columnField: 'Column', rowField: 'Row', valueField: 'Temp' },
+    };
+    const f = (await lastValueFrom(transformDataFrame([cfg as any], [frame])))[0].fields;
+    emit(`@@@ dup field ${f[0].name} => ${j(f[0].values)}  typeof=${typeofs(f[0].values)}`);
+    emit(`@@@ dup field ${f[1].name} => ${j(f[1].values)}  typeof=${typeofs(f[1].values)}`);
+    expect(f[1].values).toEqual([20]);
+  });
+
+  it('K - dataplane toggle default (OFF in this process)', async () => {
+    emit('=== K DATAPLANE TOGGLE default (this process) ===');
+    const toggleVal = (window as any)?.grafanaBootData?.settings?.featureToggles?.dataplaneFrontendFallback;
+    emit(`@@@ default window.grafanaBootData...dataplaneFrontendFallback = ${toggleVal}  (=> OFF)`);
+    const f = await pivot();
+    emit(`@@@ toggle OFF C2 = ${j(f[2].values)}  typeof=${typeofs(f[2].values)} type=${f[2].type}`);
+    expect(toggleVal).toBeUndefined();
+    expect(f[2].values[1]).toBe('');
+  });
+
+  it('L - JSON serialization nuances', () => {
+    emit('=== L JSON NUANCES (why some raw values print as null) ===');
+    emit(`@@@ JSON.stringify(-Infinity) = ${JSON.stringify(-Infinity)}`);
+    emit(`@@@ JSON.stringify(NaN) = ${JSON.stringify(NaN)}`);
+    expect(JSON.stringify(-Infinity)).toBe('null');
+    expect(JSON.stringify(NaN)).toBe('null');
+  });
+});
+OBSERVE
+```
 
 Imports resolve exactly as the project's own tests do: index symbols from `@grafana/data`
 (`transformDataFrame`, `reduceField`, `ReducerID`, `getActiveThreshold`, `getScaleCalculator`,
-`getDisplayProcessor`, `createTheme`, `toDataFrame`, `FieldType`, `SpecialValue`, `NullValueMode`), plus deep
-imports for the two test-only helpers
+`getDisplayProcessor`, `createTheme`, `toDataFrame`, `FieldType`, `SpecialValue`, `NullValueMode`,
+`ThresholdsMode`), plus deep imports for the two test-only helpers
 (`@grafana/data/src/utils/tests/mockTransformationsRegistry`,
 `@grafana/data/src/transformations/transformers/groupingToMatrix`,
 `@grafana/data/src/transformations/transformers/ids`), and the render helpers
 `@grafana/ui/src/components/Table/utils` (`getFooterItems`) and
-`@grafana/ui/src/components/BarGauge/BarGauge` (`getValuePercent`).
+`@grafana/ui/src/components/BarGauge/BarGauge` (`getValuePercent`). Because `@grafana/data` and `@grafana/ui`
+resolve their package `main` to `src/index.ts`, both the index and the deep `src/…` imports resolve through
+the workspace `node_modules` symlinks.
 
-**4) `"$HARNESS_DIR/toggle.test.ts"` — an isolated second suite** that sets
-`window.grafanaBootData.settings.featureToggles.dataplaneFrontendFallback = true` and then `require`s the
-transformer **fresh** (the toggle is read at module-load time, `groupingToMatrix.ts:31`, and
-`mockTransformationsRegistry` can be called only once per process — so this must be a separate file using
-`require`, not a hoisted `import`).
+**4) Create `toggle.test.ts` — an isolated second suite** that observes the ON path of the
+`dataplaneFrontendFallback` feature toggle. The toggle is read once, at module-load time
+(`groupingToMatrix.ts:31`), and the repo's Jest setup imports `@grafana/data` before any test runs — so the
+transformer module is already loaded (toggle OFF) by the time a test starts. The suite therefore calls
+`jest.resetModules()`, sets `window.grafanaBootData…dataplaneFrontendFallback = true`, and then `require`s the
+transformer, registry helper, and entry point **fresh** so the module-load read sees the new value
+(`mockTransformationsRegistry` may initialize the registry only once, which the fresh module graph
+guarantees — hence a separate file using `require`, not a hoisted `import`):
+
+```bash
+cat > "$HARNESS_DIR/toggle.test.ts" <<'TOGGLE'
+/**
+ * toggle.test.ts — isolated second suite.
+ *
+ * The dataplaneFrontendFallback feature toggle is read once, at module-load time
+ * (groupingToMatrix.ts:31). The repo's Jest setup imports @grafana/data before any
+ * test runs, so the transformer module is already loaded (toggle OFF) by the time a
+ * test starts. To observe the ON path we therefore jest.resetModules(), set
+ * window.grafanaBootData, and then require() the transformer + registry + entry point
+ * FRESH so the module-load read sees the toggle. mockTransformationsRegistry can only
+ * be called before the registry initializes, which the fresh module graph guarantees.
+ */
+import * as fs from 'fs';
+
+const OUT = process.env.HARNESS_DIR + '/out.txt';
+const emit = (s: string) => fs.appendFileSync(OUT, s + '\n');
+const j = (x: unknown) => JSON.stringify(x);
+const typeofs = (arr: unknown[]) => '[' + arr.map((v) => typeof v).join(',') + ']';
+
+describe('toggle', () => {
+  it('TOGGLE ON - emit is still the empty string', async () => {
+    // Clear the module cache so the transformer re-reads the toggle at load time.
+    jest.resetModules();
+
+    // Force the toggle ON *before* the transformer module is (re)loaded.
+    (window as any).grafanaBootData = {
+      settings: { featureToggles: { dataplaneFrontendFallback: true } },
+    };
+
+    // Require the whole graph fresh so they share one freshly-initialized registry.
+    const { lastValueFrom } = require('rxjs');
+    const { toDataFrame } = require('@grafana/data/src/dataframe/processDataFrame');
+    const { FieldType } = require('@grafana/data/src/types/dataFrame');
+    const { transformDataFrame } = require('@grafana/data/src/transformations/transformDataFrame');
+    const { groupingToMatrixTransformer } = require('@grafana/data/src/transformations/transformers/groupingToMatrix');
+    const { DataTransformerID } = require('@grafana/data/src/transformations/transformers/ids');
+    const { mockTransformationsRegistry } = require('@grafana/data/src/utils/tests/mockTransformationsRegistry');
+
+    mockTransformationsRegistry([groupingToMatrixTransformer]);
+
+    const toggleVal = (window as any)?.grafanaBootData?.settings?.featureToggles?.dataplaneFrontendFallback;
+    emit('=== TOGGLE ON (separate process, forced before module load) ===');
+    emit(`@@@ window.grafanaBootData...dataplaneFrontendFallback = ${toggleVal}  (=> ON)`);
+
+    const frame = toDataFrame({
+      name: 'A',
+      fields: [
+        { name: 'Column', type: FieldType.string, values: ['C1', 'C1', 'C2'] },
+        { name: 'Row', type: FieldType.string, values: ['R1', 'R2', 'R1'] },
+        { name: 'Temp', type: FieldType.number, values: [1, 4, 5] },
+      ],
+    });
+    const cfg = {
+      id: DataTransformerID.groupingToMatrix,
+      options: { columnField: 'Column', rowField: 'Row', valueField: 'Temp' },
+    };
+    const fields = (await lastValueFrom(transformDataFrame([cfg], [frame])))[0].fields;
+    const c2 = fields[2];
+    emit(`@@@ toggle ON  C2 = ${j(c2.values)}  typeof=${typeofs(c2.values)} type=${c2.type}`);
+
+    expect(toggleVal).toBe(true);
+    expect(c2.values[1]).toBe('');
+  });
+});
+TOGGLE
+```
 
 **5) Run each suite non-interactively (CI mode) and read the captured file:**
 
@@ -623,14 +1032,18 @@ transformer **fresh** (the toggle is read at module-load time, `groupingToMatrix
 : > "$HARNESS_DIR/out.txt"
 CI=true REPO="$REPO" HARNESS_DIR="$HARNESS_DIR" node .yarn/releases/yarn-4.5.3.cjs jest \
   --config "$HARNESS_DIR/harness.jest.config.js" --watchAll=false --ci --runInBand
+# => Test Suites: 2 passed, 2 total ; Tests: 13 passed, 13 total ; Snapshots: 0 total
 cat "$HARNESS_DIR/out.txt"
 ```
 
 **6) Clean up (leaving the repository byte-for-byte unchanged):**
 
+Because the harness lives entirely under `$HARNESS_DIR` in `/tmp` (outside the checkout) and no tracked file
+was touched, removing that directory returns the working tree to exactly its prior state:
+
 ```bash
 rm -rf "$HARNESS_DIR"
-git status --porcelain            # => only blitzy/documentation/grafana_4550cfb5b728.md
+git status --porcelain            # => no output (clean working tree)
 ```
 
 ### 6.4 Complete captured output
@@ -842,8 +1255,7 @@ because its `roots` is only the private dir): [OBSERVED]
 Cited by platform, number, and title only; no external text is reproduced.
 
 - **Grafana "Transform data" documentation** — for the remaining (missing) cells the user selects a value
-  among Null / True / False / Empty; there is no built-in `Zero`, and the pivoted output defaults to string
-  when types are mixed.
+  among Null / True / False / Empty; there is no built-in `Zero`.
 - **GitHub issue grafana/grafana#97632** — "Grouping to matrix doesn't support 0 for undefined combinations":
   corroborates that undefined combinations render as empty cells rather than `0`, and that no `Zero` option
   exists.
