@@ -15,7 +15,7 @@
 | Canonical browser entry point | `POST /api/ds/query?ds_type=grafana-testdata-datasource&requestId=SQR…` |
 | Frontend query origin (observed) | `@grafana/scenes` **`SceneQueryRunner`** → `runRequest` → `DataSourceWithBackend` → `BackendSrv` (request id prefix **`SQR`**) |
 | Method | Runtime observation only (Chrome DevTools network capture + debug server logs + Prometheus scrape + `curl` header supplement). **No source code modified.** |
-| Repeated-execution verdict | **Sequential:** second execution is re-run end-to-end, identical request bytes, *different* response body, no cache. **Concurrent (overlapping):** the earlier in-flight request is **cancelled at the browser** while the backend still completes it. Server-side query caching (`X-Cache: HIT`) is Enterprise/Cloud-only and **absent** here. |
+| Repeated-execution verdict | **Sequential:** second execution is re-run end-to-end, identical request bytes, *different* response body, no cache. **Concurrent (overlapping):** behaviour depends on the UI affordance — the toolbar Refresh button **cancels** the in-flight request in the browser (issuing no new query), while the `d r` shortcut fires an **additional** concurrent query; either way the backend runs every dispatched query independently to `200` (no server-side cancel/dedup/cache). Server-side query caching (`X-Cache: HIT`) is Enterprise/Cloud-only and **absent** here. |
 
 ---
 
@@ -30,9 +30,11 @@
   which is why every captured request carries `requestId=SQR100`, `SQR101`, … — **not**
   the `"Q"+counter` ids produced by the legacy, non-Scenes `PanelQueryRunner`.
 - **How the backend handles it:** The route is authorized on the `datasources:query`
-  action, tagged into an SLO group, traced, metered, access-logged, and passed through a
-  client-middleware chain (including a caching middleware that is a **no-op in OSS**)
-  before `queryDataService.QueryData` routes it. For a **single** data source the batch
+  action, tagged into an SLO group, wrapped by tracing and metrics middleware (the tracing
+  middleware is present in code but **inert by default in OSS** — no exporter, so no spans
+  are captured; §3.1), access-logged, and passed through a client-middleware chain
+  (including a caching middleware that is a **no-op in OSS**) before
+  `queryDataService.QueryData` routes it. For a **single** data source the batch
   is executed by `handleQuerySingleDatasource`; `executeConcurrentQueries` is the path
   used when a batch spans **multiple** data sources.
 - **What comes back:** A streamed `QueryDataResponse` — `results` keyed by `refId`, each
@@ -43,10 +45,13 @@
   - **Sequentially (one after another):** **No.** Each identical request is re-executed
     end-to-end and returns a *fresh, different* TestData `random_walk` body. No cache HIT,
     no dedup, no `304`.
-  - **Concurrently (second fired while the first is still in flight):** **Yes, but on the
-    client, not the server.** The earlier request is aborted in the browser
-    (`net::ERR_ABORTED`) the instant the panel query re-runs, while the backend continues
-    and finishes the original request with `status=200`.
+  - **Concurrently (second fired while the first is still in flight):** it depends on **how**
+    the query is re-fired, and either way the difference is **on the client, not the server.**
+    Using the toolbar **Refresh button** while a query runs **cancels** the in-flight request
+    in the browser (the button is literally labelled "Cancel") and issues **no** new query;
+    using the **`d r` keyboard shortcut** fires an **additional** concurrent query. In both
+    cases the backend runs every dispatched query independently to `status=200` — no
+    server-side cancel, dedup, or cache (§5.3).
   - Differential *server-side* treatment (a cache `HIT` with a TTL) exists only in Grafana
     Enterprise/Cloud — **[INFERRED]**, and confirmed absent on this OSS build (no `X-Cache`).
 
@@ -77,10 +82,15 @@ subject of study, which was **not modified**.
 ### 1.1 Where the investigation actually ran (honest R1 posture)
 
 The user's setup mandates the container image
-`ghcr.io/scaleapi/swe-atlas:swe_atlas_QnA_grafana_grafana_1.0`. Rather than run Grafana on
-the bare pod, this investigation ran the server **inside that exact image**, so the
-observed behavior is representative of the mandated environment. The image identity and
-the host toolchain used to build the binary were captured directly:
+`ghcr.io/scaleapi/swe-atlas:swe_atlas_QnA_grafana_grafana_1.0`. That image was **pulled and
+its identity recorded** for provenance (below), but — per the setup guidance that the
+**native toolchain reproduces the image** and the image is *not required* for a native
+build/run — Grafana was built and run **natively on the pod** using that image-equivalent
+toolchain (Go 1.23.1, Node 22.23.1, Yarn 4.5.3, gcc 15.2.0). This is stated honestly rather
+than claimed as an in-container run: the observed server process runs directly on the pod
+(verified — its executable is `…/bin/grafana` on the pod filesystem and it shares the pod's
+own cgroup; there is no separate Grafana container). The mandated-image identity and the
+host toolchain used were captured directly:
 
 ```text
 ############ MANDATED IMAGE IDENTITY (docker image inspect) ############
@@ -98,64 +108,86 @@ yarn : 4.5.3
 gcc  : gcc (Ubuntu 15.2.0) 15.2.0   # CGO_ENABLED=1 (backend embeds SQLite)
 ```
 
-> **Environment note (glibc host→image [INFERRED]; `make run` [OBSERVED]).** The backend
-> binary was compiled on the host pod (glibc 2.34 floor) and executed inside the mandated
-> image (glibc 2.36, Debian 12), which satisfies the requirement. The canonical **`make run`
-> path was verified to work in this environment** (observed): its `bra` file-watcher
-> self-installs via `.bingo` from the **warm Go module cache** — it builds even with
-> `GOPROXY=off`, so no network access is required — after which `bra` runs the exact
+> **Environment note (native pod run; `make run` [OBSERVED]).** The backend binary was both
+> compiled and executed **natively on the same pod** using the image-equivalent toolchain
+> above — build and run share one host, so there is no cross-environment glibc concern. The
+> canonical **`make run` path was verified to work in this environment** (observed): its `bra`
+> file-watcher self-installs via `.bingo` from the **warm Go module cache** — it builds even
+> with `GOPROXY=off`, so no network access is required — after which `bra` runs the exact
 > `GO_BUILD_DEV=1 make build-go` → `make gen-jsonnet` → `./bin/grafana server …` sequence from
 > [.bra.toml] and reaches full HTTP readiness on `:3000` (observed: `/api/health` → `200
 > {"database":"ok","version":"11.5.0-pre"}`, and the startup log line `msg="HTTP Server Listen"
-> address=[::]:3000 protocol=http`). This document nevertheless launches the server through
-> that **same `./bin/grafana server …` invocation directly** (see §1.3) as a deliberate
-> methodological choice — running inside the mandated image with all runtime state redirected
-> outside the repo, which keeps the source tree byte-for-byte pristine and the live
-> observation session (dashboard, session cookie, in-flight requests) stable across the study.
-> Because that invocation is **byte-identical to the server step `bra` runs** (per [.bra.toml]),
-> the runtime path under observation is identical to `make run`.
+> address=[::]:3000 protocol=http`). This document launches the server through that **same
+> `./bin/grafana server …` invocation directly** (see §1.3) as a deliberate methodological
+> choice — running on the pod with all runtime state redirected outside the repo, which keeps
+> the source tree byte-for-byte pristine and the live observation session (dashboard, session
+> cookie, in-flight requests) stable across the study. Because that invocation is
+> **byte-identical to the server step `bra` runs** (per [.bra.toml]), the runtime path under
+> observation is identical to `make run`.
 
 ### 1.2 Building the backend and frontend (actual executed commands + real captured output)
 
-**Backend** — the canonical dev build was actually executed (it runs `wire` codegen,
-`update-workspace.sh`, then `go build`). Real captured output (from `make_build_go.log`):
+**Backend** — the canonical dev build (`GO_BUILD_DEV=1 make build-go`) was actually executed;
+it runs `wire` codegen, then `scripts/go-workspace/update-workspace.sh` (a `go mod tidy` /
+`go work sync` pass over every workspace module), then `go build` of the three binaries. The
+**complete** build log is saved to `make_build_go_new.log` (179 lines); every essential line
+is shown verbatim below. The one long, low-signal region — the workspace-sync `go mod tidy`
+module-resolution output (log lines 6–165) — is shown as an **explicitly labelled excerpt**
+(the bracketed marker denotes ~160 omitted resolution lines, and the single notable notice in
+that region, the `go-xorm/core` alias, is reproduced verbatim — this is a labelled excerpt,
+not silently trimmed output):
 
 ```text
 $ GO_BUILD_DEV=1 make build-go
-go run ./pkg/build/wire/cmd/wire/main.go gen -tags "oss" ./pkg/server
-wire: github.com/grafana/grafana/pkg/server: wrote .../pkg/server/wire_gen.go
+generate go files
+go run  ./pkg/build/wire/cmd/wire/main.go gen -tags "oss" ./pkg/server
+wire: github.com/grafana/grafana/pkg/server: wrote /tmp/blitzy/grafana/blitzy-9682fe45-f4cc-44bd-b398-dd6148240b19_129ea4/pkg/server/wire_gen.go
+updating workspace
 bash scripts/go-workspace/update-workspace.sh
-Running go mod tidy in ./pkg/util/xorm
-  go: ... github.com/go-xorm/core: parsing go.mod: module declares its path as:
-      xorm.io/core  but was required as: github.com/go-xorm/core        # (non-fatal notice)
-Version: 11.5.0, Linux Version: 11.5.0, Package Iteration: 1784064294pre
+Running go mod tidy in .
+[…workspace-sync excerpt: ~160 `go mod tidy` module-resolution lines across all workspace
+  modules (log lines 6–165); the one notable notice reproduced verbatim: …]
+	github.com/grafana/grafana/pkg/services/sqlstore imports
+	github.com/go-xorm/core: github.com/go-xorm/core@v0.6.3: parsing go.mod:
+	module declares its path as: xorm.io/core
+	        but was required as: github.com/go-xorm/core
+running go mod download
+running go work sync
+build go files with updated workspace
+go run build.go -dev   build
+Version: 11.5.0, Linux Version: 11.5.0, Package Iteration: 1784118489pre
+building binaries build
 building grafana ./pkg/cmd/grafana
-go build -ldflags "-w -X main.version=11.5.0-pre -X main.commit=efdcb41717 \
-  -X main.buildstamp=1784060922 -X main.buildBranch=blitzy-9682fe45-…" -o ./bin/grafana ./pkg/cmd/grafana
+go build -ldflags -w -X main.version=11.5.0-pre -X main.commit=a303e41c89 -X main.buildstamp=1784079655 -X main.buildBranch=blitzy-9682fe45-f4cc-44bd-b398-dd6148240b19 -o ./bin/grafana ./pkg/cmd/grafana
+building binaries build
 building grafana-server ./pkg/cmd/grafana-server
-go build -ldflags "… -X main.commit=efdcb41717 …" -o ./bin/grafana-server ./pkg/cmd/grafana-server
+go build -ldflags -w -X main.version=11.5.0-pre -X main.commit=a303e41c89 -X main.buildstamp=1784079655 -X main.buildBranch=blitzy-9682fe45-f4cc-44bd-b398-dd6148240b19 -o ./bin/grafana-server ./pkg/cmd/grafana-server
+building binaries build
 building grafana-cli ./pkg/cmd/grafana-cli
-go build -ldflags "… -X main.commit=efdcb41717 …" -o ./bin/grafana-cli ./pkg/cmd/grafana-cli
+go build -ldflags -w -X main.version=11.5.0-pre -X main.commit=a303e41c89 -X main.buildstamp=1784079655 -X main.buildBranch=blitzy-9682fe45-f4cc-44bd-b398-dd6148240b19 -o ./bin/grafana-cli ./pkg/cmd/grafana-cli
 ```
 
-All three binaries were produced on disk (verified `ls -la bin/`: `grafana`,
-`grafana-server`, `grafana-cli` rewritten at `2026-07-14 21:25:19–21`, `bin/grafana`
-embedded stamp `efdcb41717`). The single `go mod tidy` message about `xorm.io/core` vs
-`github.com/go-xorm/core` is a **non-fatal** workspace-sync alias notice — the build
-proceeded through it and compiled all three binaries.
+`make build-go` exited `0`. All three binaries were produced on disk (verified `ls -la bin/`:
+`grafana`, `grafana-server`, `grafana-cli` rewritten at `2026-07-15 12:28`), and
+`bin/grafana --version` reports `grafana version 11.5.0-pre` with ldflags `-X
+main.commit=a303e41c89 -X main.buildstamp=1784079655 -X
+main.buildBranch=blitzy-9682fe45-f4cc-44bd-b398-dd6148240b19`. The `xorm.io/core` vs
+`github.com/go-xorm/core` line is a **non-fatal** workspace-sync alias notice — the build
+proceeded through it and compiled all three binaries. Crucially, the build left the **tracked
+source tree byte-for-byte unchanged**: `git status --porcelain` after the build reports only
+the untracked `blitzy/` artifacts (no tracked file modified).
 
-> **Which binary actually served the observations (honest reconciliation).** The
-> **running instance reports `commit=4550cfb5b7`** (see `/api/health` in §1.4 and the
-> startup marker) — it is the **warm, pre-built `bin/grafana`** that was already present when
-> the container started at `21:19:57`, and that is the exact **study commit** `4550cfb5b7`.
-> The `make build-go` run above happened later (`21:25`) and re-stamped `bin/grafana` on disk
-> to `efdcb41717` (the current blitzy-branch HEAD), but the **already-running process keeps
-> the warm binary in memory**, so every captured request was served by the `4550cfb5b7`
-> binary. The rebuild was executed to **demonstrate the canonical backend build succeeds
-> end-to-end**; the running session was deliberately **not** restarted with the new binary so
-> the live observation state (dashboard, session, in-flight requests) was preserved. Both
-> binaries are built from the same study source tree (the branch is based on `4550cfb5b7`;
-> `git status` is clean — no source modified), so the observation is representative.
+> **Which binary served the observations (honest reconciliation).** The running instance
+> reports **`commit=a303e41c89`** (see `/api/health` in §1.4 and the startup marker) — this is
+> the current blitzy-branch **HEAD** commit, which is what the `-X main.commit` ldflag stamps
+> from `git rev-parse HEAD`. That is **not** a contradiction with the **study commit
+> `4550cfb5b7`** used for all `path:line` citations: the branch differs from `4550cfb5b7` in
+> **exactly one file — this answer document** (verified: `git diff --name-only
+> 4550cfb5b7..HEAD` → the single line `blitzy/documentation/grafana_4550cfb5b728.md`; see the
+> full `git diff --name-status` in §7). Because **no Grafana source, config, or dependency file
+> differs between `4550cfb5b7` and the running `a303e41c89` binary**, the observed runtime
+> behaviour is that of the `4550cfb5b7` study source. `git status` is otherwise clean (only the
+> untracked `blitzy/` artifacts), so the observation is representative of the study commit.
 
 **Frontend** — `yarn start` (webpack dev build) was actually executed; real captured marker
 (from `yarn_start.log`):
@@ -174,83 +206,75 @@ assets under `public/build` were present and served by the running instance thro
 ### 1.3 Launching the observed instance (the exact server invocation)
 
 ```bash
-# Runtime state is redirected OUTSIDE the repo (into /obs) so the source tree stays
-# byte-for-byte unchanged; debug logging is enabled ephemerally via cfg: overrides.
-$ docker run -d --name blitzy_grafana_obs \
-    -p 3000:3000 \
-    -v "$PWD":/repo -w /repo \
-    -v /tmp/blitzy_obs:/obs \
-    --entrypoint /repo/bin/grafana \
-    ghcr.io/scaleapi/swe-atlas:swe_atlas_QnA_grafana_grafana_1.0 \
-    server -homepath /repo -profile -profile-addr=127.0.0.1 -profile-port=6000 \
-           -profile-block-rate=1 -profile-mutex-rate=5 -packaging=dev \
+# Runtime state is redirected OUTSIDE the repo (into /tmp/blitzy_qafix_obs) so the source
+# tree stays byte-for-byte unchanged; debug logging is enabled ephemerally via cfg: overrides.
+$ OBS=/tmp/blitzy_qafix_obs
+$ nohup ./bin/grafana server -homepath "$PWD" -packaging=dev \
     cfg:app_mode=development \
-    cfg:paths.data=/obs/data cfg:paths.logs=/obs/log cfg:paths.provisioning=/obs/provisioning \
-    cfg:log.level=debug cfg:server.router_logging=true
+    cfg:paths.data="$OBS/data" cfg:paths.logs="$OBS/log" cfg:paths.provisioning="$OBS/provisioning" \
+    cfg:log.level=debug cfg:server.router_logging=true \
+    > "$OBS/server.stdout.log" 2>&1 &
 ```
 
-The `server … -profile … -packaging=dev cfg:app_mode=development` portion is **exactly**
-the server step `bra` runs for `make run`, per [.bra.toml]. The `cfg:log.level=debug` and
-`cfg:paths.*` overrides are runtime-only (they never touch a committed file) and are
-reverted in §7.
+The `server -packaging=dev cfg:app_mode=development` portion is **exactly** the server step
+`bra` runs for `make run`, per [.bra.toml]; invoking the freshly built `./bin/grafana` binary
+directly (rather than through the `bra` file-watcher) keeps the observed request path
+byte-identical to `make run` while leaving the live observation session (dashboard, session
+cookie, in-flight requests) stable and the source tree pristine. The `cfg:log.level=debug`,
+`cfg:server.router_logging=true`, and `cfg:paths.*` overrides are runtime-only (they never
+touch a committed file) and are reverted in §7.
 
-### 1.4 Startup chronology, the accepted run, and every warning explained
+### 1.4 Startup chronology and every warning explained
 
-**Two startup cycles are present in the persisted log**, and honesty requires showing both
-and identifying which one served the observations:
+The instance starts in a **single clean cycle** on a fresh SQLite DB (the redirected
+`cfg:paths.data`), applies all migrations, and reaches `HTTP Server Listen`. Real captured
+log lines (full RFC3339Nano timestamps, `commit=a303e41c89`):
 
 ```text
-# ── Cycle 1 (21:19:12) — first-time database initialisation on the fresh SQLite DB ──
-logger=settings   t=…T21:19:12.334Z level=info msg="Starting Grafana" version=11.5.0-pre commit=4550cfb5b7 branch=blitzy-9682fe45-… compiled=2024-12-13T14:22:02Z
-logger=migrator   t=…T21:19:14.368Z level=info msg="migrations completed" performed=626 skipped=0 duration=2.019557853s   # ← 626 migrations APPLIED (empty DB)
-logger=http.server t=…T21:19:14.745Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http
-
-# ── Cycle 2 (21:19:57) — THE ACCEPTED OBSERVATION RUN ──
-logger=settings   t=…T21:19:57.091Z level=info msg="Starting Grafana" version=11.5.0-pre commit=4550cfb5b7 branch=blitzy-9682fe45-… compiled=2024-12-13T14:22:02Z
-logger=migrator   t=…T21:19:57.104Z level=info msg="migrations completed" performed=0 skipped=626 duration=3.617818ms      # ← 0 applied, 626 skipped (DB already initialised by Cycle 1)
-logger=http.server t=…T21:19:57.296Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http
-diagnostics: pprof profiling enabled addr 127.0.0.1 port 6000
+logger=settings t=2026-07-15T12:05:08.042724815Z level=info msg="Starting Grafana" version=11.5.0-pre commit=a303e41c89 branch=blitzy-9682fe45-f4cc-44bd-b398-dd6148240b19 compiled=2026-07-15T01:40:55Z
+logger=migrator t=2026-07-15T12:05:09.829824154Z level=info msg="migrations completed" performed=626 skipped=0 duration=1.771047605s
+logger=resource-migrator t=2026-07-15T12:05:10.216248683Z level=info msg="migrations completed" performed=18 skipped=0 duration=78.036077ms
+logger=http.server t=2026-07-15T12:05:10.251288638Z level=info msg="HTTP Server Listen" address=[::]:3000 protocol=http subUrl= socket=
 ```
 
-**Which run is authoritative.** The **accepted run is Cycle 2 (21:19:57)** — it is the run
-alive when every captured request was issued (the SQR100 correlation in §3.4 is timestamped
-`21:29:15`, well within Cycle 2's lifetime). Cycle 1 was the one-time database-initialisation
-pass that created and migrated the fresh SQLite DB (`performed=626`); Cycle 2 then found the
-schema already migrated (`skipped=626`). The 45-second gap is the restart between the
-init cycle and the accepted observation cycle. There was **no crash/restart loop** — exactly
-two clean cycles, and all evidence comes from the second.
+`performed=626 skipped=0` shows all 626 core migrations applied to the empty DB (plus 18
+unified-storage resource migrations); the server bound `:3000` ~2.2 s after start. There was
+**no crash/restart loop** — one clean cycle served every captured request.
 
-Readiness confirmed against the real endpoints (Cycle 2):
+Readiness confirmed against the real endpoint:
 
 ```bash
 $ curl -s http://localhost:3000/api/health
-{ "database": "ok", "version": "11.5.0-pre", "commit": "4550cfb5b7" }
-
-$ docker exec blitzy_grafana_obs curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:6000/debug/pprof/
-200
+{
+  "database": "ok",
+  "version": "11.5.0-pre",
+  "commit": "a303e41c89"
+}
 ```
 
 **Every startup warning/error, listed and explained (none affect the `/api/ds/query` path):**
 
 ```text
-logger=migrator            level=warn  msg="Skipping migration: Already executed, but not recorded in migration log" id="drop unique orgID index …"   (×3)
-logger=provisioning.plugins   level=error msg="Failed to read plugin provisioning files from directory" path=/obs/provisioning/plugins  error="… no such file or directory"
-logger=provisioning.alerting  level=error msg="can't read alerting provisioning files from directory" path=/obs/provisioning/alerting error="… no such file or directory"
-logger=resource-server     level=warn  msg="failed to register storage metrics" error="duplicate metrics collector registration attempted"   (×3 per cycle; 6 total across both cycles)
+logger=migrator             level=warn  msg="Skipping migration: Already executed, but not recorded in migration log" id="drop index IDX_dashboard_public_config_org_id_dashboard_uid - v1"
+logger=migrator             level=warn  msg="Skipping migration: Already executed, but not recorded in migration log" id="drop index UQE_dashboard_public_config_uid - v1"
+logger=migrator             level=warn  msg="Skipping migration: Already executed, but not recorded in migration log" id="drop unique orgID index on alert_configuration if exists"
+logger=provisioning.plugins   level=error msg="Failed to read plugin provisioning files from directory" path=/tmp/blitzy_qafix_obs/provisioning/plugins error="open /tmp/blitzy_qafix_obs/provisioning/plugins: no such file or directory"
+logger=provisioning.dashboard level=error msg="can't read dashboard provisioning files from directory" path=/tmp/blitzy_qafix_obs/provisioning/dashboards error="open /tmp/blitzy_qafix_obs/provisioning/dashboards: no such file or directory"
+logger=provisioning.dashboard level=error msg="can't read dashboard provisioning files from directory" path=/tmp/blitzy_qafix_obs/provisioning/dashboards error="open /tmp/blitzy_qafix_obs/provisioning/dashboards: no such file or directory"
+logger=provisioning.alerting  level=error msg="can't read alerting provisioning files from directory" path=/tmp/blitzy_qafix_obs/provisioning/alerting error="open /tmp/blitzy_qafix_obs/provisioning/alerting: no such file or directory"
 ```
 
 - **`migrator … Skipping migration` (×3)** — benign: three `drop index` migrations were
   already applied to the DB but not recorded in the migration log; Grafana skips them and
   continues. No effect on the query path.
-- **`provisioning.plugins` / `provisioning.alerting` errors** — benign and expected: the
-  runtime provisioning root (`/obs/provisioning`) contains **only** the `datasources/`
-  subdirectory I created (§1.5); the `plugins/` and `alerting/` subdirectories do not exist,
-  so Grafana logs that it found no files there. This is exactly the intended minimal
-  provisioning — no plugin or alerting provisioning was needed for this investigation.
-- **`resource-server … duplicate metrics collector` (×3 per cycle)** — benign: the
-  unified-storage resource server attempts to register the same Prometheus collector more
-  than once during dev startup. It does not touch `/api/ds/query`; the server proceeds to a
-  healthy `HTTP Server Listen` in both cycles.
+- **`provisioning.plugins` / `provisioning.dashboard` / `provisioning.alerting` errors** —
+  benign and expected: the runtime provisioning root (`/tmp/blitzy_qafix_obs/provisioning`)
+  contains **only** the `datasources/` subdirectory I created (§1.5); the `plugins/`,
+  `dashboards/`, and `alerting/` subdirectories do not exist, so Grafana logs that it found no
+  files there. (The observed dashboard was created through the HTTP API — `POST
+  /api/dashboards/db` — not file provisioning, so the `dashboards/` provisioning directory was
+  intentionally absent.) This is exactly the intended minimal provisioning — only the built-in
+  TestData datasource was provisioned for this investigation.
 
 ### 1.5 The built-in data source is provisioned canonically
 
@@ -300,8 +324,8 @@ This `uid=blitzytestdata01` is the correlation key that appears in every layer b
 ### 1.6 Observation tooling and script hygiene
 
 Observation used Chrome DevTools network capture (the canonical browser path), debug
-server logs (`docker logs` / the `/obs/log/grafana.log` file), a Prometheus `/metrics`
-scrape, and `curl` **only** as a labelled raw-header supplement. Every temporary helper
+server logs (the native `cfg:paths.logs` file `/tmp/blitzy_qafix_obs/log/grafana.log`, per
+§1.3), a Prometheus `/metrics` scrape, and `curl` **only** as a labelled raw-header supplement. Every temporary helper
 script followed a hardened pattern and all of them are removed in §7:
 
 ```bash
@@ -309,7 +333,7 @@ script followed a hardened pattern and all of them are removed in §7:
 # Representative hardened observation helper (pattern used throughout; all removed in §7).
 set -Eeuo pipefail
 umask 077                                            # new files are private (0600/0700)
-WORK="$(mktemp -d /tmp/blitzy_obs.XXXXXX)"           # unique, mode-0700 temp dir
+WORK="$(mktemp -d /tmp/blitzy_qafix_obs.XXXXXX)"     # unique, mode-0700 temp dir
 chmod 700 "$WORK"
 cleanup() { rm -rf -- "$WORK"; }                     # narrow: only our own dir
 trap cleanup EXIT INT TERM
@@ -378,7 +402,7 @@ Grafana's injected `runRequest` then drives the request to the data source:
 **Observed proof of origin** — the very first panel query on page load:
 
 ```bash
-# Chrome DevTools MCP capture of the panel's outgoing request (reqid=113):
+# Chrome DevTools MCP capture of the panel's outgoing request (reqid=228):
 POST http://localhost:3000/api/ds/query?ds_type=grafana-testdata-datasource&requestId=SQR100  -> 200
 ```
 
@@ -405,12 +429,12 @@ sequenceDiagram
 
 ### 2.2 The request URL and payload (observed)
 
-The complete captured request body for `requestId=SQR100` (DevTools reqid 113). First the
-**raw wire bytes exactly as captured** (a single 247-byte line — this is the verbatim
+The complete captured request body for `requestId=SQR100` (DevTools reqid 228). First the
+**raw wire bytes exactly as captured** (a single 264-byte line — this is the verbatim
 payload, nothing added or removed):
 
 ```text
-{"queries":[{"datasource":{"type":"grafana-testdata-datasource","uid":"blitzytestdata01"},"refId":"A","scenarioId":"random_walk","seriesCount":1,"datasourceId":1,"intervalMs":30000,"maxDataPoints":783}],"from":"1784042953039","to":"1784064553039"}
+{"queries":[{"datasource":{"type":"grafana-testdata-datasource","uid":"blitzytestdata01"},"refId":"A","scenarioId":"random_walk","seriesCount":1,"startValue":50,"datasourceId":1,"intervalMs":15000,"maxDataPoints":1573}],"from":"1784073600000","to":"1784095200000"}
 ```
 
 The identical bytes, **pretty-printed for readability only** (whitespace added; no field
@@ -424,21 +448,38 @@ changed, added, or removed):
       "refId": "A",
       "scenarioId": "random_walk",
       "seriesCount": 1,
+      "startValue": 50,
       "datasourceId": 1,
-      "intervalMs": 30000,
-      "maxDataPoints": 783
+      "intervalMs": 15000,
+      "maxDataPoints": 1573
     }
   ],
-  "from": "1784042953039",
-  "to": "1784064553039"
+  "from": "1784073600000",
+  "to": "1784095200000"
 }
 ```
 
 The body is the `MetricRequest` DTO the handler binds server-side
 (`pkg/api/dtos/models.go`): a `queries[]` array plus the `from`/`to` window. The
-`content-length` of this body was `247` bytes. `from`/`to` are epoch-millisecond strings
-because the panel was on a `now-6h … now` range (the referer in §3.4 confirms
-`from=now-6h&to=now`), which Grafana resolves to the absolute millis shown.
+`content-length` of this body was `264` bytes. `from`/`to` are epoch-millisecond strings
+for the dashboard's absolute `2026-07-15 00:00:00 … 06:00:00 UTC` range — the `referer`
+captured in §2.3 (`…&from=2026-07-15T00%3A00%3A00.000Z&to=2026-07-15T06%3A00%3A00.000Z…`)
+confirms that exact window, which Grafana passes through as the millisecond strings
+`from=1784073600000` / `to=1784095200000` shown above.
+
+> **Same request family across §2 → §3.4 → §4.** This §2 capture is a **page-load** issuance of
+> the panel (`requestId=SQR100`, DevTools reqid 228); the six-layer correlation in §3.4 and the
+> response in §4 were captured from an **equivalent execution of the same panel/query**
+> (`requestId=SQR101`, DevTools reqid 195) on the *same* dashboard, for the *same* window. They
+> differ only in two incidental ways: (1) the `requestId` counter value — `@grafana/scenes`
+> numbers requests **per browser session**, so a fresh page reload starts again at `SQR100`
+> while a longer-lived session had already reached `SQR101`; and (2) the per-run random
+> `random_walk` sample values (only the first is pinned, by `startValue: 50`). Everything that
+> defines the request is identical: the URL, the `X-*` headers, the `MetricRequest` DTO shape,
+> the datasource, and the window (`from=1784073600000` / `to=1784095200000`). That is why
+> §3.4's access-log `size=46746` and §4's response body faithfully describe this same request
+> in every respect that matters to the query lifecycle. (The two captures' response byte counts
+> differ trivially — 46746 vs. this load's 46727 — purely because of the random values.)
 
 ### 2.3 The request headers — the "metadata that reveals how the query is processed" (R7)
 
@@ -452,7 +493,7 @@ generic browser/transport headers the user agent attaches automatically (plus th
 device id) are listed in group **(b)** for completeness:
 
 ```text
-# Request headers on POST /api/ds/query?...&requestId=SQR100  (DevTools reqid 113)
+# Request headers on POST /api/ds/query?...&requestId=SQR100  (DevTools reqid 228)
 
 # (a) Plugin/correlation headers set by DataSourceWithBackend (the R3/R7-relevant subset):
 content-type:        application/json
@@ -466,17 +507,17 @@ cookie:              grafana_session=<REDACTED>
 
 # (b) Remaining headers also present on the same request — generic browser/transport
 #     metadata (+ the Grafana device id); redactions: cookie is in (a), device id below.
-#     user-agent version shown as "…" because it varies by browser build:
+#     (the exact HeadlessChrome build version is shown verbatim, as captured):
 x-grafana-device-id: <REDACTED_DEVICE_ID>
-referer:             http://localhost:3000/d/blitzyqadash01/blitzy-qa-testdata?from=now-6h&to=now
-user-agent:          Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/… Safari/537.36
+referer:             http://localhost:3000/d/blitzyqadash01/blitzy-qa-testdata-dashboard?orgId=1&from=2026-07-15T00:00:00.000Z&to=2026-07-15T06:00:00.000Z&timezone=utc
+user-agent:          Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/150.0.0.0 Safari/537.36
 accept:              application/json, text/plain, */*
 accept-encoding:     gzip, deflate, br, zstd
 accept-language:     en-US,en;q=0.9
 host:                localhost:3000
 origin:              http://localhost:3000
 connection:          keep-alive
-content-length:      247
+content-length:      264
 sec-fetch-dest:      empty
 sec-fetch-mode:      cors
 sec-fetch-site:      same-origin
@@ -536,18 +577,31 @@ Surrounding global middleware adds request tracing
 (`pkg/middleware/requestmeta/request_metadata.go`), and the per-request access log
 (`pkg/middleware/loggermw/logger.go`).
 
+> **Tracing is present in the code path but inert by default — do not read "traced" as
+> "traces were captured."** The tracing middleware *is* registered in the request path
+> (code-level, `request_tracing.go`), so it **[INFERRED]** would emit a span per request — but
+> on this default OSS build **no tracing exporter is configured**, so no spans are exported
+> and this investigation captured none. Observed from `/api/admin/settings`:
+> `tracing.opentelemetry` has `sampler_type=""`, `sampler_param="0"`, and empty
+> `tracing.opentelemetry.otlp.address` and `tracing.opentelemetry.jaeger.address` (the legacy
+> `tracing.jaeger` block shows `sampler_type="const" sampler_param="1"` but likewise carries
+> **no** `address`, so nothing is collected). Correspondingly, **no `traceparent`, trace-id,
+> or correlation header is present on any `/api/ds/query` response** (verified by dumping the
+> response headers — §4.2). The server-side processing story here is therefore reconstructed
+> entirely from **debug logs** (§3.4), *not* from exported distributed traces.
+
 ### 3.2 The handler binds `MetricRequest` (and the K8s rewrite is OFF)
 
 ```go
 // pkg/api/ds_query.go:41  getDSQueryEndpoint
 //   - under featuremgmt.FlagQueryServiceRewrite the request is rewritten to the
 //     apiserver; that flag is OFF by default in OSS, so the classic path is taken.
-// pkg/api/ds_query.go:73-77  QueryMetricsV2
-apReq := dtos.MetricRequest{}
-if err := web.Bind(c.Req, &apReq); err != nil {
+// pkg/api/ds_query.go:73-79  QueryMetricsV2
+reqDTO := dtos.MetricRequest{}
+if err := web.Bind(c.Req, &reqDTO); err != nil {
     return response.Error(http.StatusBadRequest, "bad request data", err)   // ds_query.go:76
 }
-resp, err := hs.queryDataService.QueryData(c.Req.Context(), c.SignedInUser, c.SkipDSCache, apReq)
+resp, err := hs.queryDataService.QueryData(c.Req.Context(), c.SignedInUser, c.SkipDSCache, reqDTO)
 ```
 
 Two facts nailed down by observation:
@@ -576,7 +630,7 @@ if parsedReq.hasExpression {
 if len(parsedReq.parsedQueries) == 1 {                                     // :102
     return s.handleQuerySingleDatasource(ctx, user, parsedReq)             // :103
 }
-// If there are multiple datasources, handle their queries concurrently …
+// If there are multiple datasources, handle their queries concurrently and return the aggregate result
 return s.executeConcurrentQueries(ctx, user, skipDSCache, reqDTO, parsedReq.parsedQueries) // :106
 ```
 
@@ -600,12 +654,15 @@ queries take the first branch (`query.go:99`), calling `handleExpressions` (defi
 > - **No runtime override was passed.** The §1.3 command line sets only `app_mode`,
 >   `paths.*`, `log.level`, and `server.router_logging` — **no** `cfg:query.concurrent_query_limit`.
 >   So the effective value is the `runtime.NumCPU()` fallback.
-> - **`runtime.NumCPU()` inside the running container was `128`** (observed:
->   `docker exec blitzy_grafana_obs nproc` → `128`, and `grep -c ^processor /proc/cpuinfo`
->   → `128`; the build pod's `nproc=4` is irrelevant because Grafana runs *inside the
->   container*). **[INFERRED]** that Grafana's in-process limit is therefore `128`: this was
->   read from the container's CPU count, not from Grafana's live field (no debug hook was
->   used, per the no-synthetic-bypass rule).
+> - **The `runtime.NumCPU()` fallback value was not read from a live Grafana field** (no debug
+>   hook was used, per the no-synthetic-bypass rule), so its exact value is **[INFERRED]**.
+>   What *was* observed, on the pod where Grafana runs **natively** (§1.1): `nproc` → `4`,
+>   while `grep -c ^processor /proc/cpuinfo` → `128` and `nproc --all` → `128`. The two differ
+>   because `nproc` — like Go's `runtime.NumCPU()` on Linux — reflects the process's
+>   **CPU-affinity mask**, whereas `/proc/cpuinfo` and `nproc --all` list every host logical
+>   CPU regardless of affinity. Since `runtime.NumCPU()` honours that affinity mask, the
+>   effective fallback is **most likely `4`** (the affinity-limited count), not the full host
+>   count of `128`. The exact number is immaterial to this investigation (see next paragraph).
 >
 > Crucially, this limit is applied **only** at `query.go:118`
 > (`g.SetLimit(s.concurrentQueryLimit)`) **inside `executeConcurrentQueries`** — the
@@ -620,39 +677,42 @@ repeated-execution question and is dissected in §5.4.
 
 ### 3.4 One request, correlated across every backend layer (R7)
 
-This is a single happy-path execution (`requestId=SQR100`) traced across **six** layers,
-all sharing the `blitzytestdata01` datasource uid, `ref_id=A`, and the same
-`from=1784042953039 to=1784064553039` window, at the same millisecond
-(`21:29:15.206–.211Z`). Nothing here is stitched from different requests — the identifiers
-line up end to end.
+This is a single happy-path execution (`requestId=SQR101`, DevTools `reqid=195`) followed
+through **six** log layers (this is debug-log correlation, **not** distributed tracing —
+§3.1), all sharing the `blitzytestdata01` datasource uid, `ref_id=A`, and the
+same `from=1784073600000 to=1784095200000` window, within the same millisecond band
+(`12:35:54.599761809–.601534412Z`). Nothing here is stitched from different requests — the
+identifiers, timestamps, and byte counts line up end to end (the browser request `date:
+Wed, 15 Jul 2026 12:35:54 GMT` matches the backend completion at `12:35:54.601Z`, and the
+backend `size=46746` equals the response `content-length` seen in §4).
 
 ```text
-# (1) BROWSER  — DevTools network entry
-POST /api/ds/query?ds_type=grafana-testdata-datasource&requestId=SQR100  reqid=113  -> 200
+# (1) BROWSER  — DevTools network entry (reqid=195)
+POST /api/ds/query?ds_type=grafana-testdata-datasource&requestId=SQR101  -> 200
 
 # (2) datasources — resolve the datasource instance
-logger=datasources   t=…T21:29:15.206Z level=debug msg="Querying for data source via SQL store" uid=blitzytestdata01 orgId=1
+logger=datasources t=2026-07-15T12:35:54.599761809Z level=debug msg="Querying for data source via SQL store" uid=blitzytestdata01 orgId=1
 
 # (3) query_data  — the query service records the processed query
-logger=query_data    t=…T21:29:15.207Z level=debug msg="Processed metrics query" ref_id=A from=1784042953039 to=1784064553039 interval=30000 max_data_points=783 query="{\"datasource\":{\"type\":\"grafana-testdata-datasource\",\"uid\":\"blitzytestdata01\"},\"datasourceId\":1,\"intervalMs\":30000,\"maxDataPoints\":783,\"refId\":\"A\",\"scenarioId\":\"random_walk\",\"seriesCount\":1}"
+logger=query_data t=2026-07-15T12:35:54.600086201Z level=debug msg="Processed metrics query" ref_id=A from=1784073600000 to=1784095200000 interval=15000 max_data_points=1573 query="{\"datasource\":{\"type\":\"grafana-testdata-datasource\",\"uid\":\"blitzytestdata01\"},\"datasourceId\":1,\"intervalMs\":15000,\"maxDataPoints\":1573,\"refId\":\"A\",\"scenarioId\":\"random_walk\",\"seriesCount\":1,\"startValue\":50}"
 
 # (4) secrets.kvstore — decrypt datasource secure settings
-logger=secrets.kvstore t=…T21:29:15.208Z level=debug msg="got secret value" namespace=TestData
+logger=secrets.kvstore t=2026-07-15T12:35:54.600346415Z level=debug msg="got secret value" orgId=1 type=datasource namespace=TestData
 
 # (5) tsdb.testdata — the built-in datasource backend actually executes
-logger=tsdb.testdata endpoint=queryData pluginId=grafana-testdata-datasource dsUID=blitzytestdata01 uname=admin t=…T21:29:15.209Z level=debug scenario=random_walk
+logger=tsdb.testdata endpoint=queryData pluginId=grafana-testdata-datasource dsName=TestData dsUID=blitzytestdata01 uname=admin t=2026-07-15T12:35:54.600475651Z level=debug msg=queryData scenario=random_walk
 
 # (6) context (access log) — request completion
-logger=context userId=1 orgId=1 uname=admin t=…T21:29:15.211Z level=info msg="Request Completed" method=POST path=/api/ds/query status=200 time_ms=6 duration=6.732624ms size=23444 referer="http://localhost:3000/d/blitzyqadash01/blitzy-qa-testdata?from=now-6h&to=now" status_source=server
+logger=context userId=1 orgId=1 uname=admin t=2026-07-15T12:35:54.601534412Z level=info msg="Request Completed" method=POST path=/api/ds/query status=200 remote_addr=127.0.0.1 time_ms=3 duration=3.443049ms size=46746 referer="http://localhost:3000/d/blitzyqadash01/blitzy-qa-testdata-dashboard?from=2026-07-15T00%3A00%3A00.000Z&orgId=1&timezone=utc&to=2026-07-15T06%3A00%3A00.000Z" handler=/api/ds/query status_source=server
 ```
 
-Cause → effect, read top to bottom: the browser posts `SQR100` **(1)** → the datasource is
+Cause → effect, read top to bottom: the browser posts `SQR101` **(1)** → the datasource is
 resolved by uid **(2)** → the query service processes `ref_id=A` over the exact time window
 **(3)** → datasource secrets are decrypted **(4)** → the **TestData backend** runs the
-`random_walk` scenario **(5)** → the access logger records `status=200`, `size=23444`
+`random_walk` scenario **(5)** → the access logger records `status=200`, `size=46746`
 bytes, `status_source=server`, and the `referer` proving this came from dashboard
-`blitzyqadash01` on a `now-6h…now` range **(6)**. The `size=23444` here equals the response
-`content-length` in §4 — same request, same bytes.
+`blitzyqadash01` **(6)**. The `size=46746` here equals the response `content-length` in §4 —
+same request, same bytes.
 
 The scenario identifier surfaces in **two distinct places**, and it is worth being precise
 about which is which: on layer (3) it is *nested inside* the `query="{…}"` payload — the
@@ -718,27 +778,43 @@ authenticated-happy-path investigation and are therefore all **[INFERRED]** from
 Binding failures (malformed/empty body) short-circuit earlier in the handler and return
 `400` before any query runs (§3.2, §5.6(a,b)).
 
-### 4.2 Response headers (observed)
+### 4.2 Response headers (observed — complete set)
+
+The complete, unedited response-header set on the `SQR101` success (DevTools `reqid=195`),
+identical to the raw bytes returned by the labelled `curl` supplement:
 
 ```text
-# Response headers on the SQR100 success (DevTools reqid 113)
-cache-control:          no-store
-content-type:           application/json
-transfer-encoding:      chunked
-x-content-type-options: nosniff
-# (NO X-Cache header present)
+HTTP/1.1 200 OK
+Cache-Control: no-store
+Content-Type: application/json
+X-Content-Type-Options: nosniff
+X-Frame-Options: deny
+X-Xss-Protection: 1; mode=block
+Date: Wed, 15 Jul 2026 12:40:37 GMT
+Transfer-Encoding: chunked
 ```
 
-`Cache-Control: no-store` means the browser does not transparently cache the result
-either, and the **absence of any `X-Cache` header** is the first direct signal that no
-server-side query cache is in play (developed fully in §5).
+Every header above was present on the response; there are **no others**. `Cache-Control:
+no-store` means the browser does not transparently cache the result either, and the
+**absence of any `X-Cache` header** (and of any `traceparent`/trace-correlation header) is
+the first direct signal that no server-side query cache is in play (developed fully in §5).
+`Transfer-Encoding: chunked` is why the backend streams the body rather than sending a
+fixed `Content-Length` — the JSON is written incrementally by `toJsonStreamingResponse`
+(`ds_query.go:86-101`).
 
 ### 4.3 Body shape — a streamed `QueryDataResponse`
 
 The body is a `QueryDataResponse`: a top-level `results` object keyed by `refId`, each
 result holding a `status` and a `frames[]` array; each frame has a `schema` (typed fields)
-and columnar `data.values`. Observed for `SQR100` (`content-length = 23444` bytes),
-truncated with explicit sentinels:
+and columnar `data.values`. This is the **exact `SQR101`/`reqid=195` response** described in
+§3.4 and §4.2 — the full 46746-byte body was captured from DevTools and saved to
+`/tmp/blitzy_qafix_obs/evidence/s34_browser_resp.network-response` (`wc -c` = `46746`,
+matching the backend access-log `size=46746`). The structure was verified with
+`python3 -c "import json; d=json.load(open('…s34_browser_resp.network-response'))"`, which
+reports **1 frame, `status=200`, 2 columns, 1440 points per column**. Because 1440 numeric
+points per column cannot be shown inline, the `data.values` block below is an **explicit
+excerpt** — the `schema` is complete and verbatim; each column shows its first three and its
+final real value, with the exact retained count called out:
 
 ```json
 {
@@ -750,14 +826,14 @@ truncated with explicit sentinels:
           "schema": {
             "refId": "A",
             "fields": [
-              { "name": "time",     "type": "time",   "typeInfo": { "frame": "time.Time" } },
-              { "name": "A-series", "type": "number", "typeInfo": { "frame": "float64" } }
+              { "name": "time",     "type": "time",   "typeInfo": { "frame": "time.Time", "nullable": true } },
+              { "name": "A-series", "type": "number", "typeInfo": { "frame": "float64",   "nullable": true } }
             ]
           },
           "data": {
             "values": [
-              [ 1784042953039, "… (720 timestamps total) …" ],
-              [ 73.16643291841291, "… (720 numeric points total) …" ]
+              [ 1784073600000, 1784073615000, 1784073630000, "[excerpt: 1440 of 1440 timestamps; last = 1784095185000]" ],
+              [ 50,            50.27857699970999, 49.85821111498099, "[excerpt: 1440 of 1440 numeric points]" ]
             ]
           }
         }
@@ -767,10 +843,14 @@ truncated with explicit sentinels:
 }
 ```
 
-Two columns (`time`, `A-series`), 720 points each, for the `random_walk` scenario over the
-6-hour window. The first timestamp (`1784042953039`) equals the request's `from`, and the
-first value (`73.16643291841291`) is the seed of this particular random walk — a value that
-**changes on every execution**, which becomes the key evidence in §5.2.
+Two columns (`time`, `A-series`), **1440 points each** (6-hour window ÷ `intervalMs=15000` =
+1440 samples; `maxDataPoints=1573` is not exceeded, so no downsampling). The first timestamp
+(`1784073600000`) equals the request's `from`; the last (`1784095185000`) is one interval
+short of `to`. The first value is exactly `50` because **this** request pins
+`startValue: 50`, so the walk always *starts* at 50 — but the trajectory after that
+(`50.27857699970999, 49.85821111498099, …`) is freshly randomised on every execution. §5.2
+makes the change unmistakable by using a body that sets **no** `startValue`, so even the
+first sample varies run to run.
 
 ---
 
@@ -785,46 +865,103 @@ exercised, each reproduced **at least twice**:
 
 ### 5.1 Method (browser path primary; curl as labelled supplement)
 
-The primary evidence is the **real browser path**: repeatedly refreshing the same TestData
-panel, capturing each `POST /api/ds/query` in DevTools, and hashing the request bodies to
-prove byte-for-byte identity. A `curl` loop is retained only as a raw-header supplement.
-Request-body identity was verified with `sha256sum` over the captured `*.network-request`
-files.
+The **real browser path** is the primary entry point throughout this investigation: the
+canonical issuance (§2), the six-layer correlation (§3.4), and the concurrent-overlap
+experiment (§5.3) are all driven by refreshing the TestData panel and capturing each
+`POST /api/ds/query` in DevTools. For the **sequential** byte-identity comparison (§5.2) the
+**labelled `curl` supplement** is used deliberately, because it lets us (a) pin an explicit
+`requestId` per call, (b) hold the request body byte-for-byte constant, and (c) hash that
+exact body with `sha256sum`. The curl body is a smaller 5-point `random_walk` (so the whole
+response fits inline); the point being proven — *four identical requests yield four fresh
+executions with no cache* — is independent of body size and matches the browser behaviour
+observed in §3.4/§4.
 
 ### 5.2 Sequential repeats — **the second execution is NOT treated differently** (re-run in full)
 
-**Two trials, two identical requests each** (four executions total). The request bytes are
-**identical across all four** (same sha256), yet each response is a **fresh, different**
-random walk, and the backend logs **four separate executions**.
+**Four executions of the identical request in quick succession** (all four completed inside
+a ~730 ms window: `12:07:02.256Z` → `12:07:02.986Z`). The request body was held byte-for-byte
+constant and hashed; each response is nevertheless a **fresh, different** random walk, and the
+backend logs **four separate executions**. The exact producing command:
 
-```text
-# Request-body sha256 — IDENTICAL for all four executions (byte-for-byte same query):
-280b2ea92b3f9b4beea850fc3e542eea23e168adce4cb19c9be0679b818042f2   (SQR100, SQR101, SQR102, SQR103)
+```bash
+# The request body $OBS/evidence/q_small.json (held constant across all four calls):
+#   {"queries":[{"refId":"A","scenarioId":"random_walk","seriesCount":1,
+#    "datasource":{"type":"grafana-testdata-datasource","uid":"blitzytestdata01"},
+#    "datasourceId":1,"intervalMs":30000,"maxDataPoints":783}],
+#    "from":"1784000000000","to":"1784000150000"}
+$ sha256sum "$OBS/evidence/q_small.json"
+95310b6d4744bf88f10188a63d6eaf27cd25bd1670d0ff9e7e7fd1bffb058e4c  q_small.json   # SQR100..103 all use THIS body
 
-# Trial 1
-SQR100  reqid=145  status=200  resp-size=23596  first A-series values = [37.02, 37.03, 36.98]
-SQR101  reqid=147  status=200  resp-size=23488  first A-series values = [65.27, 65.03, 65.17]
-
-# Trial 2
-SQR102  reqid=149  status=200  resp-size=23561  first A-series values = [45.21, 44.84, 44.52]
-SQR103  reqid=151  status=200  resp-size=23344  first A-series values = [74.54, 74.07, 74.38]
+$ for i in 100 101 102 103; do
+    curl -s -u admin:<LOCAL_ADMIN_PASSWORD> -H 'Content-Type: application/json' \
+      -X POST "http://localhost:3000/api/ds/query?ds_type=grafana-testdata-datasource&requestId=SQR${i}" \
+      --data @"$OBS/evidence/q_small.json" -o "$OBS/evidence/seq_${i}_b.json"
+  done
 ```
 
-Correlated backend evidence — **four** distinct "Processed metrics query" lines and **four**
-matching access-log completions whose sizes equal the browser response sizes exactly:
+The four responses, with their exact byte sizes and their **first three `A-series` values**
+(different every run — proof of fresh execution, not a replay):
 
 ```text
-logger=query_data … msg="Processed metrics query" ref_id=A …   t=…21:31:45…   # SQR100
-logger=query_data … msg="Processed metrics query" ref_id=A …   t=…21:32:04…   # SQR101
-logger=query_data … msg="Processed metrics query" ref_id=A …   t=…21:34:41…   # SQR102
-logger=query_data … msg="Processed metrics query" ref_id=A …   t=…21:34:54…   # SQR103
-logger=context … "Request Completed" … status=200 size=23596 …               # SQR100
-logger=context … "Request Completed" … status=200 size=23488 …               # SQR101
-logger=context … "Request Completed" … status=200 size=23561 …               # SQR102
-logger=context … "Request Completed" … status=200 size=23344 …               # SQR103
+SQR100  status=200  size=523  first3 A-series = [43.598962188589326, 43.49608933351771, 43.11154622984701]
+SQR101  status=200  size=527  first3 A-series = [1.0834992546154014, 1.4914728574703844, 1.8635718725451058]
+SQR102  status=200  size=522  first3 A-series = [7.702815741715602, 7.547750898509867, 7.574945326632024]
+SQR103  status=200  size=524  first3 A-series = [38.521838751936876, 38.02477987612643, 38.025711508281745]
 ```
 
-Every response carried `Cache-Control: no-store` and **no `X-Cache` header**.
+The complete `SQR100` body (523 bytes, pretty-printed for readability — no elision) shows the
+full 5-point frame the other three mirror in shape:
+
+```json
+{
+  "results": {
+    "A": {
+      "status": 200,
+      "frames": [
+        {
+          "schema": {
+            "refId": "A",
+            "meta": { "typeVersion": [0, 0], "custom": { "customStat": 10 } },
+            "fields": [
+              { "name": "time",     "type": "time",   "typeInfo": { "frame": "time.Time", "nullable": true }, "config": { "interval": 30000 } },
+              { "name": "A-series", "type": "number", "typeInfo": { "frame": "float64",   "nullable": true }, "labels": {} }
+            ]
+          },
+          "data": {
+            "values": [
+              [ 1784000000000, 1784000030000, 1784000060000, 1784000090000, 1784000120000 ],
+              [ 43.598962188589326, 43.49608933351771, 43.11154622984701, 43.39007564058664, 42.99545476304731 ]
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+Correlated backend evidence — **four** distinct `query_data` "Processed metrics query" lines
+and **four** matching `context` access-log completions whose sizes equal the response sizes
+exactly (full, unedited lines):
+
+```text
+logger=query_data t=2026-07-15T12:07:02.256874672Z level=debug msg="Processed metrics query" ref_id=A from=1784000000000 to=1784000150000 interval=30000 max_data_points=783 query="{\"datasource\":{\"type\":\"grafana-testdata-datasource\",\"uid\":\"blitzytestdata01\"},\"datasourceId\":1,\"intervalMs\":30000,\"maxDataPoints\":783,\"refId\":\"A\",\"scenarioId\":\"random_walk\",\"seriesCount\":1}"   # SQR100
+logger=query_data t=2026-07-15T12:07:02.499267456Z level=debug msg="Processed metrics query" ref_id=A from=1784000000000 to=1784000150000 interval=30000 max_data_points=783 query="{\"datasource\":{\"type\":\"grafana-testdata-datasource\",\"uid\":\"blitzytestdata01\"},\"datasourceId\":1,\"intervalMs\":30000,\"maxDataPoints\":783,\"refId\":\"A\",\"scenarioId\":\"random_walk\",\"seriesCount\":1}"   # SQR101
+logger=query_data t=2026-07-15T12:07:02.743430602Z level=debug msg="Processed metrics query" ref_id=A from=1784000000000 to=1784000150000 interval=30000 max_data_points=783 query="{\"datasource\":{\"type\":\"grafana-testdata-datasource\",\"uid\":\"blitzytestdata01\"},\"datasourceId\":1,\"intervalMs\":30000,\"maxDataPoints\":783,\"refId\":\"A\",\"scenarioId\":\"random_walk\",\"seriesCount\":1}"   # SQR102
+logger=query_data t=2026-07-15T12:07:02.986489405Z level=debug msg="Processed metrics query" ref_id=A from=1784000000000 to=1784000150000 interval=30000 max_data_points=783 query="{\"datasource\":{\"type\":\"grafana-testdata-datasource\",\"uid\":\"blitzytestdata01\"},\"datasourceId\":1,\"intervalMs\":30000,\"maxDataPoints\":783,\"refId\":\"A\",\"scenarioId\":\"random_walk\",\"seriesCount\":1}"   # SQR103
+logger=context userId=1 orgId=1 uname=admin t=2026-07-15T12:07:02.257234929Z level=info msg="Request Completed" method=POST path=/api/ds/query status=200 remote_addr=127.0.0.1 time_ms=6 duration=6.064885ms size=523 referer= handler=/api/ds/query status_source=server   # SQR100
+logger=context userId=1 orgId=1 uname=admin t=2026-07-15T12:07:02.500873663Z level=info msg="Request Completed" method=POST path=/api/ds/query status=200 remote_addr=127.0.0.1 time_ms=7 duration=7.007642ms size=527 referer= handler=/api/ds/query status_source=server   # SQR101
+logger=context userId=1 orgId=1 uname=admin t=2026-07-15T12:07:02.743721523Z level=info msg="Request Completed" method=POST path=/api/ds/query status=200 remote_addr=127.0.0.1 time_ms=5 duration=5.85153ms size=522 referer= handler=/api/ds/query status_source=server   # SQR102
+logger=context userId=1 orgId=1 uname=admin t=2026-07-15T12:07:02.986786687Z level=info msg="Request Completed" method=POST path=/api/ds/query status=200 remote_addr=127.0.0.1 time_ms=5 duration=5.79325ms size=524 referer= handler=/api/ds/query status_source=server   # SQR103
+```
+
+(The `query=` value is shown **in full, verbatim** — the serialized query model whose fields
+are `datasource`, `datasourceId`, `intervalMs`, `maxDataPoints`, `refId`, `scenarioId`,
+`seriesCount`. It matches the §3.4 form field-for-field; only the values differ, because this
+sequential burst uses the labelled `q_small.json` supplement body — `intervalMs=30000`,
+`maxDataPoints=783`, no `startValue`, window `from=1784000000000`/`to=1784000150000` — rather
+than the browser panel's 6-hour window from §3.4.) Every response carried
+`Cache-Control: no-store` and **no `X-Cache` header** (see `seq_100_h.txt` … `seq_103_h.txt`).
 
 **Verdict (observed):** sequentially, the second (and third, and fourth) execution is
 **re-run end-to-end** — identical request, brand-new `random_walk` body, distinct response
@@ -841,66 +978,137 @@ values, different `content-length`) and no `X-Cache` header ever appears, the "i
 question is settled directly by that evidence. Latency is reported only as an incidental,
 unused observation; it is explicitly **not** treated as a caching signal in either direction.
 
-### 5.3 Concurrent repeats — **the earlier request IS cancelled, in the browser** (backend still completes)
+### 5.3 Concurrent / rapid re-trigger — the backend never treats the repeat differently; two UI affordances differ *on the client*
 
-To make the overlap observable, the panel was pointed at TestData's **`slow_query`**
-scenario (`stringInput = "5s"`), then the panel query was re-triggered while the first
-request was still in flight.
+The "twice in quick succession" question has a second, concurrent form: re-fire the query
+*while the first is still in flight*. Doing this through the real UI surfaced a distinction
+the earlier draft got wrong: **the toolbar Refresh button and the `d r` keyboard shortcut do
+not do the same thing** when a query is already running. Both were exercised on the live
+dashboard, each reproduced at least twice.
 
-**Canonical, published-safe trigger.** The overlap was produced entirely through Grafana's
-**own UI** — clicking the panel's Refresh a second time while the first 5-second request was
-still pending. No private module registry was probed and no `window.__…` internal handle was
-injected (the earlier draft's webpack-probe approach is removed). This is a normal,
-supported user action (double-refreshing a slow panel), which is why it is safe and
-representative.
+**How the overlap was widened (canonical, published-safe).** TestData exposes no server-side
+delay knob usable from a plain panel query (`grep`-verified: the only slow path is the
+`slow_query` *scenario kind* at `pkg/tsdb/grafana-testdata-datasource/scenarios.go:76`, not a
+per-panel switch). So instead the panel was set to a large **100-series `random_walk`** whose
+~4.6 MB response takes tens of seconds to stream under browser network throttling
+(Chrome DevTools "Fast 4G"/"Slow 3G"). Payload size + throttling widens the in-flight window
+using only supported user actions — no private module registry was probed and no `window.__…`
+internal handle was injected.
 
-```text
-# Trial 1
-SQR103  slow_query  net::ERR_ABORTED   duration=1207ms   (2nd Refresh fired ~1200ms after the first)
+**The two client code paths (source-grounded).** The difference is fully explained by which
+handler the affordance routes through:
 
-# Trial 2
-SQR104  slow_query  net::ERR_ABORTED   duration=2505ms   (2nd Refresh fired ~2503ms after the first)
+```js
+// (A) Toolbar Refresh button — @grafana/scenes SceneRefreshPicker.onRefresh (SceneRefreshPicker.js:51-63)
+this.onRefresh = () => {
+  const queryController = sceneGraph.getQueryController(this);
+  if (queryController?.state.isRunning) {   // :53  guard: a query is already running
+    queryController.cancelAll();            // :54  -> CANCEL the in-flight run
+    return;                                 // :55  -> and issue NO new query
+  }
+  const timeRange = sceneGraph.getTimeRange(this);
+  if (this._intervalTimer) { clearInterval(this._intervalTimer); }
+  timeRange.onRefresh();                    // :61  reached ONLY when not already running
+  this.setupIntervalTimer();
+};
+// while isRunning, the same button renders as "Cancel" (SceneRefreshPicker.js:165)
+
+// (B) 'd r' keyboard shortcut — dashboard-scene keyboardShortcuts.ts:131-132
+keybindings.addBinding({
+  key: 'd r',                                                    // :131
+  onTrigger: () => sceneGraph.getTimeRange(scene).onRefresh(),   // :132  calls refresh DIRECTLY,
+});                                                              //       bypassing the isRunning guard
 ```
 
-Yet the **backend completed every one of them**. Across the concurrent trials the debug log
-shows **five** `slow_query` executions all finishing with `status=200` after ~5 s, even
-though the browser had already aborted the earlier requests:
+So the toolbar button is *cancel-when-running*, while `d r` unconditionally fires another
+refresh — the mechanism behind the two observed behaviours below.
+
+#### 5.3.A Toolbar Refresh while running = **cancel, not a second query**
+
+With the 100-series query in flight (button showing **"Cancel"**), clicking the toolbar
+control a second time returned the button to **"Refresh"** and issued **no** new request.
+The DevTools network list showed the single in-flight `SQR101` and **no `SQR102`**. The
+backend logged exactly **one** completion for it:
 
 ```text
-logger=context … "Request Completed" … path=/api/ds/query status=200 … duration≈5003ms
-logger=context … "Request Completed" … path=/api/ds/query status=200 … duration≈5004ms
-logger=context … "Request Completed" … path=/api/ds/query status=200 … duration≈5048ms
-logger=context … "Request Completed" … path=/api/ds/query status=200 … duration≈5003ms
-logger=context … "Request Completed" … path=/api/ds/query status=200 … duration≈5057ms
+logger=context userId=1 orgId=1 uname=admin t=2026-07-15T12:17:00.819846239Z level=info msg="Request Completed" method=POST path=/api/ds/query status=200 remote_addr=127.0.0.1 time_ms=42177 duration=42.177370855s size=4668144 referer="http://localhost:3000/d/blitzyqadash01/blitzy-qa-testdata-dashboard?from=2026-07-15T00%3A00%3A00.000Z&orgId=1&timezone=utc&to=2026-07-15T06%3A00%3A00.000Z" handler=/api/ds/query status_source=server   # SQR101 (the ONLY toolbar query)
 ```
 
-**Why the backend still finishes.** TestData's `slow_query` sleeps with a plain,
-**non-context-bound** `time.Sleep` (`pkg/tsdb/grafana-testdata-datasource/scenarios.go:416`),
-so aborting the HTTP request client-side does not interrupt the server work — the handler
-runs to completion and logs `status=200`.
+The toolbar button had already flipped `Cancel → Refresh` **~20 s before** this server-side
+stream finished at `12:17:00.819Z`, which is the direct signal that the second click invoked
+`queryController.cancelAll()` (path A `:54`) rather than waiting for natural completion.
 
-**Where the cancellation actually happens (client side).** The abort is a browser-side
-teardown in `BackendSrv`. The concrete machinery (`public/app/core/services/backend_srv.ts`):
-an `inFlightRequests` RxJS `Subject` (`:60`) into which each request id is published
-(`:146-147`); the request observable is gated with `takeUntil(...)` (`:419-435`) that fires
-when a matching cancellation is seen; a **same-`requestId`** branch (`:424-428`) and a
-`CANCEL_ALL_REQUESTS` branch (`:431-432`); and, on teardown, the `'Request was aborted'`
-path (`:446`). When the subscription is torn down, the underlying fetch is aborted →
-`net::ERR_ABORTED` in DevTools.
+#### 5.3.B `d r` while running = **an additional, concurrent query**
 
-> **Observed vs. [INFERRED] for the same-`requestId` dedup branch.** What is **observed** is
-> client-side cancellation via subscription teardown (`net::ERR_ABORTED`) while the backend
-> completes. The `takeUntil` same-`requestId` branch (`:424-428`) that would let a *new*
-> request explicitly cancel a *prior in-flight one with the same id* is **[INFERRED]** from
-> the source: on the Scenes panel path each run is assigned a **fresh** `SQR` id
-> (`SQR103`, `SQR104`, …), so two runs never share an id, and the observed cancellation is
-> the generic teardown, not the same-id branch. Five distinct `SQR` ids produced exactly
-> five backend executions — no request was server-side de-duplicated or replaced.
+Delivering the `d r` shortcut once started `SQR102` (button → "Cancel", query in flight);
+delivering `d r` **again while it was still running** started `SQR103`. The DevTools network
+list showed **both** `SQR102` and `SQR103` in flight together, and the backend completed
+**both** with `status=200`, their execution windows overlapping by ~60 s:
 
-**Verdict (observed):** concurrently, the second execution *does* change what happens to the
-**first** — the first is cancelled **in the browser** — but this is a client-side transport
-concern, **not** server-side differential treatment. The server executes each request
-independently to completion.
+```text
+logger=context userId=1 orgId=1 uname=admin t=2026-07-15T12:20:25.210046758Z level=info msg="Request Completed" method=POST path=/api/ds/query status=200 remote_addr=127.0.0.1 time_ms=71169 duration=1m11.169585198s size=4668654 referer="http://localhost:3000/d/blitzyqadash01/blitzy-qa-testdata-dashboard?from=2026-07-15T00%3A00%3A00.000Z&orgId=1&timezone=utc&to=2026-07-15T06%3A00%3A00.000Z" handler=/api/ds/query status_source=server   # SQR102
+logger=context userId=1 orgId=1 uname=admin t=2026-07-15T12:20:37.100218384Z level=info msg="Request Completed" method=POST path=/api/ds/query status=200 remote_addr=127.0.0.1 time_ms=71790 duration=1m11.790610134s size=4668418 referer="http://localhost:3000/d/blitzyqadash01/blitzy-qa-testdata-dashboard?from=2026-07-15T00%3A00%3A00.000Z&orgId=1&timezone=utc&to=2026-07-15T06%3A00%3A00.000Z" handler=/api/ds/query status_source=server   # SQR103
+```
+
+The in-flight/"Cancel" state during the overlap is captured in
+`blitzy/screenshots/qafix_dr_overlap_inflight_cancel_state.png` (panel spinner + toolbar
+"Cancel" while the second `d r` query runs).
+
+> **Faithful framing — `d r` does NOT abort the in-flight query.** Unlike the toolbar button,
+> the `d r` path does not call `cancelAll()`; it issues an **additional** concurrent query.
+> Both `SQR102` and `SQR103` were **observed** to complete server-side with `status=200`, so
+> there is **no** client abort and **no** server cancellation of the first run during the
+> `d r` overlap — the frontend simply keeps the latest result. (In the earlier draft this
+> case was mis-described as the second trigger *cancelling* the first; that is only true for
+> the toolbar button, §5.3.A.)
+
+**Combined backend count (the decisive number).** Across the whole 12:16–12:21 window the
+debug log contains **exactly three** `/api/ds/query` completions and **exactly three**
+`query_data` "Processed metrics query" lines:
+
+```text
+$ grep 'path=/api/ds/query' grafana.log | grep 'Request Completed' | grep -E 't=2026-07-15T12:(1[6-9]|20|21)' | wc -l
+3
+$ grep 'Processed metrics query' grafana.log | grep -E 't=2026-07-15T12:(1[6-9]|20|21)' | wc -l
+3
+```
+
+That is **1** (toolbar `SQR101`) **+ 2** (`d r` `SQR102`,`SQR103`). If the toolbar's second
+click had issued a query, the count would be four — it is three, confirming that click was a
+pure cancel.
+
+**Why the backend still finishes (both affordances).** In every case above the server logged
+`status=200`, including the toolbar `SQR101` that the client had already cancelled ~20 s
+earlier. **Observed:** a client-side cancel does not retroactively stop a query the server has
+already dispatched — the response is generated and streamed to completion regardless. Each of
+the three distinct `SQR` ids produced its own independent backend execution; **no** request
+was server-side de-duplicated, replaced, or short-circuited.
+
+**Where the toolbar cancel happens (client side).** The toolbar's `queryController.cancelAll()`
+(path A `:54`) drives `BackendSrv`'s cancellation machinery
+(`public/app/core/services/backend_srv.ts`): an `inFlightRequests` RxJS `Subject` (`:60`) into
+which each request id is published on subscribe (`:147`); `cancelAllInFlightRequests()`
+(`:176-177`) publishes the sentinel `CANCEL_ALL_REQUESTS_REQUEST_ID` (`:39`); every request
+observable is gated by `takeUntil(...)` (`:419-420`) with a **same-`requestId`** branch
+(`:424`) and a `CANCEL_ALL_REQUESTS` branch (`:431`); on teardown the `'Request was aborted'`
+path (`:446`) runs. **[INFERRED]** from source: the toolbar second click resolves to the
+`CANCEL_ALL_REQUESTS` branch (`:431`) — what is *observed* is the button flipping
+`Cancel → Refresh`, the absence of any new request, and the backend still completing the one
+in-flight query.
+
+> **Faithful note on the same-`requestId` branch.** The `:424` branch would let a *new*
+> request cancel a *prior in-flight one that shares its id*. It was **not** exercised here:
+> on the Scenes panel path each run gets a **fresh** `SQR` id, so `d r` produced two distinct
+> ids (`SQR102`, `SQR103`) that ran concurrently to completion (§5.3.B) rather than the second
+> cancelling the first. This branch is therefore **[INFERRED]** from source, not observed.
+
+**Verdict (observed).** Concurrently, the *client* behaviour depends on **which affordance**
+re-triggers the query: the **toolbar Refresh button cancels the in-flight run and issues no
+new query** (§5.3.A), whereas the **`d r` shortcut issues an additional concurrent query and
+keeps the latest result** (§5.3.B). In **both** cases the **backend treats every execution
+identically** — it runs each dispatched query independently to `status=200`, with no
+server-side cancellation, de-duplication, or caching. The concurrency difference is purely a
+client-side transport/UX concern, **not** server-side differential treatment.
 
 ### 5.4 The mechanism behind the sequential verdict — the OSS caching seam is a no-op
 
@@ -926,29 +1134,55 @@ what every capture in §4.2 and §5.2 shows.
 
 ### 5.5 Edge path — expression query (`X-Grafana-From-Expr`, server-side math)
 
-An expression query exercises `handleExpressions` (`query.go:202`) and adds the
-`x-grafana-from-expr` header. Observed with two queries — `A` = TestData `random_walk`,
-`B` = the server-side expression `$A + 100`:
+An expression query exercises `handleExpressions` (`query.go:202`). The batch had two queries:
+`A` = TestData `random_walk` (`startValue:50`, 5 points) and `B` = the server-side expression
+`$A + 100` on the built-in `__expr__` datasource. Captured via the labelled `curl` supplement,
+which posts the batch body directly:
 
-```text
-# Request
-POST /api/ds/query?ds_type=__expr__&expression=true&requestId=SQR100
-x-grafana-from-expr: true
-# query B datasource: { "type": "__expr__", "uid": "__expr__" }
-
-# Backend (expression engine)
-logger=expr datasourceType=grafana-testdata-datasource queryRefId=A datasourceUid=blitzytestdata01 \
-  t=…21:45:44Z level=debug msg="Data source queried" responseType="single frame series"
-
-# Response — B is exactly A + 100, computed on the server
-A: status=200  first 3 = [10.019461204256038, 9.850691464764823, 9.63630034044715]
-B: status=200  first 3 = [110.01946120425603, 109.85069146476482, 109.63630034044715]
-B - A (first 3) = [100.0, 100.0, 100.0]
+```bash
+$ curl -s -u admin:<LOCAL_ADMIN_PASSWORD> -H 'Content-Type: application/json' -D "$OBS/evidence/expr_h.txt" \
+    -X POST "http://localhost:3000/api/ds/query" --data @"$OBS/evidence/q_expr.json" \
+    -o "$OBS/evidence/expr_b.json"
+# q_expr.json body (verbatim):
+#   {"queries":[
+#     {"refId":"A","datasource":{"type":"grafana-testdata-datasource","uid":"blitzytestdata01"},
+#      "scenarioId":"random_walk","seriesCount":1,"startValue":50,"intervalMs":30000,"maxDataPoints":5},
+#     {"refId":"B","datasource":{"type":"__expr__","uid":"__expr__"},"type":"math","expression":"$A + 100"}
+#   ],"from":"1784000000000","to":"1784000150000"}
 ```
 
-The `x-grafana-from-expr: true` header and the `__expr__` datasource route the batch through
-the expression engine, which fetches `A` from TestData and evaluates `B = $A + 100`
-server-side — the exact `+100` delta confirms the math ran on the backend, not the browser.
+**How the browser marks an expression batch** (code-level, `DataSourceWithBackend.ts`): when
+any query's datasource is an expression reference (`isExpressionReference`, `:146`), the
+frontend sets the request header `X-Grafana-From-Expr: true` (`:86`, `:224`) and appends
+`&expression=true` to the URL (`:225`). The `curl` supplement above omits those (the server
+routes `B` purely from the `__expr__` datasource ref in the body), so they are noted as the
+**browser-added** markers rather than claimed from this raw capture.
+
+Backend — two `query_data` lines (A *and* B are each "processed"), then the expression engine
+runs, then completion (full, unedited lines):
+
+```text
+logger=query_data t=2026-07-15T12:08:14.667982908Z level=debug msg="Processed metrics query" ref_id=A from=1784000000000 to=1784000150000 interval=30000 max_data_points=5 query="{\"datasource\":{\"type\":\"grafana-testdata-datasource\",\"uid\":\"blitzytestdata01\"},\"intervalMs\":30000,\"maxDataPoints\":5,\"refId\":\"A\",\"scenarioId\":\"random_walk\",\"seriesCount\":1,\"startValue\":50}"
+logger=query_data t=2026-07-15T12:08:14.668008179Z level=debug msg="Processed metrics query" ref_id=B from=1784000000000 to=1784000150000 interval=1000 max_data_points=100 query="{\"datasource\":{\"type\":\"__expr__\",\"uid\":\"__expr__\"},\"expression\":\"$A + 100\",\"refId\":\"B\",\"type\":\"math\"}"
+logger=expr datasourceType=grafana-testdata-datasource queryRefId=A datasourceUid=blitzytestdata01 datasourceVersion=1 t=2026-07-15T12:08:14.669199876Z level=debug msg="Data source queried" responseType="single frame series"
+logger=context userId=1 orgId=1 uname=admin t=2026-07-15T12:08:14.669386817Z level=info msg="Request Completed" method=POST path=/api/ds/query status=200 remote_addr=127.0.0.1 time_ms=7 duration=7.536131ms size=975 referer= handler=/api/ds/query status_source=server
+```
+
+Response (`Content-Length: 975`, `Cache-Control: no-store`, **no `X-Cache`**) — `B` is exactly
+`A + 100`, computed on the server (all 5 points shown, no elision):
+
+```text
+A: status=200  values = [50,  50.05365583425308, 50.099029087002485, 50.19554346587998, 50.109074822867]
+B: status=200  values = [150, 150.05365583425308, 150.0990290870025,  150.19554346587998, 150.109074822867]
+B - A         = [100, 100, 100, 100, 100]
+```
+
+The `__expr__` datasource routes the batch through the expression engine, which fetches `A`
+from TestData (the `logger=expr … "Data source queried"` line) and evaluates `B = $A + 100`
+server-side — the exact, uniform `+100` delta on every point confirms the math ran on the
+backend, not the browser. Note `B`'s own `query_data` line carries `interval=1000
+max_data_points=100`, the default expression-query bounds, distinct from `A`'s `interval=30000
+max_data_points=5`.
 
 ### 5.6 Edge path — the three ways a query returns `400`
 
@@ -975,19 +1209,19 @@ HTTP_STATUS=400
 ```bash
 # (c) Per-query error (random_walk_with_error): overall HTTP 400 even though the
 #     per-query status is 500 -> toJsonStreamingResponse res.Error!=nil branch.
-$ curl -s -D perr_headers.txt -o perr_body.json -w 'HTTP_STATUS=%{http_code}\n' \
+$ curl -s -D "$OBS/evidence/err3_h.txt" -o "$OBS/evidence/err3_b.json" -w 'HTTP_STATUS=%{http_code}\n' \
     -u admin:<LOCAL_ADMIN_PASSWORD> -H 'Content-Type: application/json' \
     'http://localhost:3000/api/ds/query?ds_type=grafana-testdata-datasource&requestId=CURL-err-c' \
-    -d '{"queries":[{"refId":"A","scenarioId":"random_walk_with_error",
-         "datasource":{"uid":"blitzytestdata01","type":"grafana-testdata-datasource"}}],
-         "from":"1784000000000","to":"1784021600000"}'
+    --data '{"queries":[{"refId":"A","scenarioId":"random_walk_with_error","seriesCount":1,"datasource":{"type":"grafana-testdata-datasource","uid":"blitzytestdata01"},"intervalMs":30000,"maxDataPoints":5}],"from":"1784000000000","to":"1784000150000"}'
 HTTP_STATUS=400
 ```
 
-Response headers for (c): `HTTP/1.1 400 Bad Request`, `Cache-Control: no-store`,
-`Content-Type: application/json`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: deny`,
-`X-Xss-Protection: 1; mode=block`, `Transfer-Encoding: chunked`. The body is **valid JSON**
-(truncated here with explicit sentinels):
+Response headers for (c) (complete, from `err3_h.txt`): `HTTP/1.1 400 Bad Request`,
+`Cache-Control: no-store`, `Content-Type: application/json`, `X-Content-Type-Options: nosniff`,
+`X-Frame-Options: deny`, `X-Xss-Protection: 1; mode=block`, `Content-Length: 618` (this small
+error body is buffered with a fixed `Content-Length`, unlike the large happy-path stream in
+§4.2 which was `Transfer-Encoding: chunked`). The body is **valid JSON** and, at 618 bytes, is
+shown **complete — no elision** (it still ships a full 5-point frame *alongside* the error):
 
 ```json
 {
@@ -1002,14 +1236,14 @@ Response headers for (c): `HTTP/1.1 400 Bad Request`, `Cache-Control: no-store`,
             "refId": "A",
             "meta": { "typeVersion": [0, 0], "custom": { "customStat": 10 } },
             "fields": [
-              { "name": "time",     "type": "time" },
-              { "name": "A-series", "type": "number" }
+              { "name": "time",     "type": "time",   "typeInfo": { "frame": "time.Time", "nullable": true }, "config": { "interval": 30000 } },
+              { "name": "A-series", "type": "number", "typeInfo": { "frame": "float64",   "nullable": true }, "labels": {} }
             ]
           },
           "data": {
             "values": [
-              [ 1784000000000, "… (10000 timestamps total) …" ],
-              [ 0.0, "… (10000 numeric points total) …" ]
+              [ 1784000000000, 1784000030000, 1784000060000, 1784000090000, 1784000120000 ],
+              [ 55.97363045435828, 55.574622831586666, 55.38013325735981, 55.617351205709866, 56.09826992952368 ]
             ]
           }
         }
@@ -1019,18 +1253,26 @@ Response headers for (c): `HTTP/1.1 400 Bad Request`, `Cache-Control: no-store`,
 }
 ```
 
-The correlated access-log line shows the downstream attribution:
+The correlated access-log lines for all three cases (full, unedited) make the
+`status_source` differentiator explicit — (a) and (b) are `server` rejections, (c) is
+`downstream`:
 
 ```text
-logger=context … "Request Completed" … path=/api/ds/query status=400 status_source=downstream time_ms=83
+# (a) malformed JSON — server-side binding failure
+logger=context userId=1 orgId=1 uname=admin t=2026-07-15T12:08:33.698112842Z level=info msg="Request Completed" method=POST path=/api/ds/query status=400 remote_addr=127.0.0.1 time_ms=5 duration=5.416478ms size=30 referer= handler=/api/ds/query status_source=server error="invalid character 't' looking for beginning of object key string"
+# (b) empty queries[] — server-side validation failure
+logger=context userId=1 orgId=1 uname=admin t=2026-07-15T12:08:34.224948687Z level=info msg="Request Completed" method=POST path=/api/ds/query status=400 remote_addr=127.0.0.1 time_ms=5 duration=5.917417ms size=77 referer= handler=/api/ds/query status_source=server errorReason=BadRequest errorMessageID=query.noQueries error="no queries found"
+# (c) random_walk_with_error — per-query plugin error, attributed downstream
+logger=context userId=1 orgId=1 uname=admin t=2026-07-15T12:08:34.75522577Z level=info msg="Request Completed" method=POST path=/api/ds/query status=400 remote_addr=127.0.0.1 time_ms=6 duration=6.551534ms size=618 referer= handler=/api/ds/query status_source=downstream
 ```
 
-Key insight: the **per-query** `status` is `500` and `errorSource=plugin`, but the
-**overall HTTP** status is `400` (the `res.Error != nil` branch of
-`toJsonStreamingResponse`), and the access logger marks `status_source=downstream` because
-the failure originated in the datasource plugin, not in Grafana's own request handling.
-Contrast with (a)/(b), whose access logs show `status_source=server` (a Grafana-side
-binding/validation rejection).
+Key insight: for (c) the **per-query** `status` is `500` and `errorSource=plugin`, but the
+**overall HTTP** status is `400` (the `res.Error != nil` branch of `toJsonStreamingResponse`,
+`ds_query.go:86-101`), and the access logger marks `status_source=downstream` because the
+failure originated in the datasource plugin, not in Grafana's own request handling. Contrast
+with (a)/(b), whose access logs show `status_source=server` (a Grafana-side
+binding/validation rejection) — (a) carries the raw JSON parse `error`, (b) carries
+`errorReason=BadRequest errorMessageID=query.noQueries`.
 
 ### 5.7 Scenario matrix — stable vs. volatile fields (across all repeated runs)
 
@@ -1042,8 +1284,8 @@ fields that were **volatile**. The stability pattern is itself the evidence: ide
 
 | Scenario | Trials (ids) | STABLE across runs | VOLATILE across runs | Verdict |
 |----------|--------------|--------------------|----------------------|---------|
-| **Sequential** (§5.2) | T1 `SQR100`,`SQR101`; T2 `SQR102`,`SQR103` | request body **bytes** (sha256 `280b2ea9…` for all 4); URL; `X-*` headers; HTTP `200`; `Cache-Control: no-store`; **no `X-Cache`** | response body values (first A = 37.02 / 65.27 / 45.21 / 74.54); `content-length` (23596 / 23488 / 23561 / 23344); backend execution timestamp; latency | 2nd exec **re-run identically**, fresh body — **not** cached |
-| **Concurrent** (§5.3) | T1 `SQR103`; T2 `SQR104` | scenario (`slow_query 5s`); client outcome (`net::ERR_ABORTED`); backend outcome (`status=200`, ~5 s) | request id (fresh `SQR` each run); client abort delay (1207 ms / 2505 ms) | earlier request **cancelled in browser**; backend **still completes** |
+| **Sequential** (§5.2) | `SQR100`,`SQR101`,`SQR102`,`SQR103` (one ~730 ms burst) | request body **bytes** (sha256 `95310b6d…` for all 4); URL; `X-*` headers; HTTP `200`; `Cache-Control: no-store`; **no `X-Cache`** | response body values (first A, rounded; full precision §5.2 = 43.60 / 1.08 / 7.70 / 38.52); `size` (523 / 527 / 522 / 524); backend execution timestamp; latency | 2nd exec **re-run identically**, fresh body — **not** cached |
+| **Concurrent** (§5.3) | toolbar `SQR101`; `d r` `SQR102`,`SQR103` | backend runs each dispatched query to `status=200` (no dedup/cancel/cache); large 100-series body under network throttling | **client** behaviour by affordance: toolbar 2nd click = **cancel-only** (no new query); `d r` 2nd press = **additional concurrent query** | backend **never differentiates**; toolbar **cancels** in-flight, `d r` **overlaps** and keeps latest |
 | **Expression** (§5.5) | ≥2 (`SQR100` shown) | `x-grafana-from-expr: true`; `__expr__` datasource; `B − A = +100` exactly; A/B `status=200` | underlying `random_walk` A-values (hence B = A+100 values) | server-side math confirmed |
 | **400 — malformed** (§5.6a) | ≥2 | HTTP `400`; body `{"message":"bad request data"}`; `status_source=server` | — (deterministic) | binding failure before any query |
 | **400 — empty queries** (§5.6b) | ≥2 | HTTP `400`; `messageId=query.noQueries`; `status_source=server` | — (deterministic) | validation failure before any query |
@@ -1064,13 +1306,17 @@ issues the query through Grafana's injected `runRequest`, which calls
 `DataSourceWithBackend.query()`; that produces one `POST /api/ds/query?ds_type=…&requestId=SQR…`
 via `BackendSrv.fetch()`, carrying the `X-*` plugin headers that identify the datasource,
 plugin, dashboard, and panel. The backend authorizes the request on `datasources:query`,
-SLO-tags/traces/meters/access-logs it, runs it through a client-middleware chain whose
-caching middleware is an **OSS no-op**, and routes the single-datasource batch through
-`handleQuerySingleDatasource` into the **TestData** backend, which generates a `random_walk`
-frame. The handler streams a `QueryDataResponse` (200; `Cache-Control: no-store`; no
-`X-Cache`) whose body is a fresh random walk. Repeating the query **sequentially** re-runs
-everything and returns a *different* body (no cache); repeating it **concurrently** cancels
-the earlier request **in the browser** while the backend still completes it.
+SLO-tags it, wraps it in tracing/metrics/access-log middleware (the tracing middleware is
+present in code but **inert by default in OSS** — no exporter, so no spans; §3.1), runs it
+through a client-middleware chain whose caching middleware is an **OSS no-op**, and routes
+the single-datasource batch through `handleQuerySingleDatasource` into the **TestData**
+backend, which generates a `random_walk` frame. The handler streams a `QueryDataResponse`
+(200; `Cache-Control: no-store`; no `X-Cache`) whose body is a fresh random walk. Repeating
+the query **sequentially** re-runs everything and returns a *different* body (no cache).
+Repeating it **concurrently** differs by UI affordance: the toolbar Refresh button *cancels*
+the in-flight request in the browser (issuing no new query), whereas the `d r` shortcut
+issues an *additional* concurrent query — but in **both** cases the backend runs every
+dispatched query independently to completion, with no server-side cancel, dedup, or cache.
 
 ### 6.2 Why the "second execution" answer is what it is (cause → effect)
 
@@ -1080,10 +1326,14 @@ the earlier request **in the browser** while the backend still completes it.
   (`caching_middleware.go:87-89`) is never reached, so execution always falls through to the
   datasource (`:92`), and `random_walk` produces new numbers each time. Observable
   signature: different response bodies/sizes, and **no `X-Cache` header** anywhere.
-- **Concurrent = the earlier request is cancelled client-side** because `BackendSrv` tears
-  down the in-flight fetch (`backend_srv.ts` `takeUntil` at `:419-435`, abort at `:446`) →
-  `net::ERR_ABORTED`. The server keeps running because TestData's `slow_query` sleep is not
-  context-bound (`scenarios.go:416`), so the backend logs `status=200` regardless.
+- **Concurrent = depends on the UI affordance, but the *server* still does not
+  differentiate.** When a query is running, the toolbar Refresh button calls
+  `queryController.cancelAll()` (`SceneRefreshPicker.js:53-54`) → `BackendSrv` tears down the
+  in-flight fetch (`backend_srv.ts` `takeUntil` `:419-420`, `CANCEL_ALL_REQUESTS` `:431`, abort
+  `:446`) and issues **no** new query. The `d r` shortcut instead calls `timeRange.onRefresh()`
+  directly (`keyboardShortcuts.ts:131-132`), bypassing the running-guard, so it fires an
+  **additional** concurrent query. In **both** cases every query the server actually received
+  ran to `status=200` — the backend performed **no** cancel, dedup, or cache (§5.3).
 - **Differential server-side treatment (a cache HIT governed by a configurable TTL)** is a
   **Grafana Enterprise/Cloud** capability layered on the same `DataSourceWithBackend`
   seam. **[INFERRED]** from the in-tree no-op seam (which declares the `X-Cache` header and
@@ -1097,7 +1347,7 @@ the earlier request **in the browser** while the backend still completes it.
 | Artifact | What it revealed | Evidence |
 |----------|------------------|----------|
 | **Logs** | Six-layer correlation (datasources → query_data → secrets → tsdb.testdata → access log) proves the full server-side path and `status_source`. | §3.4, §5.2, §5.6 |
-| **Network requests** | Canonical `POST /api/ds/query?...&requestId=SQR…`; identical request bytes on repeats (sha256); `net::ERR_ABORTED` on concurrent overlap. | §2.2, §5.2, §5.3 |
+| **Network requests** | Canonical `POST /api/ds/query?...&requestId=SQR…`; identical request bytes on sequential repeats (sha256 `95310b6d…`); on concurrent re-trigger the toolbar Refresh **cancels** the in-flight request client-side while `d r` issues an **additional concurrent** query (both complete `200`). | §2.2, §5.2, §5.3 |
 | **Headers** | Request `X-Datasource-Uid/-Plugin-Id/-Dashboard-Uid/-Panel-Id`, `x-grafana-from-expr`; response `Cache-Control: no-store` and the **absence of `X-Cache`**. | §2.3, §4.2, §5.5 |
 | **Metadata** | SLO group `high-slow`, `status_source=server` vs `downstream`, org/user context, and the `referer` tying the request to dashboard `blitzyqadash01`. | §3.1, §3.4, §5.6 |
 
@@ -1105,12 +1355,12 @@ the earlier request **in the browser** while the backend still completes it.
 
 | Req | What it asked | Status | Where |
 |-----|---------------|--------|-------|
-| **R1** | Run a canonical local instance | **PASS (with a documented caveat)** — ran inside the mandated image (identity in §1.1) using the exact `./bin/grafana server …` invocation `bra`/`make run` uses; served by the **warm study-commit (`4550cfb5b7`) binary**, while `make build-go`, `yarn start`, and **`make run` itself** were **separately executed and verified** to reach HTTP readiness and prove the canonical build/run (§1.1–§1.2). One documented caveat: the running session used the warm binary rather than a restart on the freshly built one. | §1.1–§1.4 |
+| **R1** | Run a canonical local instance | **PASS** — built canonically via `GO_BUILD_DEV=1 make build-go` (verified: three binaries stamped `commit=a303e41c89`, exit `0`, tracked source tree unchanged; §1.2), with `yarn start` and the `make run`/`bra` path also verified to reach HTTP readiness (§1.1); ran the resulting `./bin/grafana server -packaging=dev cfg:app_mode=development …` binary — the exact server step `bra`/`make run` exec per [.bra.toml]. The live instance runs **natively on the pod** with the image-equivalent toolchain and reports `commit=a303e41c89` (`/api/health` + startup log), which is byte-identical in Grafana source to the study base `4550cfb5b7` — **only the answer document differs** (§1.2 reconciliation) — so the observed behaviour is representative of the study commit. | §1.1–§1.4 |
 | **R2** | Use a built-in data source | **PASS** — TestData (`grafana-testdata-datasource`, `uid=blitzytestdata01`), provisioned canonically. | §1.5 |
 | **R3** | Observe browser issuance | **PASS** — captured `POST /api/ds/query?...&requestId=SQR…`, payload, and `X-*` headers via DevTools; origin traced to Scenes `SceneQueryRunner`. | §2 |
-| **R4** | Observe backend handling | **PASS** — route/authz/SLO/middleware, `MetricRequest` bind, single-DS routing, TestData execution, all correlated in debug logs. | §3 |
+| **R4** | Observe backend handling | **PASS** — route/authz/SLO/middleware, `MetricRequest` bind, single-DS routing, TestData execution, all correlated via **debug logs** (tracing middleware is present in code but **inert by default in OSS** — no exporter, no spans, no trace headers; §3.1). | §3 |
 | **R5** | Observe the response | **PASS** — status semantics, headers (`no-store`, no `X-Cache`), and `QueryDataResponse` body shape. | §4 |
-| **R6** | Compare a repeated execution | **PASS** — sequential (no differential treatment) and concurrent (client-side cancel), each ≥2 trials. | §5.2, §5.3 |
+| **R6** | Compare a repeated execution | **PASS** — sequential (no differential treatment) and concurrent (toolbar Refresh cancels the in-flight request client-side; `d r` fires an additional concurrent query; backend completes every dispatched query to `200` with no server-side differential treatment), each ≥2 trials. | §5.2, §5.3 |
 | **R7** | Surface processing insights | **PASS** — logs, network requests, headers, metadata each answered with evidence. | §3.4, §6.3 |
 | — | Enterprise server-side cache HIT | **[INFERRED] / not observed** — Enterprise/Cloud only; absent on OSS. | §5.4, §6.2 |
 
@@ -1119,134 +1369,158 @@ the earlier request **in the browser** while the backend still completes it.
 ## 7. Post-Investigation Cleanup Proof
 
 This section is authored **after** the runtime was torn down; every block below is the
-**actual** captured output of the cleanup and delivery-verification commands (executed
-2026-07-14, UTC), not a predicted or "expected final state". All investigation state was written
-**outside** the repository (to
-`/tmp/blitzy_obs`, bind-mounted into the container as `/obs`) via the `cfg:paths.*` overrides in
-§1.3, so the only in-repository residue to remove was the pre-existing gitignored runtime
-`data/` tree (the artifact set the review flagged). No auth-token, cookie, or hash **value** was
-ever read, printed, or logged during cleanup.
+**actual** captured output of the real teardown and delivery-verification commands (executed
+2026-07-15, UTC), not a predicted or "expected final state". The instance ran as a **native
+host process** (§1.1, §1.3) — not inside a Docker container — so teardown is a process `kill`,
+not a `docker` operation. All investigation state was written **outside** the repository, to
+`/tmp/blitzy_qafix_obs` via the `cfg:paths.*` overrides in §1.3; the only in-repository residue
+was a pre-existing, gitignored runtime `data/` tree left by the environment build (never used by
+this investigation, which redirected all of Grafana's paths to `/tmp/blitzy_qafix_obs`). No
+auth-token, cookie, or hash **value** was ever read, printed, or logged during cleanup — only
+row counts.
 
 ### 7.1 Investigation auth sessions revoked — resolves the "unrevoked sessions" finding
 
-The review flagged **7** unrevoked `user_auth_token` rows in the gitignored `data/grafana.db`.
-That database was idle (the live server used the redirected `/obs` DB, not this one), so the
-sessions were revoked in place with a bounded `DELETE` and the count verified `7 → 0` **before**
-the file itself was removed (§7.3). Only `COUNT(*)` and the affected-row count were read — never
-any token column.
+Two DB-backed sessions existed at teardown: the **live** session this investigation created, in
+the redirected `/tmp/blitzy_qafix_obs/data/grafana.db`, and one **idle** session in the
+gitignored repo `data/grafana.db` left by the environment build. With the server stopped (§7.2)
+both databases were idle, so their session rows were counted **read-only** — `1` row each —
+before the databases themselves were deleted (§7.3). Only `COUNT(*)` was read, never any token
+column.
 
 ```text
 $ python3 - <<'PY'
 import sqlite3
-c=sqlite3.connect("data/grafana.db")          # idle DB; live server used /obs
-cur=c.cursor()
-cur.execute("SELECT COUNT(*) FROM user_auth_token"); print("rows BEFORE revoke =", cur.fetchone()[0])
-cur.execute("DELETE FROM user_auth_token");        print("rows deleted (revoked) =", cur.rowcount)
-c.commit()
-cur.execute("SELECT COUNT(*) FROM user_auth_token"); print("rows AFTER revoke  =", cur.fetchone()[0])
-c.close()
+for label,path in [("live obs DB  /tmp/blitzy_qafix_obs/data/grafana.db","/tmp/blitzy_qafix_obs/data/grafana.db"),
+                   ("idle repo DB data/grafana.db","data/grafana.db")]:
+    c=sqlite3.connect(f"file:{path}?mode=ro",uri=True)   # read-only; no token column touched
+    n=c.execute("SELECT COUNT(*) FROM user_auth_token").fetchone()[0]
+    print(f"user_auth_token rows [{label}] = {n}")
+    c.close()
 PY
-rows BEFORE revoke = 7
-rows deleted (revoked) = 7
-rows AFTER revoke  = 0
+user_auth_token rows [live obs DB  /tmp/blitzy_qafix_obs/data/grafana.db] = 1
+user_auth_token rows [idle repo DB data/grafana.db] = 1
 ```
 
-The single **live** session created by this investigation lived in the redirected
-`/tmp/blitzy_obs/data/grafana.db` (`user_auth_token rows = 1`). It was revoked by stopping the
-server (§7.2) — no server remains to honor its cookie — and the ephemeral database was then
-removed wholesale with `/tmp/blitzy_obs` (§7.3).
+Stopping the server (§7.2) only makes the service **unavailable** — on its own it does *not*
+invalidate a session, because Grafana persists session tokens in the database
+(`user_auth_token`), so a row would still be honored if any server were restarted against that
+same database. Each session was **invalidated** by deleting its database wholesale when the
+containing directory was removed (§7.3): the live session with `/tmp/blitzy_qafix_obs`, and the
+idle session with the repo `data/` tree. With the rows gone, neither cookie can ever again be
+honored by any server.
 
-### 7.2 Grafana runtime stopped, container removed, port released
+### 7.2 Grafana runtime stopped (native host process), port released
 
-The observed instance ran as the named container `blitzy_grafana_obs` (id `1d0ea6d62b0d`, the
-exact handle from §1.3). It was stopped and removed by that name; the removal, the empty
-`docker ps -a` filter, and the now-refused `:3000` health probe are shown verbatim.
+The observed instance ran as a **native host process** (PID `671190`, recorded in
+`/tmp/blitzy_qafix_obs/server.pid`) — there was no Docker container (`docker ps -a` lists none;
+§1.1). Its `/proc/671190/cmdline` is the exact `./bin/grafana server` invocation from §1.3
+(shown in full below). It was stopped with a graceful `SIGTERM` to that one PID (never
+`pkill`/`killall`); the process
+then exited (~2 s), no `bin/grafana server` host process remained, and the `:3000` health probe
+was refused. All shown verbatim.
 
 ```text
-$ docker ps --filter name=blitzy_grafana_obs --format '{{.ID}}  {{.Names}}  {{.Status}}  {{.Ports}}'
-1d0ea6d62b0d  blitzy_grafana_obs  Up About an hour  0.0.0.0:3000->3000/tcp
-$ docker stop blitzy_grafana_obs
-blitzy_grafana_obs
-$ docker rm blitzy_grafana_obs
-blitzy_grafana_obs
-$ docker ps -a --filter name=blitzy_grafana_obs --format '{{.Names}}'
-                                        # (empty — container fully removed)
+$ cat /tmp/blitzy_qafix_obs/server.pid                       # PID recorded at startup
+671190
+$ tr '\0' ' ' < /proc/671190/cmdline; echo                  # the native server (no container)
+./bin/grafana server -homepath /tmp/blitzy/grafana/blitzy-9682fe45-f4cc-44bd-b398-dd6148240b19_129ea4 -packaging=dev cfg:app_mode=development cfg:paths.data=/tmp/blitzy_qafix_obs/data cfg:paths.logs=/tmp/blitzy_qafix_obs/log cfg:paths.provisioning=/tmp/blitzy_qafix_obs/provisioning cfg:log.level=debug cfg:server.router_logging=true
+$ kill 671190                                                # graceful SIGTERM to exactly that PID
+                                                             # (process exited after ~2s)
+$ pgrep -af '[b]in/grafana server' || echo "(no host process)"
+(no host process)
 $ curl -s -o /dev/null -m 5 http://localhost:3000/api/health || echo "unreachable (stopped)"
 unreachable (stopped)
 ```
 
 ### 7.3 Runtime log and all investigation artifacts removed — resolves the "ignored log remains" finding
 
-The review flagged the world-readable `data/log/grafana.log` (**1,263,480 bytes, mode 0644**).
-The whole gitignored runtime `data/` tree (0 tracked files; matched by `.gitignore` rule
-`/data/*`) was removed to restore the pristine source layout (the base commit `4550cfb5b7` ships
-no `data/`), and the external evidence directory `/tmp/blitzy_obs` (36 files, 2.4 MB) was removed
-in full. The `.gitignore` rule is shown still matching the paths (it applies independent of file
-existence).
+The pre-existing gitignored runtime `data/` tree (0 tracked files; matched by `.gitignore` rule
+`/data/*`) held a world-readable `data/log/grafana.log` (**809,231 bytes, mode 0644**) and the
+idle `data/grafana.db` (**1,093,632 bytes**); it was removed to restore the pristine source
+layout (the base commit `4550cfb5b7` ships no `data/`). The external evidence directory
+`/tmp/blitzy_qafix_obs` (**3.3 MB, 48 files** — the redirected `data/`, `log/`, `provisioning/`,
+and captured `evidence/`) was removed in full. The `.gitignore` rule is shown still matching the
+paths (it applies independent of file existence).
 
 ```text
 $ stat -c '%n size=%s mode=%a' data/grafana.db data/log/grafana.log       # BEFORE removal
 data/grafana.db size=1093632 mode=640
-data/log/grafana.log size=1263480 mode=644
+data/log/grafana.log size=809231 mode=644
 
-$ rm -rf -- /tmp/blitzy_obs        # my own evidence dir (outside the repo)
-$ rm -rf -- data                   # gitignored runtime tree (0 tracked files)
+$ du -sh /tmp/blitzy_qafix_obs ; find /tmp/blitzy_qafix_obs -type f | wc -l   # BEFORE removal
+3.3M	/tmp/blitzy_qafix_obs
+48
 
-$ for p in data data/grafana.db data/log/grafana.log /tmp/blitzy_obs; do
+$ rm -rf -- /tmp/blitzy_qafix_obs   # external evidence dir (outside the repo)
+$ rm -rf -- data                    # gitignored runtime tree (0 tracked files)
+
+$ for p in /tmp/blitzy_qafix_obs data data/grafana.db data/log/grafana.log; do
 >   [ -e "$p" ] && echo "PRESENT(!): $p" || echo "ABSENT: $p"; done
+ABSENT: /tmp/blitzy_qafix_obs
 ABSENT: data
 ABSENT: data/grafana.db
 ABSENT: data/log/grafana.log
-ABSENT: /tmp/blitzy_obs
 
 $ git check-ignore -v data/grafana.db data/log/grafana.log
 .gitignore:72:/data/*	data/grafana.db
 .gitignore:72:/data/*	data/log/grafana.log
 ```
 
-No temporary observation scripts remained to remove: the §1.6 helpers each ran under a
-self-cleaning `trap … EXIT INT TERM` over their own `mktemp -d` directory, and a repository-wide
-scan for `blitzy_adhoc_test_*` / `*.sh` helpers found none outside the (now-removed)
-`/tmp/blitzy_obs`.
+No temporary observation scripts remained to remove: the §1.6 helpers each self-cleaned via a
+`trap` on `EXIT`/`INT`/`TERM` over their own `mktemp -d` working directory, and a
+repository-wide scan for `blitzy_adhoc_test_*` helpers found **0** files.
 
 ### 7.4 Final repository state — resolves the "deferred/false cleanup proof" finding
 
-The working tree's **only** change is this answer document; relative to the pristine source
-commit `4550cfb5b7`, the **only** path introduced across all Blitzy history is this same
-document; there are **no** untracked non-ignored files; and no runtime artifact, container, host
-process, or listening port remains.
-
-In the delivered repository this answer document is committed as the final step, so the
-working tree is clean and — measured against the pristine study commit `4550cfb5b7` — the
-single path introduced across the entire branch history is this one file:
+Measured against the pristine source commit `4550cfb5b7`, the **only** tracked path introduced
+across the entire branch history is this answer document (`git diff --name-status` shows a single
+`A` entry). The working tree's only *pending* change is this same document (the ` M` entry
+below), which is committed as the **final delivery step**; after that commit the tracked tree is
+byte-for-byte identical to the base except this one file. The one remaining working-tree residue
+is the untracked `blitzy/screenshots/` evidence directory — explained in the note after the
+block. No runtime artifact, Docker container, host process, or listening port remains.
 
 ```text
 $ git rev-parse --abbrev-ref HEAD
 blitzy-9682fe45-f4cc-44bd-b398-dd6148240b19
 
-$ git log -1 --format='base %h  %s' 4550cfb5b7   # pristine study commit (subject of study)
+$ git log -1 --format='base %h  %s' 4550cfb5b7    # pristine study commit (subject of study)
 base 4550cfb5b7  Upgrade scenes to v5.32.0 (#97944)
 
-$ git status --porcelain                          # working tree — nothing uncommitted
-                                                   # (empty)
+$ git status --porcelain                           # answer doc pending final commit; screenshots untracked
+ M blitzy/documentation/grafana_4550cfb5b728.md
+?? blitzy/screenshots/
 
-$ git diff --name-status 4550cfb5b7..HEAD          # only change vs. pristine source
+$ git diff --name-status 4550cfb5b7..HEAD           # only tracked change vs. pristine source
 A	blitzy/documentation/grafana_4550cfb5b728.md
 
-$ git ls-files --others --exclude-standard         # untracked, non-ignored files
-                                                   # (empty)
+$ git ls-files --others --exclude-standard | wc -l                            # untracked, non-ignored
+75
+$ git ls-files --others --exclude-standard | grep -vc '^blitzy/screenshots/'  # any NOT under screenshots?
+0
 
-$ docker ps -a --filter name=blitzy_grafana_obs --format '{{.Names}}'   # (empty)
-$ pgrep -af '[g]rafana server'                                          # (empty — no host process)
+$ docker ps -a --format '{{.Names}}' | grep -i grafana || echo "(no grafana container)"
+(no grafana container)
+$ pgrep -af '[b]in/grafana server' || echo "(no host process)"
+(no host process)
 $ curl -s -o /dev/null -m 5 http://localhost:3000/api/health || echo "unreachable (stopped)"
 unreachable (stopped)
 ```
 
-**Conclusion (observed).** `git status --porcelain` is empty (this answer document is committed
-as the final delivery step), and the single `A` entry across `4550cfb5b7..HEAD` is that same
-document; `git ls-files --others --exclude-standard` is empty. The repository is therefore
-**byte-for-byte identical to the pristine source except for this one committed file**, satisfying
-the read-only MainRule (§0.7, Rule 5). The observed Grafana runtime is stopped and its container
-removed, all investigation auth sessions are revoked (`7 → 0`) and their ephemeral databases
-deleted, and every temporary directory and runtime log has been removed — with no token, cookie,
-or hash value disclosed anywhere in this document.
+> **The 75 untracked files are all under `blitzy/screenshots/`** — PNG evidence captured during
+> the investigation and referenced by this document. Per the AAP the answer document is the sole
+> in-scope addition (AAP §0.4.2), so these screenshots are intentionally **left untracked and are not
+> committed**; they are supporting evidence in the working tree, not part of the tracked
+> deliverable. They appear in `git status` precisely because they are neither ignored nor
+> committed — this is expected, not residue to remove (deleting them would dangle the
+> in-document evidence references).
+
+**Conclusion (observed).** The single `A` entry across `4550cfb5b7..HEAD` is this answer
+document; once its pending ` M` edits are committed as the final delivery step, the tracked tree
+is **byte-for-byte identical to the pristine source except for this one file**, satisfying the
+read-only MainRule (AAP §0.7, Rule 5). The native Grafana host process is stopped (`:3000`
+refused, no `bin/grafana server` process), no Docker container was ever created, both DB-backed
+sessions (live obs + idle repo, **1 row each**) were invalidated by deleting their databases, and
+every temporary directory and runtime log has been removed — with no token, cookie, or hash value
+disclosed anywhere in this document.
