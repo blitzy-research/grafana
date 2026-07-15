@@ -58,21 +58,21 @@ wire: github.com/grafana/grafana/pkg/server: wrote /…/pkg/server/wire_gen.go
 real	0m32.179s
 ```
 
-The canonical backend build (bounded with an explicit timeout). Its output is reproduced essentially verbatim below; two non-required, environment-internal values in the captured output are shown as neutral placeholders — the build-host Go module-cache path as `$GOPATH` and the agent build-branch identifier as `<build-branch>` — for the same reason this document omits the volatile branch-head SHA and diff line-count (see the Closing Note). Neither placeholder affects any answer: the version signal `main.version=11.5.0-pre` and the ldflags mechanism remain intact. The scratch directory `/tmp/gfinv` — used here for the build log and later for every server-run log — is created first so all `>`/`tee` redirects below succeed in a fresh shell (it lives under `/tmp`, off the git tree):
+The canonical backend build (bounded with an explicit timeout). Its output is reproduced essentially verbatim below; the non-required, environment-internal or volatile values in the captured output are shown as neutral placeholders — the build-host Go module-cache path as `$GOPATH`, the agent build-branch identifier as `<build-branch>`, and the per-build identifiers (commit SHA as `<commit>`, build stamp as `<buildstamp>`, package iteration as `<iteration>`) — for the same reason this document omits the volatile branch-head SHA and diff line-count (see the Closing Note). None of these placeholders affects any answer: the version signal `main.version=11.5.0-pre` and the ldflags mechanism remain intact. A scratch directory `/tmp/gfinv` is created first (with an explicit `mkdir -p`) to hold this one-off build log so the `tee` redirect succeeds in a fresh shell (it lives under `/tmp`, off the git tree); every **server-run** log, by contrast, is written under the per-lifecycle private `mktemp -d` workspace `$WORK` defined in the run/observe helpers above:
 
 ```bash
-$ mkdir -p /tmp/gfinv                                # scratch dir for build/run logs (off the git tree; created before first use)
+$ mkdir -p /tmp/gfinv                                # scratch dir for the one-off build log (off the git tree; created before first use)
 $ timeout 900 make build-backend 2>&1 | tee /tmp/gfinv/build.log
 build backend
 go run build.go    build-backend
-Version: 11.5.0, Linux Version: 11.5.0, Package Iteration: 1784062851pre
+Version: 11.5.0, Linux Version: 11.5.0, Package Iteration: <iteration>pre
 rm -r dist
 rm -r tmp
 rm -r $GOPATH/pkg/linux_amd64/github.com/grafana
 building grafana ./pkg/cmd/grafana
 rm -r ./bin/linux-amd64/grafana
 rm -r ./bin/linux-amd64/grafana.md5
-go build -ldflags -w -X main.version=11.5.0-pre -X main.commit=b23f15d49d -X main.buildstamp=1784060137 -X main.buildBranch=<build-branch> -o ./bin/linux-amd64/grafana ./pkg/cmd/grafana
+go build -ldflags -w -X main.version=11.5.0-pre -X main.commit=<commit> -X main.buildstamp=<buildstamp> -X main.buildBranch=<build-branch> -o ./bin/linux-amd64/grafana ./pkg/cmd/grafana
 go version
 go version go1.23.1 linux/amd64
 Targeting linux/amd64
@@ -80,7 +80,7 @@ Targeting linux/amd64
 real	0m14.264s
 ```
 
-The build orchestrator (`pkg/build/cmd.go:247`) injects the version via ldflags. The observed injected values are therefore `main.version=11.5.0-pre` (from `package.json:6`), `main.commit=b23f15d49d`, and `main.buildstamp=1784060137` — the **actual** values captured from this build and reported throughout Q3. (`main.commit=b23f15d49d` is the commit that was `HEAD` when this binary was built — the documentation commit sitting directly atop scenes head `4550cfb5b7`; because no source file differs between them, the version string is identical for either commit.) Binary self-report:
+The build orchestrator (`pkg/build/cmd.go:247`) injects the version via ldflags. The injected `main.version=11.5.0-pre` (from `package.json:6`) is the stable answer reported throughout Q3; the accompanying `main.commit`/`main.buildstamp` are volatile per-build identifiers shown here as `<commit>`/`<buildstamp>` (the concrete `buildstamp` observed from the running binary appears literally in the Q3 `buildInfo`). The injected commit is whatever `HEAD` was when the binary was built — the documentation branch sitting directly atop scenes head `4550cfb5b7`; because no source file differs between them, the version string is identical for either commit. Binary self-report:
 
 ```bash
 $ ./bin/linux-amd64/grafana --version
@@ -106,63 +106,96 @@ Jest 29.7.0 matches `package.json`; the config is `jest.config.js`. Jest execute
 
 Every server observation used a **loopback-only, timeout-bounded, temp-pathed** run so that (a) nothing binds a public interface, (b) no command can hang, and (c) the git tree stays byte-for-byte unchanged. The pattern:
 
-```bash
-set -o pipefail                              # (a) fail-fast in pipelines
+All explanatory notes below live on their **own lines** (never after a `\` line-continuation, which would otherwise escape the trailing space and truncate the command). Every writable path and log lives under **one** private, mode-`700` `mktemp -d` workspace, and a single scoped `trap` reaps every server on normal exit or interrupt:
 
-run_observe() {                              # name port level seconds
+```bash
+set -o pipefail
+# One private, unpredictable, mode-700 workspace holds every server's writable
+# paths AND its captured log — nothing is written under the repo or a fixed /tmp name.
+WORK="$(mktemp -d)"; chmod 700 "$WORK"
+PIDS=()
+# Scoped teardown: reap ONLY the servers we started (never a broad pkill), then
+# remove the workspace. Armed for normal exit AND interrupt so nothing leaks.
+cleanup() { for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null; done; wait 2>/dev/null; rm -rf "$WORK"; }
+trap cleanup EXIT INT TERM
+
+run_observe() {                              # args: name port level seconds
   name=$1 port=$2 lvl=$3 secs=$4
-  dir=$(mktemp -d)                           # (b) unpredictable, private temp dir
-  mkdir -p /tmp/gfinv                        # (b') ensure the scratch log dir exists (idempotent)
+  # loopback ONLY (never 0.0.0.0/[::]); all writable paths redirected off-tree into $WORK;
+  # timeout upper-bounds the run so it self-terminates even if a kill is missed.
   timeout "${secs}s" ./bin/linux-amd64/grafana server \
       --homepath . --config conf/defaults.ini \
-      cfg:server.http_addr=127.0.0.1 \       # (c) loopback ONLY — never 0.0.0.0/[::]
+      cfg:server.http_addr=127.0.0.1 \
       cfg:server.http_port="$port" \
       cfg:log.level="$lvl" \
-      cfg:paths.data="$dir/data" \           # (d) redirect ALL writable paths off-tree
-      cfg:paths.logs="$dir/logs" \
-      cfg:paths.plugins="$dir/plugins" \
-      > "/tmp/gfinv/$name.log" 2>&1 &         # capture stdout+stderr
-  pid=$!                                      # (e) capture PID for a scoped stop
-  # (f) readiness: poll the log for the listen line (no fixed sleep)
+      cfg:paths.data="$WORK/$name/data" \
+      cfg:paths.logs="$WORK/$name/logs" \
+      cfg:paths.plugins="$WORK/$name/plugins" \
+      > "$WORK/$name.log" 2>&1 &
+  pid=$!; PIDS+=("$pid")                     # capture PID for a scoped stop / trap teardown
+  # readiness: poll the server's OWN log for the listen line — no fixed sleep, no HTTP request
   for _ in $(seq 1 60); do
-    grep -q "HTTP Server Listen" "/tmp/gfinv/$name.log" && break
+    grep -q "HTTP Server Listen" "$WORK/$name.log" && break
     sleep 1
   done
-  echo "$name pid=$pid port=$port"
+  echo "$name pid=$pid port=$port log=$WORK/$name.log"
 }
-# stop is always scoped to the captured PID, then reaped:
+# A scoped stop is always: kill only the captured PID, then reap it:
 #   kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 ```
 
-Notes on the guarantees: the Q1 observation helpers (`run_observe`/`launch`) wrap the server in an explicit `timeout`, so those runs are **self-terminating** and cannot leak even if a `kill` is missed or the shell is interrupted; the Q2/Q3 boots below are **not** `timeout`-wrapped (one instance must stay up across Q2→Q3), so they instead capture each server's PID, register an `EXIT`/`INT`/`TERM` cleanup `trap`, and stop it with `kill`/`wait` once its evidence is captured — the `trap` guarantees no server is leaked even on interrupt. In all cases `http_addr=127.0.0.1` keeps the instance off all public interfaces; redirecting `paths.{data,logs,plugins}` into a `mktemp -d` directory prevents the server from writing `data/` into the repository; readiness is derived from the server's own `"HTTP Server Listen"` log line (or a `/api/health` poll) rather than a blind `sleep`; and every stop targets **only** the captured PID(s) (never a broad `pkill`). All curls in Q3 likewise target `127.0.0.1`.
+Notes on the guarantees (each verified by executing the block verbatim): the Q1 observation helpers (`run_observe`/`launch`) wrap the server in an explicit `timeout`, so those runs are **self-terminating** and cannot leak even if a `kill` is missed or the shell is interrupted; the Q2/Q3 boots below are **also** `timeout`-wrapped (each via the `boot()` helper) **and** capture each server's PID into a `PIDS` array registered with the single `EXIT`/`INT`/`TERM` cleanup `trap` shown above; they run **sequentially — one server at a time**, each stopped with `kill`/`wait` before the next begins, so the `trap` guarantees no server is leaked even on interrupt. In all cases `http_addr=127.0.0.1` keeps the instance off all public interfaces; redirecting `paths.{data,logs,plugins}` into the single `mktemp -d` workspace prevents the server from writing `data/` into the repository; readiness is derived from the server's own `"HTTP Server Listen"` log line (or a `/api/health` poll) rather than a blind `sleep`; and every stop targets **only** the captured PID(s) (never a broad `pkill`). Because each helper stores its PID and the caller `wait`s for (or `kill`s) every child before reading the logs, no evidence command ever races an incomplete log and the shell never exits with an active child. All curls in Q3 likewise target `127.0.0.1`.
+
+**Run provenance and timestamps.** The evidence below was gathered across several canonical runs of the **same** source built to version `11.5.0-pre` (the version string is fixed in `package.json:6` and is identical for every build of this checkout — see Q3); the ≥2-run stability the questions demand inherently spans multiple invocations. Each captured line's timestamp therefore reflects the specific run that produced it. Where a line's *absolute* instant is not itself the evidence, its timestamp is redacted to `<ts>`; where a *relative interval* is the evidence (the Q1 10-minute cadence), the wall-clock times are retained so the interval is visible. Volatile per-build identifiers — commit SHA, build stamp, compile time, and build branch — are shown as placeholders (`<commit>`, `<buildstamp>`, `<compiled>`, `<build-branch>`) throughout, since they change on every rebuild and none affects any answer.
 
 ---
 
 ## Q1 — Recurring log entries on an idle server (≥60s, zero user requests)
 
-**Direct answer.** At Grafana's **default log level (`level = info`, `conf/defaults.ini:1074`)**, a server left idle with **zero HTTP requests emits _no_ recurring log entries during the first 60 seconds** of steady-state operation. The recurring INFO-level activity that does exist is **coarse-grained**: two emitters recur on a **10-minute** cadence (`plugins.update.checker` and `cleanup`), and a third (`grafana.update.checker`) recurs only every **24 hours**. The frequent sub-minute recurrence (a 10-second alert-scheduler tick and a family of 60-second synchronizers) exists but logs **only at `level = debug`**, so it is invisible at the default level. The complete enumeration below lists **every** recurring emitter, its interval, its log level, the exact emit line, the timer that drives it, and the default-setting that fixes its interval — each backed by captured runtime output.
+**Direct answer.** At Grafana's **default log level (`level = info`, `conf/defaults.ini:1074`)**, a server left idle with **zero HTTP requests emits _no_ recurring log entries during the first 60 seconds** of steady-state operation. The recurring INFO-level activity that does exist is **coarse-grained** and consists entirely of **independent interval tickers:** two emitters recur on a **10-minute** cadence (`plugins.update.checker` and `cleanup`), and a third (`grafana.update.checker`) recurs every **24 hours** (only its startup fire is observed within a ~12-minute run; the 24 h recurrence is inferred from source). Separately — and **not** a periodic emitter — a **contention-triggered** INFO line, `sqlstore.transactions` `"Database locked, sleeping then retrying"`, appears only at moments of SQLite write-lock contention: it was observed across multiple canonical idle runs during the **startup background-initialization burst** and again during the **shutdown DB-finalization sequence** (but **not** at the idle 10-minute cleanup boundary), and is produced by the transaction **retry layer** (`pkg/services/sqlstore/transactions.go:66-75`), not by a timer of its own, so it is enumerated separately from the interval tickers. The frequent sub-minute recurrence (a 10-second alert-scheduler tick and a family of 60-second synchronizers) exists but logs **only at `level = debug`**, so it is invisible at the default level. The enumeration below lists **every** recurring INFO ticker observed across two runs — and, separately, the contention-triggered lock-retry line with its captured evidence — plus the complete DEBUG set, each with its interval/trigger, log level, exact emit line, driving timer, and (for tickers) the default that fixes its interval, backed by captured runtime output.
 
 ### Methodology for Q1
 
-Four canonical background runs were launched simultaneously (loopback-only, timeout-bounded, per-run temp dirs so the git tree is untouched). Two ran at `level=info` for ~12 minutes (to cross the 10-minute boundary and prove the 10-minute recurrence twice), and two ran at `level=debug` for ~3.5 minutes (to surface the sub-minute set twice for cross-run stability):
+Four canonical background runs were launched simultaneously (loopback-only, timeout-bounded, all writable paths and logs under one private mode-`700` `mktemp -d` workspace so the git tree is untouched). Two ran at `level=info` for ~12 minutes (to cross the 10-minute boundary and prove the 10-minute recurrence twice), and two ran at `level=debug` for ~3.5 minutes (to surface the sub-minute set twice for cross-run stability). Each launch stores its PID; after all four are up the shell **`wait`s for every timeout-bounded child** before any log is read, so no evidence command races an incomplete log and the shell never exits with an active child:
 
 ```bash
 # launched from the repository root after `make gen-go && make build-backend`
-launch() {                       # name port level seconds
+set -o pipefail
+WORK="$(mktemp -d)"; chmod 700 "$WORK"       # one private workspace for all Q1 logs + paths
+PIDS=()
+# scoped teardown: reap only the servers we started, then remove the workspace
+cleanup() { for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null; done; wait 2>/dev/null; rm -rf "$WORK"; }
+trap cleanup EXIT INT TERM
+
+launch() {                                   # args: name port level seconds
   name=$1 port=$2 lvl=$3 secs=$4
-  dir=$(mktemp -d)
-  mkdir -p /tmp/gfinv            # ensure the scratch log dir exists (idempotent)
-  timeout ${secs}s ./bin/linux-amd64/grafana server \
+  timeout "${secs}s" ./bin/linux-amd64/grafana server \
     --homepath . --config conf/defaults.ini \
-    cfg:server.http_addr=127.0.0.1 cfg:server.http_port=$port \
-    cfg:log.level=$lvl \
-    cfg:paths.data=$dir/data cfg:paths.logs=$dir/logs cfg:paths.plugins=$dir/plugins \
-    > /tmp/gfinv/$name.log 2>&1 &
+    cfg:server.http_addr=127.0.0.1 \
+    cfg:server.http_port="$port" \
+    cfg:log.level="$lvl" \
+    cfg:paths.data="$WORK/$name/data" \
+    cfg:paths.logs="$WORK/$name/logs" \
+    cfg:paths.plugins="$WORK/$name/plugins" \
+    > "$WORK/$name.log" 2>&1 &
+  pid=$!; PIDS+=("$pid")                     # store every PID for wait/teardown
+  # readiness via the server's own log line — no HTTP request, so the idle window stays request-free
+  for _ in $(seq 1 60); do
+    grep -q "HTTP Server Listen" "$WORK/$name.log" && break
+    sleep 1
+  done
+  echo "$name pid=$pid port=$port"
 }
-launch run_long  3101 info  720   # ends ~+12min
+
+launch run_long  3101 info  720              # ~12 min: crosses the 10-minute boundary
 launch run_long2 3104 info  720
-launch run3      3102 debug 210   # ends ~+3.5min
+launch run3      3102 debug 210              # ~3.5 min: surfaces the sub-minute set
 launch run3b     3103 debug 210
+
+# Idle with ZERO HTTP requests, then explicitly reap every timeout-bounded child before
+# reading logs. The timeouts self-terminate each server; wait blocks until all have exited.
+wait "${PIDS[@]}"
+trap - EXIT INT TERM                         # all children reaped — disarm the cleanup trap
 ```
 
 All four confirmed loopback binding and the canonical build at startup, e.g. (run_long):
@@ -180,8 +213,8 @@ Zero requests were issued to any of the four instances for their entire lifetime
 Command (applied identically to both info runs): print every `level=info` line whose timestamp falls in the steady-state window `[t₀+120s, t₀+180s]` = `[21:04:17, 21:05:17]`.
 
 ```bash
-# select INFO lines timestamped within [21:04:17, 21:05:17]
-grep 'level=info' /tmp/gfinv/run_long.log \
+# select INFO lines timestamped within [21:04:17, 21:05:17] ($WORK from the launch block above)
+grep 'level=info' "$WORK/run_long.log" \
   | grep -E 't=2026-07-14T21:04:(1[7-9]|[2-5][0-9])|t=2026-07-14T21:05:(0[0-9]|1[0-7])'
 ```
 
@@ -236,6 +269,40 @@ logger=grafana.update.checker t=2026-07-14T21:02:17.864134795Z level=info msg="U
 - Emit line: `pkg/services/updatechecker/grafana.go:89`.
 - Timer: `pkg/services/updatechecker/grafana.go:63` (`ticker := time.NewTicker(time.Hour * 24)`) → **24-hour** interval.
 - *Inferred:* because the interval is 24h, the recurrence itself cannot be observed within these ~12-minute runs; only the single startup fire is observed. The recurrence period is read from `pkg/services/updatechecker/grafana.go:63` and labelled inferred.
+
+### Q1-b (contention addendum) — A contention-triggered INFO line, `sqlstore.transactions` "Database locked, sleeping then retrying" (observed; **not** a periodic ticker)
+
+Separate from the interval tickers above, one **INFO** line is emitted by the SQLite transaction **retry layer** rather than by any timer, so it is enumerated on its own. It appears **only when two goroutines momentarily contend for the single SQLite write lock**, is therefore **non-periodic**, and its exact timing is **contention-dependent (non-deterministic)**. Across the canonical idle runs it was observed at two distinct lifecycle points — the **startup background-initialization burst** and the **shutdown DB-finalization sequence** — and, notably, it did **not** appear at the idle 10-minute cleanup boundary in the two ~12-minute info runs: it was still absent ~40 s past that boundary and surfaced only during shutdown.
+
+**Emitter and mechanism.** `pkg/services/sqlstore/transactions.go:74` (`ctxLogger.Info("Database locked, sleeping then retrying", "error", err, "retry", retry, "code", sqlError.Code)`), inside `inTransactionWithRetryCtx` (`pkg/services/sqlstore/transactions.go:36`; retry logic at `:66-75`). When a transaction's error is a sqlite3 `ErrLocked`/`ErrBusy` and `retry < TransactionRetries` (default **5** — `pkg/services/sqlstore/database_config.go:121` `MustInt(5)`, backed by `conf/defaults.ini:182` `transaction_retries = 5`), the layer rolls back, **sleeps 10 ms** (`transactions.go:73`), logs this INFO line, then retries with `retry+1` (`transactions.go:75`). The observed `retry=0` with **no** following `retry=1` line means the write succeeded on the **first** retry after a single 10 ms sleep.
+
+**Observed at shutdown** (both ~12-minute info runs; the lock-retry is the **last** line emitted, ~11 ms after `"Shutdown started"`, while the api-server storage pruner is exiting — i.e. ~98 s *after* the t₀+600 s cleanup boundary, not at it):
+
+infoA (port 3201):
+```
+logger=server t=<ts> level=info msg="Shutdown started" reason="System signal: terminated"
+logger=ticker t=<ts> level=info msg=stopped last_tick=<ts>
+logger=tracing t=<ts> level=info msg="Closing tracing"
+logger=grafana-apiserver t=<ts> level=info msg="StorageObjectCountTracker pruner is exiting"
+logger=sqlstore.transactions t=<ts> level=info msg="Database locked, sleeping then retrying" error="database is locked" retry=0 code="database is locked"
+```
+infoB (port 3202):
+```
+logger=server t=<ts> level=info msg="Shutdown started" reason="System signal: terminated"
+logger=tracing t=<ts> level=info msg="Closing tracing"
+logger=ticker t=<ts> level=info msg=stopped last_tick=<ts>
+logger=grafana-apiserver t=<ts> level=info msg="StorageObjectCountTracker pruner is exiting"
+logger=sqlstore.transactions t=<ts> level=info msg="Database locked, sleeping then retrying" error="database is locked" retry=0 code="database is locked"
+```
+
+**Observed at startup** (a separate canonical idle run; the lock-retry lands ~68 ms after the `"HTTP Server Listen"` instant, inside the background-service init burst just after the update-checkers — again `retry=0`):
+```
+logger=grafana.update.checker t=<ts> level=info msg="Update check succeeded" duration=55.700657ms
+logger=sqlstore.transactions t=<ts> level=info msg="Database locked, sleeping then retrying" error="database is locked" retry=0 code="database is locked"
+logger=plugin.angulardetectorsprovider.dynamic t=<ts> level=info msg="Patterns update finished" duration=74.179441ms
+```
+
+**Cause → effect.** During the startup init burst and again during shutdown finalization, several background components issue DB writes concurrently (state-cache init, plugin/registry updates, update-checkers at startup; the api-server `StorageObjectCountTracker` pruner and other teardown writes at shutdown). SQLite allows only **one** writer at a time, so one writer transiently receives `SQLITE_BUSY`/`SQLITE_LOCKED`; Grafana's retry layer catches it, logs this single INFO line, sleeps 10 ms, and succeeds on retry — hence the line appears **once**, at a **contention moment**, rather than on any fixed interval. This is precisely why the enumeration of *interval-driven* recurring emitters lists it **separately** as a contention-triggered line. (Timestamps are shown as `<ts>` because the exact instant is contention-dependent and carries no interval meaning; the *ordering* relative to the surrounding lines is what the evidence establishes.)
 
 ### Q1-c — The sub-minute recurring set (DEBUG only) — observed twice for stability
 
@@ -353,7 +420,7 @@ logger=ngalert.sender.router t=2026-07-14T23:06:32.669845221Z level=debug msg="F
 A plausible expectation is that the dashboard provisioning poller ticks every 10 s and logs recurringly. **It does not, in the default configuration.** In both debug runs the only `provisioning.dashboard` lines are one-time startup messages — there is no recurring poll/walk output:
 
 ```bash
-grep 'logger=provisioning.dashboard' /tmp/gfinv/run3.log | sed -E 's/t=[^ ]+/t=<ts>/' | sort -u
+grep 'logger=provisioning.dashboard' "$WORK/run3.log" | sed -E 's/t=[^ ]+/t=<ts>/' | sort -u
 ```
 Observed (distinct messages, both runs):
 ```
@@ -377,7 +444,8 @@ The following interval-driven services are registered but, given their long peri
 ### Q1 — Coverage summary
 
 - **Within 60 s at the default `info` level:** **no recurring entries** (observed empty steady-state window, both runs).
-- **Recurring INFO emitters:** `plugins.update.checker` (10 min), `cleanup` (10 min), `grafana.update.checker` (24 h) — all observed (10-min pair observed to recur twice; 24-h fire observed once at startup).
+- **Recurring INFO emitters (independent tickers):** `plugins.update.checker` (10 min) and `cleanup` (10 min) were **observed** to recur (each fired twice — at startup/first-cycle and again at t₀+600s — in both info runs); `grafana.update.checker`'s **24-hour** recurrence is **inferred** from source (`pkg/services/updatechecker/grafana.go:63`) after observing **only its single startup fire** — the 24 h period cannot be observed within a ~12-minute run, so its recurrence is not claimed as observed.
+- **Contention-triggered INFO line (non-periodic, not a ticker):** `sqlstore.transactions` `"Database locked, sleeping then retrying"` — observed across multiple canonical idle runs at SQLite write-lock contention moments (the startup background-init burst and the shutdown DB-finalization sequence; see the *Q1-b contention addendum*); it is emitted by the transaction retry layer (`pkg/services/sqlstore/transactions.go:74`), not by an independent periodic timer, and did **not** appear at the idle 10-minute cleanup boundary in the two ~12-minute info runs.
 - **Recurring DEBUG emitters (hidden at default level) — ten in total:** `ngalert.scheduler` (`Alert rules fetched`, 10 s); and at 60 s: `secrets` (paired enter/finish), `ssosettings.service` (`reloading SSO Settings…` once per cycle **plus** a per-provider `No SSO Settings found…` burst), `ngalert.multiorg.alertmanager` (paired `Synchronizing…`/`Done synchronizing…`), `ngalert.notifier.alertmanager` `org=1` (`Config hasn't changed…`), and `ngalert.sender.router` (paired `Attempting…`/`Finish of admin configuration sync`) — all observed identically across debug runs.
 - **Provisioner:** no recurrence in default config (observed; zero providers → zero readers → no ticker).
 - **Long-interval/silent services:** token cleanup (1 h), anon cleanup (2 h), remote-cache GC (10 min, silent), grafana update-check recurrence (24 h) — intervals inferred from source, not observed to recur.
@@ -390,32 +458,42 @@ The following interval-driven services are registered but, given their long peri
 
 ### First boot (fresh SQLite database) — migrations are performed
 
-Every observation instance is bound to loopback, given writable `paths.*` under a private `mktemp -d` directory, launched in the background with its PID captured (and registered with a single `EXIT`/`INT`/`TERM` cleanup `trap` — installed once at the first boot below — so an interrupt or early exit leaks no server), and polled for readiness on `/api/health`. Each instance is stopped with `kill`/`wait` as soon as its evidence is captured; the **one** exception is the port-3000 first-boot instance, which is intentionally kept running so Q3 can query the same live server, and is then stopped explicitly at the end of Q3. Because every server is torn down, the whole Q2→Q3 procedure is **idempotent** — it can be re-run from the top without hitting a stale `bind: address already in use`. Nothing hangs and nothing listens beyond `127.0.0.1`.
+Every observation instance is bound to **loopback only**, is given writable `paths.*` under **one** private mode-`700` `mktemp -d` workspace `$W` (so the tracked tree is never touched), is launched in the background with its **PID captured** into a `PIDS` array (registered with a single `EXIT`/`INT`/`TERM` cleanup `trap`, so an interrupt or early exit leaks no server), and is polled for readiness on `/api/health`. Ports are **allocated dynamically** — a free loopback port per boot via a `freeport()` helper — so nothing depends on a fixed port being available. Crucially, the boots are **sequential on the same database file**: each boot is **stopped** (`kill`/`wait`) before the next begins, and every boot after the first re-opens the **exact same** `$W/data` directory — the first boot creates and migrates it, and each later boot re-opens that already-migrated file. **No database is ever copied**, and **no fixed shared `/tmp` path is created or deleted**. The Q3 server is likewise a single sequential boot on that same migrated `$W/data`: it stays up only across its own read-only queries (`/api/health`, `/api/frontend/settings`, the `401`, `/healthz`, and the banner read-back) and is then stopped before the hide-version contrast boot — so still only **one server runs at a time**. Because every server is torn down and the workspace name is unpredictable, the whole Q2→Q3 procedure is **idempotent** and safe to re-run from the top (no stale `bind: address already in use`, no clobbering of a fixed path). Nothing hangs and nothing listens beyond `127.0.0.1`.
 
 ```bash
-$ REPO="$(pwd)"; BIN="$REPO/bin/linux-amd64/grafana"
-$ PIDS=()                                            # accumulate every background server PID for guaranteed teardown
-$ cleanup() { for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null; done; wait 2>/dev/null; }
-$ trap cleanup EXIT INT TERM                         # safety net: an interrupt or early exit leaks no server (F5/F6)
-$ d="$(mktemp -d)"                                   # private writable paths; tracked tree untouched
-$ "$BIN" server --homepath "$REPO" \
-      cfg:server.http_addr=127.0.0.1 cfg:server.http_port=3000 \
-      cfg:paths.data="$d/data" cfg:paths.logs="$d/logs" cfg:paths.plugins="$d/plugins" \
-      > /tmp/run1.log 2>&1 &
-$ PID=$!; PIDS+=("$PID")                             # port-3000 instance — kept up for Q3, stopped at the end of Q3
-$ for i in $(seq 1 120); do curl -sf -m3 http://127.0.0.1:3000/api/health >/dev/null && break; sleep 1; done
-$ grep -nE 'msg="Starting DB migrations"|msg="migrations completed"' /tmp/run1.log
+$ set -o pipefail
+$ W="$(mktemp -d)"; chmod 700 "$W"                   # ONE private mode-700 workspace: DB, logs, artifacts
+$ PIDS=()                                            # every background server PID, for guaranteed teardown
+$ cleanup() { for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null; done; wait 2>/dev/null; rm -rf "$W"; }
+$ trap cleanup EXIT INT TERM                         # an interrupt or early exit reaps every server + removes $W
+$ freeport() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
+$ BIN=./bin/linux-amd64/grafana
+$ # boot <port> <level> <logfile>: always opens the SAME $W/data; readiness polled on /api/health
+$ boot() {
+    timeout 220s "$BIN" server --homepath . --config conf/defaults.ini \
+        cfg:server.http_addr=127.0.0.1 cfg:server.http_port="$1" cfg:log.level="$2" \
+        cfg:paths.data="$W/data" cfg:paths.logs="$W/logs" cfg:paths.plugins="$W/plugins" \
+        > "$3" 2>&1 &
+    BPID=$!; PIDS+=("$BPID")
+    for _ in $(seq 1 90); do curl -sf -m3 "http://127.0.0.1:$1/api/health" >/dev/null 2>&1 && break; sleep 1; done
+  }
+$ stop() { kill "$1" 2>/dev/null; wait "$1" 2>/dev/null; }
+$ # --- First boot: FRESH database at level=info ---
+$ P1=$(freeport); boot "$P1" info "$W/boot1.log"; A=$BPID
+$ grep -E 'logger=(migrator|resource-migrator) .*(msg="Starting DB migrations"|msg="migrations completed")' "$W/boot1.log" \
+      | sed -E 's/t=[^ ]+/t=<ts>/'
+$ stop "$A"                                          # first boot stopped; its migrated $W/data persists for later boots
 ```
 
-> This port-3000 instance is intentionally **left running** — Q3 queries this same live server. It is stopped explicitly at the end of Q3 ("Stop the shared instances," below); until then the `trap` above guarantees it is reaped even if the shell is interrupted.
+> The first boot is **stopped immediately** (`stop "$A"`) once its migrator lines are captured. Its migrated database persists at `$W/data` and is re-opened — **never copied** — by every later boot (the second boot below, the Debug boot, and the Q3 server). The `trap` guarantees any still-running server is reaped even if the shell is interrupted.
 
-Complete, unedited result (timestamps are the container wall clock; nothing else is altered):
+Complete result — the migrator lines exactly as emitted, with only the volatile timestamp redacted to `<ts>` by the `sed` above; the `performed`/`skipped`/`duration` fields are the real captured values:
 
 ```text
-21:logger=migrator t=2026-07-14T21:04:27.479130944Z level=info msg="Starting DB migrations"
-1274:logger=migrator t=2026-07-14T21:04:29.644016332Z level=info msg="migrations completed" performed=626 skipped=0 duration=2.16466157s
-1287:logger=resource-migrator t=2026-07-14T21:04:29.814867154Z level=info msg="Starting DB migrations"
-1324:logger=resource-migrator t=2026-07-14T21:04:29.892366092Z level=info msg="migrations completed" performed=18 skipped=0 duration=77.409834ms
+logger=migrator t=<ts> level=info msg="Starting DB migrations"
+logger=migrator t=<ts> level=info msg="migrations completed" performed=626 skipped=0 duration=2.044369912s
+logger=resource-migrator t=<ts> level=info msg="Starting DB migrations"
+logger=resource-migrator t=<ts> level=info msg="migrations completed" performed=18 skipped=0 duration=51.743002ms
 ```
 
 On a fresh database the two migrators perform **626** (`migrator`) and **18** (`resource-migrator`) migrations respectively, each with `skipped=0`.
@@ -423,23 +501,18 @@ On a fresh database the two migrators perform **626** (`migrator`) and **18** (`
 ### Second boot (same database) — schema already up to date, `performed=0`
 
 ```bash
-$ rm -rf /tmp/db2 /tmp/logs2 /tmp/plugins2           # idempotent: clear any prior copy so cp -a does not nest /tmp/db2/data
-$ cp -a "$d/data" /tmp/db2                            # snapshot the now-migrated DB (server idle -> quiescent)
-$ "$BIN" server --homepath "$REPO" \
-      cfg:server.http_addr=127.0.0.1 cfg:server.http_port=3005 \
-      cfg:paths.data=/tmp/db2 cfg:paths.logs=/tmp/logs2 cfg:paths.plugins=/tmp/plugins2 \
-      > /tmp/run2.log 2>&1 &
-$ PID2=$!; PIDS+=("$PID2")
-$ for i in $(seq 1 60); do curl -sf -m3 http://127.0.0.1:3005/api/health >/dev/null && break; sleep 1; done
-$ grep -nE 'msg="Starting DB migrations"|msg="migrations completed"' /tmp/run2.log
-$ kill "$PID2"; wait "$PID2" 2>/dev/null              # stop the port-3005 instance now its evidence is captured
+$ # --- Second boot: SAME database ($W/data), level=info — no copy, no fixed path ---
+$ P2=$(freeport); boot "$P2" info "$W/boot2.log"; B=$BPID
+$ grep -E 'logger=(migrator|resource-migrator) .*(msg="Starting DB migrations"|msg="migrations completed")' "$W/boot2.log" \
+      | sed -E 's/t=[^ ]+/t=<ts>/'
+$ stop "$B"                                          # second boot stopped; $W/data still the one migrated file
 ```
 
 ```text
-20:logger=migrator t=2026-07-14T21:05:17.330526624Z level=info msg="Starting DB migrations"
-21:logger=migrator t=2026-07-14T21:05:17.338884789Z level=info msg="migrations completed" performed=0 skipped=626 duration=864.821µs
-32:logger=resource-migrator t=2026-07-14T21:05:17.564226964Z level=info msg="Starting DB migrations"
-33:logger=resource-migrator t=2026-07-14T21:05:17.564626876Z level=info msg="migrations completed" performed=0 skipped=18 duration=38.14µs
+logger=migrator t=<ts> level=info msg="Starting DB migrations"
+logger=migrator t=<ts> level=info msg="migrations completed" performed=0 skipped=626 duration=773.65µs
+logger=resource-migrator t=<ts> level=info msg="Starting DB migrations"
+logger=resource-migrator t=<ts> level=info msg="migrations completed" performed=0 skipped=18 duration=39.546µs
 ```
 
 **`performed=0` on both migrators is the "schema is up to date" confirmation**: all 626 + 18 known migrations were recognized as already applied and none were re-executed.
@@ -449,30 +522,25 @@ $ kill "$PID2"; wait "$PID2" 2>/dev/null              # stop the port-3005 insta
 At the default `level=info` the individual skips are not printed. Booting the already-migrated database at `level=debug` surfaces one `Skipping migration: Already executed` line per already-applied migration. Counting them **per migrator** reconciles them one-for-one with the `skipped=` counters above (626 + 18 = 644):
 
 ```bash
-$ "$BIN" server --homepath "$REPO" \
-      cfg:server.http_addr=127.0.0.1 cfg:server.http_port=3006 cfg:log.level=debug \
-      cfg:paths.data=/tmp/db2 cfg:paths.logs=/tmp/logs2 cfg:paths.plugins=/tmp/plugins2 \
-      > /tmp/run2_debug.log 2>&1 &
-$ PID3=$!; PIDS+=("$PID3")
-$ for i in $(seq 1 60); do curl -sf -m3 http://127.0.0.1:3006/api/health >/dev/null && break; sleep 1; done
-$ echo "migrator=$(grep 'logger=migrator '          /tmp/run2_debug.log | grep -c 'Skipping migration: Already executed')"
-$ echo "resource=$(grep 'logger=resource-migrator ' /tmp/run2_debug.log | grep -c 'Skipping migration: Already executed')"
-$ echo "total=$(grep -c 'Skipping migration: Already executed' /tmp/run2_debug.log)"
-$ kill "$PID3"; wait "$PID3" 2>/dev/null
+$ # --- Debug boot: SAME database ($W/data), level=debug — surfaces per-migration skips ---
+$ P3=$(freeport); boot "$P3" debug "$W/boot3.log"; C=$BPID
+$ L="$W/boot3.log"
+$ echo "migrator skips=$(grep 'logger=migrator '          "$L" | grep -c 'Skipping migration: Already executed')" \
+       "resource-migrator skips=$(grep 'logger=resource-migrator ' "$L" | grep -c 'Skipping migration: Already executed')" \
+       "total=$(grep -c 'Skipping migration: Already executed' "$L")"
+$ stop "$C"
 ```
 
 ```text
-migrator=626
-resource=18
-total=644
+migrator skips=626 resource-migrator skips=18 total=644
 ```
 
 So the `644` per-migration skip lines are exactly `626` (from `logger=migrator`) + `18` (from `logger=resource-migrator`), matching the two `skipped=` counters. First three skip lines of the main migrator (verbatim):
 
 ```text
-logger=migrator t=2026-07-14T21:05:33.549818539Z level=debug msg="Skipping migration: Already executed" id="create migration_log table"
-logger=migrator t=2026-07-14T21:05:33.549861665Z level=debug msg="Skipping migration: Already executed" id="create user table"
-logger=migrator t=2026-07-14T21:05:33.549867299Z level=debug msg="Skipping migration: Already executed" id="add unique index user.login"
+logger=migrator t=<ts> level=debug msg="Skipping migration: Already executed" id="create migration_log table"
+logger=migrator t=<ts> level=debug msg="Skipping migration: Already executed" id="create user table"
+logger=migrator t=<ts> level=debug msg="Skipping migration: Already executed" id="add unique index user.login"
 ```
 
 ### Responsible code
@@ -491,23 +559,52 @@ On boot, `(*Migrator).run` iterates its registered migration list. For each migr
 
 ## Q3 — Query the running instance's API to verify build information; report the exact version string
 
-**Direct answer: the running canonical instance reports the version string `11.5.0-pre`.** The exact value is returned identically by `GET /api/health` (`"version": "11.5.0-pre"`), by `GET /api/frontend/settings` (`buildInfo.version = "11.5.0-pre"`, `versionString = "Grafana v11.5.0-pre (b23f15d49d)"`), and by the startup banner (`version=11.5.0-pre`). The value is **build-method dependent**: the canonical build (`make build-backend`, ldflag `-X main.version=11.5.0-pre`) yields `11.5.0-pre`; a bare `go run ./pkg/cmd/grafana` (no ldflags) yields the fallback literal `9.2.0`. The canonical `11.5.0-pre` is the reported answer.
+**Direct answer: the running canonical instance reports the version string `11.5.0-pre`.** The exact value is returned identically by `GET /api/health` (`"version": "11.5.0-pre"`), by `GET /api/frontend/settings` (`buildInfo.version = "11.5.0-pre"`, `versionString = "Grafana v11.5.0-pre (<commit>)"`), and by the startup banner (`version=11.5.0-pre`). The value is **build-method dependent**: the canonical build (`make build-backend`, ldflag `-X main.version=11.5.0-pre`) yields `11.5.0-pre`; a bare `go run ./pkg/cmd/grafana` (no ldflags) yields the fallback literal `9.2.0`. The canonical `11.5.0-pre` is the reported answer.
 
-> Build provenance: the canonical binary was built with the documentation commit `b23f15d49d` as `HEAD` — the commit layered directly on top of the investigated source head `4550cfb5b7` (“Upgrade scenes to v5.32.0”); no source file differs between them (see the Closing Note). Consequently the build injected `main.commit=b23f15d49d`, and the API/banner reported `commit=b23f15d49d`. The **version string** — the subject of this question — is sourced from `package.json` and is `11.5.0-pre` regardless of which of the two commits is checked out.
+> Build provenance: the canonical build injects `main.commit` from the repository `HEAD` at build time. On this checkout `HEAD` is the documentation branch, whose only addition over the investigated source head `4550cfb5b7` (“Upgrade scenes to v5.32.0”) is this answer document — no source file differs (see the Closing Note). The build therefore injected that `HEAD` as `main.commit`, so the API/banner reported it as `commit=<commit>`, **redacted throughout this section** as a volatile, environment-specific build identifier. The **version string** — the subject of this question — is sourced from `package.json` and is `11.5.0-pre` regardless of which commit is checked out.
+
+### Q3 server (Boot D — same migrated `$W/data`)
+
+Q3 queries a canonical server booted on the **same** `$W/data` that Q2 migrated — a **dynamic free port** (`freeport`), its PID captured into the same `PIDS` array (so the `trap` still guarantees teardown), readiness polled on `/api/health`, and the whole `--config conf/defaults.ini` default in force. As everywhere else, exactly **one server runs at a time**: Boot D is the only instance up for these queries and is stopped explicitly before the hide-version contrast boot.
+
+```bash
+$ P4=$(freeport); boot "$P4" info "$W/q3.log"; D=$BPID   # Q3 server on the SAME migrated $W/data
+```
 
 ### `GET /api/health` (public; loopback)
 
 ```bash
-$ curl -s http://127.0.0.1:3000/api/health
+$ curl -s "http://127.0.0.1:$P4/api/health"
 ```
 
 ```json
 {
   "database": "ok",
   "version": "11.5.0-pre",
-  "commit": "b23f15d49d"
+  "commit": "<commit>"
 }
 ```
+
+**Repeated-query stability** — to confirm the reported value is stable across repeated queries rather than a one-shot read, two consecutive `/api/health` requests are captured to files and compared byte-for-byte:
+
+```bash
+$ curl -s "http://127.0.0.1:$P4/api/health" > "$W/health1.json"
+$ curl -s "http://127.0.0.1:$P4/api/health" > "$W/health2.json"
+$ wc -c "$W/health1.json" "$W/health2.json"
+$ cmp -s "$W/health1.json" "$W/health2.json" && echo "health: BYTE-IDENTICAL"
+$ sha256sum "$W/health1.json" "$W/health2.json"
+```
+
+```text
+ 75 /…/health1.json
+ 75 /…/health2.json
+150 total
+health: BYTE-IDENTICAL
+b5f151348bf312ec13ae994d9faf62387610fd27201801222cf852387636a4c7  /…/health1.json
+b5f151348bf312ec13ae994d9faf62387610fd27201801222cf852387636a4c7  /…/health2.json
+```
+
+Both responses are identical (`75` bytes, equal SHA-256). The `75`-byte size and the hash are computed over the **raw** response as returned by the server; its only volatile field — the build `commit` — is shown redacted as `<commit>` in the JSON above (the raw value is a 10-character short SHA, so the redacted body renders two bytes shorter than the raw `75`). The stability result — two consecutive reads are byte-identical — is unaffected by the redaction.
 
 ### `GET /api/frontend/settings` → `buildInfo`
 
@@ -517,7 +614,7 @@ $ curl -s http://127.0.0.1:3000/api/health
 $ export ADMIN_PW=admin                        # default admin password (conf/defaults.ini:331 admin_password = admin)
 $ NETRC="$(mktemp)"
 $ printf 'machine 127.0.0.1 login admin password %s\n' "$ADMIN_PW" > "$NETRC"  # written to the netrc file, not the process table
-$ curl -s --netrc-file "$NETRC" http://127.0.0.1:3000/api/frontend/settings \
+$ curl -s --netrc-file "$NETRC" "http://127.0.0.1:$P4/api/frontend/settings" \
     | python3 -c 'import sys,json;print(json.dumps(json.load(sys.stdin)["buildInfo"],indent=2))'
 $ shred -u "$NETRC"
 ```
@@ -526,10 +623,10 @@ $ shred -u "$NETRC"
 {
   "hideVersion": false,
   "version": "11.5.0-pre",
-  "versionString": "Grafana v11.5.0-pre (b23f15d49d)",
-  "commit": "b23f15d49d",
-  "commitShort": "b23f15d49d",
-  "buildstamp": 1784060137,
+  "versionString": "Grafana v11.5.0-pre (<commit>)",
+  "commit": "<commit>",
+  "commitShort": "<commit>",
+  "buildstamp": 1784092664,
   "edition": "Open Source",
   "latestVersion": "",
   "hasUpdate": false,
@@ -537,13 +634,38 @@ $ shred -u "$NETRC"
 }
 ```
 
+**Repeated-query stability.** The full `/api/frontend/settings` response (not just the `buildInfo` excerpt) is fetched twice and compared byte-for-byte:
+
+```bash
+$ printf 'machine 127.0.0.1 login admin password %s\n' "$ADMIN_PW" > "$NETRC"
+$ curl -s --netrc-file "$NETRC" "http://127.0.0.1:$P4/api/frontend/settings" > "$W/settings1.json"
+$ curl -s --netrc-file "$NETRC" "http://127.0.0.1:$P4/api/frontend/settings" > "$W/settings2.json"
+$ shred -u "$NETRC"
+$ wc -c "$W/settings1.json" "$W/settings2.json"
+$ cmp -s "$W/settings1.json" "$W/settings2.json" && echo "settings: BYTE-IDENTICAL"
+$ sha256sum "$W/settings1.json" "$W/settings2.json"
+```
+
+```text
+ 29749 /…/settings1.json
+ 29749 /…/settings2.json
+ 59498 total
+settings: BYTE-IDENTICAL
+aa98e103b1f8a54e19871cd11908ccfccc3d7de467af4ab1f3a8876db98d6b4b  /…/settings1.json
+aa98e103b1f8a54e19871cd11908ccfccc3d7de467af4ab1f3a8876db98d6b4b  /…/settings2.json
+```
+
+Both full responses are identical (`29749` bytes, equal SHA-256), so `buildInfo.version = "11.5.0-pre"` is stable across repeated queries. (These figures are over the complete raw response; the excerpt above shows only `buildInfo`, with the volatile `commit`/`commitShort`/versionString-suffix redacted to `<commit>`.)
+
 ### Edge conditions (observed at runtime, not inferred)
 
 **Unauthenticated request** to `/api/frontend/settings` returns `401` (anonymous disabled by default):
 
 ```bash
-$ curl -s -i http://127.0.0.1:3000/api/frontend/settings | sed -n '1,6p'
+$ curl -s -i "http://127.0.0.1:$P4/api/frontend/settings"
 ```
+
+Complete response — status line, **all** headers, and the **full JSON body** (the `Date` header is the only redaction, as a volatile wall-clock value):
 
 ```text
 HTTP/1.1 401 Unauthorized
@@ -552,41 +674,52 @@ Content-Type: application/json; charset=UTF-8
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
+Date: <date>
+Content-Length: 102
+
+{"extra":null,"message":"Unauthorized","messageId":"auth.unauthorized","statusCode":401,"traceID":""}
 ```
 
-**Hidden-version** case: starting an instance with `auth.anonymous.hide_version=true` makes `/api/health` omit both `version` and `commit` (the `omitempty` fields are left unset by the `if !hs.Cfg.Anonymous.HideVersion` gate). Observed directly:
-
-```bash
-$ "$BIN" server --homepath "$REPO" cfg:server.http_addr=127.0.0.1 cfg:server.http_port=3007 \
-      cfg:auth.anonymous.enabled=true cfg:auth.anonymous.hide_version=true \
-      cfg:paths.data="$d/data" cfg:paths.logs="$d/logs" cfg:paths.plugins="$d/plugins" > /tmp/run_hide.log 2>&1 &
-$ PID4=$!; PIDS+=("$PID4")                           # hide_version instance — registered for teardown; stopped at end of Q3
-$ for i in $(seq 1 60); do curl -sf -m3 http://127.0.0.1:3007/api/health >/dev/null && break; sleep 1; done  # readiness
-$ curl -s http://127.0.0.1:3007/api/health          # hide_version=true
-{
-  "database": "ok"
-}
-$ curl -s http://127.0.0.1:3000/api/health          # default (hide_version=false) — contrast
-{
-  "database": "ok",
-  "version": "11.5.0-pre",
-  "commit": "b23f15d49d"
-}
-```
+The body is a `102`-byte payload with `"statusCode":401` and `"messageId":"auth.unauthorized"` — the 101-character JSON object shown above plus a single trailing newline, matching the server's `Content-Length: 102` header.
 
 ### `GET /healthz` (bare liveness) and the startup banner
 
+While Boot D is still up, `/healthz` returns the bare liveness string, and the startup banner is read back from Boot D's own log (`$W/q3.log`):
+
 ```bash
-$ curl -s http://127.0.0.1:3000/healthz
+$ curl -s "http://127.0.0.1:$P4/healthz"; echo
 Ok
-$ grep 'msg="Starting Grafana"' /tmp/run1.log
+$ grep 'msg="Starting Grafana"' "$W/q3.log" | sed -E 's/t=[^ ]+/t=<ts>/'
 ```
 
 ```text
-logger=settings t=2026-07-14T21:04:27.477055456Z level=info msg="Starting Grafana" version=11.5.0-pre commit=b23f15d49d branch=<build-branch> compiled=2026-07-14T20:15:37Z
+logger=settings t=<ts> level=info msg="Starting Grafana" version=11.5.0-pre commit=<commit> branch=<build-branch> compiled=<compiled>
 ```
 
 `/healthz` intentionally returns only the literal string `Ok` (no version).
+
+### Hidden-version contrast (`auth.anonymous.hide_version=true`)
+
+Starting an instance with `auth.anonymous.hide_version=true` makes `/api/health` omit both `version` and `commit` (the `omitempty` fields are left unset by the `if !hs.Cfg.Anonymous.HideVersion` gate). Boot D is stopped first (one server at a time), then a contrast server is booted on the **same** `$W/data`:
+
+```bash
+$ stop "$D"                                          # stop the default Q3 server, freeing $W/data for the contrast boot
+$ P5=$(freeport)
+$ timeout 120s "$BIN" server --homepath . --config conf/defaults.ini \
+      cfg:server.http_addr=127.0.0.1 cfg:server.http_port="$P5" \
+      cfg:auth.anonymous.enabled=true cfg:auth.anonymous.hide_version=true \
+      cfg:paths.data="$W/data" cfg:paths.logs="$W/logs" cfg:paths.plugins="$W/plugins" \
+      > "$W/hide.log" 2>&1 &
+$ H=$!; PIDS+=("$H")
+$ for _ in $(seq 1 90); do curl -sf -m3 "http://127.0.0.1:$P5/api/health" >/dev/null 2>&1 && break; sleep 1; done
+$ curl -s "http://127.0.0.1:$P5/api/health"          # hide_version=true
+{
+  "database": "ok"
+}
+$ stop "$H"
+```
+
+Contrast this with the default `/api/health` shown at the top of this section (`version` and `commit` present): under `hide_version=true` both `omitempty` fields drop out, leaving only `"database": "ok"`.
 
 ### Build-method dependency (all demonstrated at runtime)
 
@@ -602,19 +735,18 @@ grafana version 9.2.0
 # (c) DEPRECATED grafana-server shim — prints a deprecation warning, then the version of the re-exec'd binary:
 $ ./bin/linux-amd64/grafana-server --version
 Deprecation warning: The standalone 'grafana-server' program is deprecated and will be removed in the future. Please update all uses of 'grafana-server' to 'grafana server'
-Version 11.5.0-pre (commit: b23f15d49d, branch: <build-branch>)
+Version 11.5.0-pre (commit: <commit>, branch: <build-branch>)
 ```
 
-### Stop the shared instances (end of Q3)
+### End of Q3 — teardown and idempotency
 
-All Q3 queries are complete, so the two instances still running from earlier — the port-3000 first-boot server started in Q2 and the port-3007 hide_version server — are stopped explicitly now. After this, no observation server is left running and the entire Q2→Q3 sequence can be re-run from the top without a stale `bind: address already in use`:
+Every Q2/Q3 boot (`A`, `B`, `C`, the default Q3 server `D`, and the hide-version server `H`) was stopped inline the moment its evidence was captured, so by this point **no observation server is running**. The `trap` is disarmed, the private workspace `$W` is removed, and the absence of any residual loopback listener on the dynamically chosen ports is confirmed. Because `$W` is an unpredictable `mktemp` name and every port was allocated dynamically via `freeport`, the whole Q2→Q3 procedure is idempotent and re-runnable from the top with no stale `bind: address already in use`:
 
 ```bash
-$ kill "$PID4" 2>/dev/null; wait "$PID4" 2>/dev/null   # stop the hide_version instance (port 3007)
-$ kill "$PID"  2>/dev/null; wait "$PID"  2>/dev/null   # stop the shared first-boot instance (port 3000)
-$ trap - EXIT INT TERM                                 # every server is stopped — disarm the cleanup trap
-$ ss -ltn 2>/dev/null | grep -E ':3000|:3005|:3006|:3007' || echo "no Q2/Q3 listeners remain"
+$ trap - EXIT INT TERM                               # every server already stopped — disarm the cleanup trap
+$ ss -ltn 2>/dev/null | grep -E "127\.0\.0\.1:($P1|$P2|$P3|$P4|$P5)\b" || echo "no Q2/Q3 listeners remain"
 no Q2/Q3 listeners remain
+$ rm -rf "$W"                                        # remove the private mktemp workspace (DB, logs, artifacts)
 ```
 
 ### Responsible code
@@ -767,7 +899,7 @@ On the dashboard-view → panel-editor transition the tab activates (`:44`/`:59`
 
 ## Q5 — When the alerting edit view is opened, does the backend's rule definition populate the query state?
 
-**Direct answer: YES.** For an existing Grafana-managed alerting rule, the rule-form conversion populates the form's `queries` state directly from the backend rule definition's `grafana_alert.data`, so opening the edit view carries the full set of queries (all N=3 in the test below) from the backend. New rules, by contrast, start with `queries: []`. One faithful nuance: the edit-view entry point `formValuesFromExistingRule` post-processes the populated queries through `ignoreHiddenQueries`, which strips `model.hide` from any *hidden* query — so while the queries are fully populated, they are **not universally deep-equal** to the raw backend data (hidden queries differ by the removed `hide` flag). Both the ordinary and the hidden-query cases are proven below.
+**Direct answer: YES.** For an existing Grafana-managed alerting rule, the rule-form conversion that runs when the edit view opens populates the form's `queries` state directly from the backend rule definition's `grafana_alert.data`, so the edit-view form state is seeded with the full set of queries (all N=3 in the test below) from the backend. New rules, by contrast, start with `queries: []`. One faithful nuance: the edit-view entry point `formValuesFromExistingRule` post-processes the populated queries through `ignoreHiddenQueries`, which strips `model.hide` from any *hidden* query — so while the queries are fully populated, they are **not universally deep-equal** to the raw backend data (hidden queries differ by the removed `hide` flag). The boundary cases are equally faithful and are proven below: an existing rule whose backend `data` is an empty array yields `queries: []`; an existing rule whose backend `data` is `undefined` passes straight through to `queries: undefined` (no fabrication); and an existing Grafana rule missing the `no_data_state`/`exec_err_state` discriminators throws `Unexpected type of rule for grafana rules source` rather than silently falling back. All of these — the ordinary populated case, the hidden-query normalization, the empty-data and undefined-data boundaries, and the missing-discriminator throw — are proven by the captured test output below. (Whether the seeded query state is subsequently *rendered* in the edit view is addressed, and explicitly labelled as source-inferred, in "Responsible code" and "Cause → effect".)
 
 ### Why a temporary spec was needed
 
@@ -801,9 +933,13 @@ import { RuleFormType } from '../types/rule-form';
 import { GRAFANA_RULES_SOURCE_NAME } from './datasource';
 import { rulerRuleToFormValues, formValuesFromExistingRule, getDefaultFormValues } from './rule-form';
 
-function makeGrafanaAlertingRuleWithLocation(): RuleWithLocation<RulerGrafanaRuleDTO> {
+function makeGrafanaAlertingRuleWithLocation(
+  overrides: Partial<GrafanaRuleDefinition> = {}
+): RuleWithLocation<RulerGrafanaRuleDTO> {
   // A Grafana-managed ALERTING rule: no `record` -> alerting branch; N=3 queries,
-  // the 2nd of which is a HIDDEN query (model.hide === true).
+  // the 2nd of which is a HIDDEN query (model.hide === true). `overrides` lets the
+  // boundary cases below vary a single field (e.g. data, discriminators) while the
+  // no-arg default reproduces the primary N=3 fixture verbatim.
   const ga: GrafanaRuleDefinition = {
     uid: 'rule-uid-1',
     title: 'my alert',
@@ -817,6 +953,7 @@ function makeGrafanaAlertingRuleWithLocation(): RuleWithLocation<RulerGrafanaRul
       { refId: 'B', datasourceUid: 'ds-uid-B', queryType: 'query', model: { refId: 'B', expr: 'down', hide: true } },
       { refId: 'C', datasourceUid: '__expr__', queryType: '', model: { refId: 'C', type: 'classic_conditions' } },
     ],
+    ...overrides,
   };
   const rule: RulerGrafanaRuleDTO = { grafana_alert: ga, annotations: {}, labels: {} };
   return {
@@ -860,12 +997,41 @@ describe('Q5: alert rule-edit query-state population (rulerRuleToFormValues / fo
   it('new rules start with queries: [] (contrast with the populated edit view)', () => {
     expect(getDefaultFormValues().queries).toEqual([]);
   });
+
+  // --- Boundary conditions (Q5 exhaustive coverage) ---
+
+  it('BOUNDARY existing rule with empty backend data yields queries: [] (edit view opens with no queries)', () => {
+    const rwl = makeGrafanaAlertingRuleWithLocation({ data: [] });
+    const form = rulerRuleToFormValues(rwl);
+    expect(form.type).toBe(RuleFormType.grafana);
+    expect(form.queries).toEqual([]);
+    // the edit-view entry point behaves identically for empty data (no fabrication)
+    expect(formValuesFromExistingRule(rwl).queries).toEqual([]);
+  });
+
+  it('BOUNDARY existing rule with undefined backend data passes through as queries: undefined (no fabrication)', () => {
+    const rwl = makeGrafanaAlertingRuleWithLocation({
+      data: undefined as unknown as GrafanaRuleDefinition['data'],
+    });
+    const form = rulerRuleToFormValues(rwl);
+    expect(form.queries).toBeUndefined();
+    // ignoreHiddenQueries uses optional chaining, so the edit-view entry also yields undefined
+    expect(formValuesFromExistingRule(rwl).queries).toBeUndefined();
+  });
+
+  it('BOUNDARY existing rule missing no_data_state/exec_err_state throws (no silent fallback)', () => {
+    const rwl = makeGrafanaAlertingRuleWithLocation({
+      no_data_state: undefined as unknown as GrafanaAlertStateDecision,
+      exec_err_state: undefined as unknown as GrafanaAlertStateDecision,
+    });
+    expect(() => rulerRuleToFormValues(rwl)).toThrow('Unexpected type of rule for grafana rules source');
+  });
 });
 ```
 
 ### Complete, unedited captured output (Jest 29.7.0)
 
-The leading `jest-haste-map` warnings are the same pre-existing monorepo mock warnings shown in Q4 (unchanged repository state):
+The leading `jest-haste-map: duplicate manual mock found` lines are pre-existing monorepo mock-collision warnings (the same set shown in Q4, from the unchanged repository state); the specific collision *pairing order* that `jest-haste-map` prints varies run to run and is not significant. This is the complete, verbatim output of the extended six-test run (three primary cases + three boundary cases):
 
 ```text
 jest-haste-map: duplicate manual mock found: store.navIndex.mock
@@ -877,11 +1043,6 @@ jest-haste-map: duplicate manual mock found: index
   The following files share their name; please delete one of them:
     * <rootDir>/public/app/features/datasources/__mocks__/index.ts
     * <rootDir>/public/app/features/plugins/admin/__mocks__/index.ts
-
-jest-haste-map: duplicate manual mock found: datasource
-  The following files share their name; please delete one of them:
-    * <rootDir>/packages/grafana-prometheus/src/test/__mocks__/datasource.ts
-    * <rootDir>/public/app/plugins/datasource/azuremonitor/__mocks__/datasource.ts
 
 jest-haste-map: duplicate manual mock found: datasource
   The following files share their name; please delete one of them:
@@ -898,16 +1059,24 @@ jest-haste-map: duplicate manual mock found: datasource
     * <rootDir>/public/app/plugins/datasource/influxdb/__mocks__/datasource.ts
     * <rootDir>/public/app/plugins/datasource/loki/__mocks__/datasource.ts
 
-PASS public/app/features/alerting/unified/utils/rule-form.blitzytmp.test.ts (14.575 s)
+jest-haste-map: duplicate manual mock found: datasource
+  The following files share their name; please delete one of them:
+    * <rootDir>/public/app/plugins/datasource/loki/__mocks__/datasource.ts
+    * <rootDir>/packages/grafana-prometheus/src/test/__mocks__/datasource.ts
+
+PASS public/app/features/alerting/unified/utils/rule-form.blitzytmp.test.ts (6.544 s)
   Q5: alert rule-edit query-state population (rulerRuleToFormValues / formValuesFromExistingRule)
-    ✓ rulerRuleToFormValues populates queries verbatim from backend grafana_alert.data (N=3, deep-equal) (3 ms)
+    ✓ rulerRuleToFormValues populates queries verbatim from backend grafana_alert.data (N=3, deep-equal) (4 ms)
     ✓ formValuesFromExistingRule (edit-view entry) still carries all 3 queries but strips model.hide from hidden queries (3 ms)
     ✓ new rules start with queries: [] (contrast with the populated edit view) (1 ms)
+    ✓ BOUNDARY existing rule with empty backend data yields queries: [] (edit view opens with no queries) (1 ms)
+    ✓ BOUNDARY existing rule with undefined backend data passes through as queries: undefined (no fabrication) (1 ms)
+    ✓ BOUNDARY existing rule missing no_data_state/exec_err_state throws (no silent fallback) (13 ms)
 
 Test Suites: 1 passed, 1 total
-Tests:       3 passed, 3 total
+Tests:       6 passed, 6 total
 Snapshots:   0 total
-Time:        16.121 s
+Time:        7.261 s
 Ran all test suites matching /public\/app\/features\/alerting\/unified\/utils\/rule-form.blitzytmp.test.ts/i.
 ```
 
@@ -918,23 +1087,24 @@ Ran all test suites matching /public\/app\/features\/alerting\/unified\/utils\/r
 - `:365` `export function rulerRuleToFormValues(ruleWithLocation: RuleWithLocation): RuleFormValues` — converts a backend rule definition to form values.
 - `:392` `if (ga.no_data_state !== undefined && ga.exec_err_state !== undefined) {` — the Grafana-alerting branch guard.
 - `:402` `queries: ga.data,` — inside that branch, the form's `queries` are set directly from the backend definition's `grafana_alert.data`. (The Grafana *recording*-rule branch sets the same way at `:380`.)
+- `:415` `throw new Error('Unexpected type of rule for grafana rules source');` — the `else` of the discriminator guard: when a Grafana rule carries `grafana_alert` but is missing `no_data_state`/`exec_err_state`, the conversion **throws** here (the missing-discriminator boundary proven above) rather than fabricating a fallback. (The outer `else` at `:418` throws the same message when the rule has no `grafana_alert` at all.)
 - `:909`–`:914` `export const ignoreHiddenQueries = (ruleDefinition: RuleFormValues): RuleFormValues => { return { ...ruleDefinition, queries: ruleDefinition.queries?.map((query) => omit(query, 'model.hide')) }; }` — a block-body arrow (explicit `return`, spanning `:909`–`:914`) that removes `model.hide` from every query; the `omit(query, 'model.hide')` map is at `:912`.
 - `:916`–`:917` `export function formValuesFromExistingRule(rule: RuleWithLocation<RulerRuleDTO>) { return ignoreHiddenQueries(rulerRuleToFormValues(rule)); }` — the edit-view entry point (population + hidden-query normalization).
 - New-rule contrast: `getDefaultFormValues()` (`:87`) sets `queries: []` (`:101`).
 
 **Consumer of the populated form values** — `public/app/features/alerting/unified/components/rule-editor/query-and-alert-condition/QueryAndExpressionsStep.tsx`:
 
-- `:134` `... } = useFormContext<RuleFormValues>();` and `:140` `queries: getValues('queries'),` — the step seeds its initial reducer state from the populated form `queries`, then `:143` `useReducer(queriesAndExpressionsReducer, initialState)` renders them.
+- `:134` `... } = useFormContext<RuleFormValues>();`, `:140` `queries: getValues('queries'),`, and `:143` `useReducer(queriesAndExpressionsReducer, initialState)` — the step reads the populated form `queries` via `getValues('queries')` (`:140`) and uses that as the initial state seeded into its `useReducer` (`:143`). **Inferred from source, not observed at runtime:** this investigation exercised the conversion/population functions in `rule-form.ts` directly (captured above) and did **not** mount `QueryAndExpressionsStep`, so the subsequent *visual rendering* of the seeded `queries` in the edit view is a source-trace of the consuming component, not a captured render assertion.
 
 ### Cause → effect
 
-When the edit view opens for an existing Grafana-managed rule, `formValuesFromExistingRule` (`:916`) calls `rulerRuleToFormValues` (`:365`), whose Grafana-alerting branch assigns `queries: ga.data` (`:402`) — copying the backend definition's query array into the form. `formValuesFromExistingRule` then passes the result through `ignoreHiddenQueries` (`:909`), which maps each query through `omit(query, 'model.hide')`, stripping the `hide` flag from hidden queries (the backend runs hidden queries regardless, so the editor removes the flag to avoid confusion). `QueryAndExpressionsStep` seeds its reducer from `getValues('queries')` (`:140`) and renders them, so the edit view shows the backend's queries — fully populated, with hidden queries' `hide` flag normalized away. For a new rule the form instead starts from `getDefaultFormValues()` with `queries: []` (`:101`), which is why the populated state is specific to editing an existing rule.
+When the edit view opens for an existing Grafana-managed rule, `formValuesFromExistingRule` (`:916`) calls `rulerRuleToFormValues` (`:365`), whose Grafana-alerting branch assigns `queries: ga.data` (`:402`) — copying the backend definition's query array into the form. `formValuesFromExistingRule` then passes the result through `ignoreHiddenQueries` (`:909`), which maps each query through `omit(query, 'model.hide')`, stripping the `hide` flag from hidden queries (the backend runs hidden queries regardless, so the editor removes the flag to avoid confusion). `QueryAndExpressionsStep` reads those form values via `getValues('queries')` (`:140`) and seeds its `useReducer` initial state with them (`:143`); by source inspection (not a runtime render test — see the "Inferred from source" note above) the edit view then renders that seeded state, so the edit view opens with the backend's queries — fully populated, with hidden queries' `hide` flag normalized away. For a new rule the form instead starts from `getDefaultFormValues()` with `queries: []` (`:101`), which is why the populated state is specific to editing an existing rule.
 
 ---
 
 ## Closing Note — read-only integrity and cleanup
 
-This investigation is read-only with respect to existing source; the only tracked change is this document. The verification uses **stable facts only** — a specific branch-head SHA and the document's own diff line-count are intentionally omitted, because both change every time this document is committed. For the same reason, two environment-internal values that appear in the captured build/banner output are shown as neutral placeholders rather than literal values: the build-host Go module-cache path as `$GOPATH` and the agent build-branch identifier as `<build-branch>` (the canonical build injects the current git branch via `-X main.buildBranch`, and the startup banner echoes it). Neither is required by any answer, and the version signal `11.5.0-pre` is unaffected:
+This investigation is read-only with respect to existing source; the only tracked change is this document. The verification uses **stable facts only** — a specific branch-head SHA and the document's own diff line-count are intentionally omitted, because both change every time this document is committed. For the same reason, the environment-internal and volatile per-build values that appear in the captured build/banner/API output are shown as neutral placeholders rather than literal values: the build-host Go module-cache path as `$GOPATH`; the agent build-branch identifier as `<build-branch>` (the canonical build injects the current git branch via `-X main.buildBranch`, and the startup banner echoes it); and the per-build identifiers that change on every rebuild — the commit SHA as `<commit>`, the build stamp as `<buildstamp>`, the compile time as `<compiled>`, and the package iteration as `<iteration>`. None of these is required by any answer, and the version signal `11.5.0-pre` (fixed in `package.json:6`) is unaffected:
 
 ```bash
 $ git status --porcelain
