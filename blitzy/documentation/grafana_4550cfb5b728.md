@@ -58,7 +58,7 @@ wire: github.com/grafana/grafana/pkg/server: wrote /…/pkg/server/wire_gen.go
 real	0m32.179s
 ```
 
-The canonical backend build (bounded with an explicit timeout, output captured in full). The scratch directory `/tmp/gfinv` — used here for the build log and later for every server-run log — is created first so all `>`/`tee` redirects below succeed in a fresh shell (it lives under `/tmp`, off the git tree):
+The canonical backend build (bounded with an explicit timeout). Its output is reproduced essentially verbatim below; two non-required, environment-internal values in the captured output are shown as neutral placeholders — the build-host Go module-cache path as `$GOPATH` and the agent build-branch identifier as `<build-branch>` — for the same reason this document omits the volatile branch-head SHA and diff line-count (see the Closing Note). Neither placeholder affects any answer: the version signal `main.version=11.5.0-pre` and the ldflags mechanism remain intact. The scratch directory `/tmp/gfinv` — used here for the build log and later for every server-run log — is created first so all `>`/`tee` redirects below succeed in a fresh shell (it lives under `/tmp`, off the git tree):
 
 ```bash
 $ mkdir -p /tmp/gfinv                                # scratch dir for build/run logs (off the git tree; created before first use)
@@ -68,11 +68,11 @@ go run build.go    build-backend
 Version: 11.5.0, Linux Version: 11.5.0, Package Iteration: 1784062851pre
 rm -r dist
 rm -r tmp
-rm -r /root/go/pkg/linux_amd64/github.com/grafana
+rm -r $GOPATH/pkg/linux_amd64/github.com/grafana
 building grafana ./pkg/cmd/grafana
 rm -r ./bin/linux-amd64/grafana
 rm -r ./bin/linux-amd64/grafana.md5
-go build -ldflags -w -X main.version=11.5.0-pre -X main.commit=b23f15d49d -X main.buildstamp=1784060137 -X main.buildBranch=blitzy-bd7c52bb-ddb1-4334-9ff1-3439b97e50cf -o ./bin/linux-amd64/grafana ./pkg/cmd/grafana
+go build -ldflags -w -X main.version=11.5.0-pre -X main.commit=b23f15d49d -X main.buildstamp=1784060137 -X main.buildBranch=<build-branch> -o ./bin/linux-amd64/grafana ./pkg/cmd/grafana
 go version
 go version go1.23.1 linux/amd64
 Targeting linux/amd64
@@ -583,7 +583,7 @@ $ grep 'msg="Starting Grafana"' /tmp/run1.log
 ```
 
 ```text
-logger=settings t=2026-07-14T21:04:27.477055456Z level=info msg="Starting Grafana" version=11.5.0-pre commit=b23f15d49d branch=blitzy-bd7c52bb-ddb1-4334-9ff1-3439b97e50cf compiled=2026-07-14T20:15:37Z
+logger=settings t=2026-07-14T21:04:27.477055456Z level=info msg="Starting Grafana" version=11.5.0-pre commit=b23f15d49d branch=<build-branch> compiled=2026-07-14T20:15:37Z
 ```
 
 `/healthz` intentionally returns only the literal string `Ok` (no version).
@@ -602,7 +602,7 @@ grafana version 9.2.0
 # (c) DEPRECATED grafana-server shim — prints a deprecation warning, then the version of the re-exec'd binary:
 $ ./bin/linux-amd64/grafana-server --version
 Deprecation warning: The standalone 'grafana-server' program is deprecated and will be removed in the future. Please update all uses of 'grafana-server' to 'grafana server'
-Version 11.5.0-pre (commit: b23f15d49d, branch: blitzy-bd7c52bb-ddb1-4334-9ff1-3439b97e50cf)
+Version 11.5.0-pre (commit: b23f15d49d, branch: <build-branch>)
 ```
 
 ### Stop the shared instances (end of Q3)
@@ -934,7 +934,7 @@ When the edit view opens for an existing Grafana-managed rule, `formValuesFromEx
 
 ## Closing Note — read-only integrity and cleanup
 
-This investigation is read-only with respect to existing source; the only tracked change is this document. The verification uses **stable facts only** — a specific branch-head SHA and the document's own diff line-count are intentionally omitted, because both change every time this document is committed:
+This investigation is read-only with respect to existing source; the only tracked change is this document. The verification uses **stable facts only** — a specific branch-head SHA and the document's own diff line-count are intentionally omitted, because both change every time this document is committed. For the same reason, two environment-internal values that appear in the captured build/banner output are shown as neutral placeholders rather than literal values: the build-host Go module-cache path as `$GOPATH` and the agent build-branch identifier as `<build-branch>` (the canonical build injects the current git branch via `-X main.buildBranch`, and the startup banner echoes it). Neither is required by any answer, and the version signal `11.5.0-pre` is unaffected:
 
 ```bash
 $ git status --porcelain
