@@ -137,7 +137,7 @@ $ git -C <REPO_ROOT> status --ignored --short  # empty → no stray ignored runt
 
 ### The observed boot sequence (Run 1, first run) — raw head, verbatim
 
-This is the unedited head of the captured `run1_console.log` (1354 lines total), shown with timestamps intact to demonstrate it is real output:
+This is the unedited head of the captured `run1_console.log` (≈1354 lines total — a **run-specific** count that varies slightly with async background-service timing; see the [run-specific note in §7](#7-first-run-vs-subsequent-runs)), shown with timestamps intact to demonstrate it is real output:
 
 ```
 Grafana server is running with elevated privileges. This is not recommended
@@ -253,6 +253,17 @@ func IsDisabled(srv BackgroundService) bool {
 
 **Key consequence:** when a service is disabled, the loop simply `continue`s — it prints **nothing**. There is **no per-service "disabled" log line** at clean-state startup (this was *not* observed, and the code confirms none is emitted). So the impression that "some services report they are 'disabled' or 'skipped'" is a misreading: disabled services are invisible, while enabled services that *choose* to log their own init (e.g. the MultiOrg Alertmanager, the alerting scheduler, the update checkers) produce the "success"-looking lines. The asymmetry is in **who logs**, not in success-vs-failure.
 
+Concretely, several *enabled* background services logged their own initialization in the captured run — these are the "success"-looking lines, not disable reports. Observed examples (from `run1_console.log`, timestamps elided):
+
+```
+logger=live.push_http level=info msg="Live Push Gateway initialization"
+logger=infra.usagestats.collector level=info msg="registering usage stat providers" usageStatsProvidersLen=2
+logger=infra.usagestats level=info msg="Usage stats are ready to report"
+logger=plugin.angulardetectorsprovider.dynamic level=info msg="Restored cache from database" duration=197.112µs
+```
+
+Each is an enabled service announcing itself; none is a disabled service, and none prints a "disabled"/"skipping service" line — consistent with the silent-skip mechanism above.
+
 Server initialization itself (before the background-service loop) runs in `Server.Init` (`pkg/server/server.go:L113`): it writes the PID file, registers fixed RBAC roles, and calls `RunInitProvisioners` at `pkg/server/server.go:L134`. That provisioner (`pkg/services/provisioning/provisioning.go:L169`) runs in a fixed order — **data sources first** (`ProvisionDatasources`, `:L170`), **then plugins** (`ProvisionPlugins`, `:L176`), **then alerting** (`ProvisionAlerting`, `:L182`) — after which `Run` enters the loop above.
 
 ### The genuinely observed anomalies (explained, not fixed)
@@ -263,11 +274,20 @@ These are real lines from the log and are the actual "not-success" reports — e
 - **`failed to register storage metrics … duplicate metrics collector registration attempted`** — a `warn`, emitted **3×** by `logger=resource-server` (raw lines 1341–1343 above). In the observed run it was **non-fatal**: the server continued, `app registry initialized` was logged immediately afterward, and all API probes succeeded. Whether any individual collector/metric was *dropped* by the duplicate registration was not separately measured, so the stronger claim "benign, nothing lost" would be **(inferred)**; what is *observed* is that it did not stop startup.
 - **`Failed to install plugin pluginId=grafana-lokiexplore-app … not compatible with your Grafana version: 9.2.0`** — the remote **preinstall** attempt fails the version-compatibility check. The version it cites (`9.2.0`) is the **(non-canonical)** stamp. Full mechanism in [§5](#5-plugin-and-data-source-bootstrap).
 - **`Config overridden from command line`** — appeared **3×**, one per `cfg:paths.*` override passed (`paths.data`, `paths.logs`, `paths.plugins`).
-- **`Update check succeeded`** — appeared **2×** (a Grafana core check and a plugins check). These succeeded because this environment had internet access. **(inferred)** In a fully offline environment those two checks would instead fail/time out; that offline outcome was **not** observed here.
+- **`Update check succeeded`** — appeared **2×**, from **two distinct loggers**: `logger=grafana.update.checker` (the Grafana core check, `pkg/services/updatechecker/grafana.go:L38`) and `logger=plugins.update.checker` (the plugins check, `pkg/services/updatechecker/plugins.go:L39`). These succeeded because this environment had internet access. **(inferred)** In a fully offline environment those two checks would instead fail/time out; that offline outcome was **not** observed here.
+- **`Skipping migration: Already executed, but not recorded in migration log`** (`logger=migrator level=warn`) — appeared **3×** on the first run, in **both** the console and the `grafana.log` file sink. This is a genuine *"skipped"*-style report — precisely the kind of line the original question was about — so it is called out explicitly rather than folded into the migration summary. It is emitted by the conditional-migration path in the migrator (`pkg/services/sqlstore/migrator/migrator.go:L371`): a migration that carries a `MigrationCondition` runs its condition SQL first, and if the condition is **not** fulfilled the migrator logs this warn and skips that migration's DDL (`return nil`). The three migrations that trip it on a fresh DB are all conditional "drop index if exists" migrations built by `NewDropIndexMigration` (`pkg/services/sqlstore/migrator/migrations.go:L173-L175`), which attaches an `IfIndexExistsCondition` (`pkg/services/sqlstore/migrator/conditions.go:L20-L26`) — on a brand-new database the target index was never created, so there is nothing to drop and the DDL is skipped. Observed verbatim (timestamps elided):
+
+```
+logger=migrator level=warn msg="Skipping migration: Already executed, but not recorded in migration log" id="drop unique orgID index on alert_configuration if exists"
+logger=migrator level=warn msg="Skipping migration: Already executed, but not recorded in migration log" id="drop index UQE_dashboard_public_config_uid - v1"
+logger=migrator level=warn msg="Skipping migration: Already executed, but not recorded in migration log" id="drop index IDX_dashboard_public_config_org_id_dashboard_uid - v1"
+```
+
+  Despite the wording, this warn does **not** contradict the `migrations completed performed=626 skipped=0` line and is **not** a re-run signal: each of these three migrations is still *counted as performed* and **is** recorded in `migration_log` (verified by querying the seeded database — all three `migration_id`s are present). Only the individual DDL statement *inside* the migration is skipped, because the index it would drop does not exist on a fresh install. Consistently, this warn appears **only on the first run** — on a subsequent run against the same data dir the migrator reports `performed=0 skipped=626` and does not re-execute these conditionals, so the warn does **not** reappear (see [§7](#7-first-run-vs-subsequent-runs)). The first example `id` maps to `pkg/services/sqlstore/migrations/ualert/tables.go:L502` (`NewDropIndexMigration` on `alert_configuration`).
 
 ### Honesty note — lines the original brief anticipated but that did NOT appear
 
-The original task brief anticipated a **"missing image renderer"** line and an **"empty external-plugins path"** line at clean-state startup. **Neither was observed** in the captured log (a full-text search of `run1_console.log` returns no such lines). They are therefore **not** claimed here. The actual observed startup anomalies are exactly the five bullets above.
+The original task brief anticipated a **"missing image renderer"** line and an **"empty external-plugins path"** line at clean-state startup. **Neither was observed** in the captured log (a full-text search of `run1_console.log` returns no such lines). They are therefore **not** claimed here. The actual observed startup anomalies are the six bullets above — the five `error`/`warn`/override reports plus the migrator conditional-DDL "Skipping migration" warn (the last is benign and first-run-only, as explained). Aside from these, an exhaustive scan of the first-run log for `level=error`/`level=warn` messages surfaced no other distinct anomaly types.
 
 ---
 
@@ -309,7 +329,7 @@ drwxr-xr-x 5 root root 4096 Jul 14 20:31 ..      # empty — no external plugins
 
 - **`grafana.db`** (1,093,632 bytes) — the SQLite database and the **only behavior-driving** state. Its engine comes from the default config: `conf/defaults.ini` `[database] type = sqlite3`. The startup log's `Connecting to DB dbtype=sqlite3` and `Creating SQLite database file path=…/grafana.db` (see [§1](#1-initialization-ground-truth)) confirm both engine and path.
 - **`csv/`, `pdf/`, `png/`** — scratch directories created empty (used later for rendered/exported artifacts; nothing exists on a fresh install). Persisted, but non-behavioral.
-- **`grafana.log`** (198,321 bytes) — a file sink written *in addition* to the console, because the default log mode is **`console file`** (`conf/defaults.ini:L1071`, inside the `[log]` section at `conf/defaults.ini:L1068`). The default path roots come from the `[paths]` block: `data = data` (`conf/defaults.ini:L15`) and `logs = data/log` (`conf/defaults.ini:L21`) — both redirected outside the repo in this run via `cfg:` overrides. Persisted, but non-behavioral.
+- **`grafana.log`** (198,321 bytes *in this run* — a **run-specific** snapshot; the exact size grows with log verbosity and how long the process ran before it was stopped, so independent runs differ by a few hundred bytes) — a file sink written *in addition* to the console, because the default log mode is **`console file`** (`conf/defaults.ini:L1071`, inside the `[log]` section at `conf/defaults.ini:L1068`). The default path roots come from the `[paths]` block: `data = data` (`conf/defaults.ini:L15`) and `logs = data/log` (`conf/defaults.ini:L21`) — both redirected outside the repo in this run via `cfg:` overrides. Persisted, but non-behavioral.
 - **`plugins/`** — empty; on a fresh install nothing is discovered here (see [§5](#5-plugin-and-data-source-bootstrap)).
 
 ### The database contents after the first run — exact command + output (Python `sqlite3`, since the `sqlite3` CLI is not installed)
@@ -515,11 +535,13 @@ $ curl -s -u admin:admin 'http://localhost:3000/api/plugins?type=app'
 
 ### The three tiers of the plugin ecosystem (and where each is loaded from)
 
-The plugin sources are registered by `Service.List()` at `pkg/plugins/manager/sources/sources.go:L24`, which builds exactly three kinds of source:
+The plugin sources are registered by `Service.List()` at `pkg/plugins/manager/sources/sources.go:L24`, which produces sources in **three plugin classes** — `ClassCore`, `ClassBundled`, and `ClassExternal`. (Mechanically it makes *four* builder calls: two inline `NewLocalSource(...)` for core/bundled at `:L26`/`:L27`, then it appends `externalPluginSources()` at `:L29` and `pluginSettingSources()` at `:L30`; the last two both yield the **same** `ClassExternal` class, so there are still only three classes — see the note under item 3.)
 
 1. **Shipped core (what you see).** `NewLocalSource(plugins.ClassCore, corePluginPaths(s.cfg.StaticRootPath))` at `pkg/plugins/manager/sources/sources.go:L26`. `corePluginPaths` (`:L63-L67`) resolves to two **filesystem** directories — `<StaticRootPath>/app/plugins/datasource` and `<StaticRootPath>/app/plugins/panel`. `StaticRootPath` is a config-derived filesystem path (`pkg/setting/setting.go:L103`, set at `:L1868` via `makeAbsolute(staticRoot, cfg.HomePath)`). So core plugins are **read from disk under the static root**, not embedded in the binary; `signature: internal` denotes their *core trust class*, not binary embedding. They are loaded by the plugin store, which logs `"Loading plugins..."` at `pkg/services/pluginsintegration/pluginstore/store.go:L38` and `"Plugins loaded"` with `count`/`duration` at `:L50` — observed as `Plugins loaded count=54`.
 2. **Bundled (a distinct path).** `NewLocalSource(plugins.ClassBundled, []string{s.cfg.BundledPluginsPath})` at `pkg/plugins/manager/sources/sources.go:L27` — the `BundledPluginsPath`. This is separate from both the core static-root path and the external plugins path. None were present in this run.
-3. **External / disk-discovered.** `DirAsLocalSources(s.cfg.PluginsPath, plugins.ClassExternal)` at `pkg/plugins/manager/sources/sources.go:L35`; the discovery routine is `DirAsLocalSources` at `pkg/plugins/manager/sources/source_local_disk.go:L44-L70` (it returns an error if the path is unset, else scans the directory). On this fresh install the plugins directory (`cfg:paths.plugins=<TMP>/state_A/plugins`) is **empty**, so **no** external plugins are discovered.
+3. **External (`ClassExternal`).** This class is built by **two** appended builders, both of which produce `ClassExternal` sources:
+   - **Disk-discovered.** `externalPluginSources()` (`pkg/plugins/manager/sources/sources.go:L29`) calls `DirAsLocalSources(s.cfg.PluginsPath, plugins.ClassExternal)` at `:L35`; the discovery routine is `DirAsLocalSources` at `pkg/plugins/manager/sources/source_local_disk.go:L44-L70` (it returns an error if the path is unset, else scans the directory). On this fresh install the plugins directory (`cfg:paths.plugins=<TMP>/state_A/plugins`) is **empty**, so **no** external plugins are discovered.
+   - **Plugin-settings paths.** `pluginSettingSources()` (`pkg/plugins/manager/sources/sources.go:L30`, defined at `:L49-L57`) turns any `[plugin.<id>] path = …` settings into additional `ClassExternal` sources. On a clean install there are **no** `PluginSettings` configured, so this builder returns an **empty** list and contributes nothing. It is called out here for completeness; because it maps to the already-counted `ClassExternal` class and yields zero on a fresh instance, it does **not** change the 54-loaded / 49-API counts.
 4. **Remote preinstall** (a fourth, network path). A background installer attempts to fetch a preinstalled plugin from the remote catalog — `pkg/services/pluginsintegration/plugininstaller/service.go` (`installPlugins` at `:L137`, logging `"Installing plugin"` at `:L160` and `"Failed to install plugin"` at `:L175`, driven from `Run` at `:L187`). On a fresh install it tries `grafana-lokiexplore-app` and **fails** the compatibility check (below).
 
 ### Where the `grafana-lokiexplore-app` preinstall actually comes from
@@ -611,7 +633,9 @@ Both the built binary and `go run` report the same `grafana version 9.2.0` — t
 | admin/org seed | `Created default admin` + `Created default organization` | (none) |
 | plugins loaded | `count=54` | `count=54` |
 | version | `9.2.0` / `NA` **(non-canonical)** | `9.2.0` / `NA` **(non-canonical)** |
-| startup log size | 1354 lines | 62 lines |
+| startup log line count *(run-specific — see note)* | ≈1354 lines | ≈62 lines |
+
+> **Note (run-specific value).** The startup **log line count** is **not** a deterministic constant — it varies run-to-run because several background services log asynchronously, and the total also depends on exactly when the process is stopped (a graceful shutdown flushes a few extra lines). The captured sample here was **1354** (first run) / **62** (subsequent run); independent re-runs of the identical command clustered around **≈1,350–1,360** (first run) and **≈58–62** (subsequent), varying by a handful of lines. What **is** stable and behavioral is the **order-of-magnitude difference** — a first run produces ~20×+ more log lines than a subsequent run, because the first run additionally logs database creation, all 626 (+18) migrations, and admin/org seeding. Treat the exact counts as illustrative, not as fixed invariants.
 
 ### Observed: the subsequent run (Run 2, SAME data dir) — before/after + key lines
 
@@ -749,6 +773,7 @@ The only change reported (tracked or ignored) is this documentation file; the ge
 
 - The full boot sequence and its key log lines (raw excerpts in [§1](#1-initialization-ground-truth)); `app mode = production`; config loaded from `conf/defaults.ini`.
 - The 6 `Adding GroupVersion` API-group registrations and the 3× duplicate-metrics warning (raw tail in [§1](#1-initialization-ground-truth)); the run continued and `app registry initialized` was logged.
+- The migrator `Skipping migration: Already executed, but not recorded in migration log` warn — **3×** on the first run in **both** sinks, from conditional "drop index if exists" migrations on a fresh DB; each such migration is still recorded in `migration_log` (so `performed=626 skipped=0` is unaffected), and the warn does not reappear on a subsequent run ([§1](#1-initialization-ground-truth)).
 - 56 default-on feature toggles (full line + `wc -l` count in [§4](#4-api-feature-enablement)); identical 56-set across runs, differing only in print order.
 - SQLite `grafana.db` created on first run; 626 migrations performed; 18 resource migrations; 76 tables; seeded admin/org rows; empty `data/{png,pdf,csv}` dirs; `logs/grafana.log` (file sizes shown in [§2](#2-persistent-state-what-and-where)).
 - `POST /login` success (200 + session cookie), `/api/login/ping`, `/api/user` (single super-admin, org 1, `uid` matches DB).
@@ -784,6 +809,8 @@ The only change reported (tracked or ignored) is this documentation file; the ge
 | Wire git-ignore + build | `.gitignore:L194`; `Makefile:L5`, `:L166-L169` (`gen-go`), `:L187` (`build-go`), `:L191` (`build-go-fast`) |
 | SQLite / paths / log | `conf/defaults.ini` `[database] type = sqlite3`; `[paths]` data `:L15` / logs `:L21` / plugins `:L24` / provisioning `:L27`; `[log]` `:L1068`, `mode` `:L1071`; `http_port` `:L41` |
 | Migrations | `pkg/services/sqlstore/migrations/migrations.go:L31` |
+| Migrator conditional-DDL "Skipping migration" warn | `pkg/services/sqlstore/migrator/migrator.go:L371` (warn), `:L358-L372` (condition path); `pkg/services/sqlstore/migrator/migrations.go:L173-L175` (`NewDropIndexMigration`); `pkg/services/sqlstore/migrator/conditions.go:L20-L26` (`IfIndexExistsCondition`); example id `pkg/services/sqlstore/migrations/ualert/tables.go:L502` |
+| Update checkers (2 loggers) | `pkg/services/updatechecker/grafana.go:L38` (`grafana.update.checker`), `pkg/services/updatechecker/plugins.go:L39` (`plugins.update.checker`) |
 | Admin/org seeding | `pkg/services/sqlstore/sqlstore.go:L158`, `:L190`, `:L214`, `:L222`, `:L230` |
 | Random admin `uid` | `pkg/services/sqlstore/user.go:L67` (`util.GenerateShortUID()`) |
 | Envelope encryption log | `pkg/services/secrets/manager/manager.go:L103` |
@@ -794,7 +821,7 @@ The only change reported (tracked or ignored) is this documentation file; the ge
 | Health handler | `pkg/api/http_server.go:L634` (`m.Use`), `:L703-L709` (doc), `:L710` (`apiHealthHandler`), `:L717` (`Database:"ok"`), `:L719` (`HideVersion`); `pkg/api/health.go:L10` (`databaseHealthy`) |
 | Feature toggles | `pkg/services/featuremgmt/registry.go:L20` (56 `Expression:"true"`) |
 | Plugin load logs | `pkg/services/pluginsintegration/pluginstore/store.go:L38`, `:L50` |
-| Plugin sources (core/bundled/external) | `pkg/plugins/manager/sources/sources.go:L24` (`List`), `:L26` (core), `:L27` (bundled), `:L35` (external), `:L63-L67` (`corePluginPaths`) |
+| Plugin sources (core/bundled/external) | `pkg/plugins/manager/sources/sources.go:L24` (`List`), `:L26` (core), `:L27` (bundled), `:L29` (`externalPluginSources`), `:L30` (`pluginSettingSources` call), `:L35` (disk `DirAsLocalSources`), `:L49-L57` (`pluginSettingSources` def), `:L63-L67` (`corePluginPaths`) |
 | Core static-root path | `pkg/setting/setting.go:L103` (`StaticRootPath`), `:L1868` (resolved) |
 | External disk discovery | `pkg/plugins/manager/sources/source_local_disk.go:L44-L70` (`DirAsLocalSources`) |
 | Remote preinstall | `pkg/services/pluginsintegration/plugininstaller/service.go:L137` (`installPlugins`), `:L160`, `:L175`, `:L187`; origin `pkg/setting/setting_plugins.go:L30`, `:L32`, `:L77`; empty ini key `conf/defaults.ini:L1766` |
