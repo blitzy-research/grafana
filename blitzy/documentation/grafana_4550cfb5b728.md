@@ -15,7 +15,7 @@
 | Canonical browser entry point | `POST /api/ds/query?ds_type=grafana-testdata-datasource&requestId=SQR…` |
 | Frontend query origin (observed) | `@grafana/scenes` **`SceneQueryRunner`** → `runRequest` → `DataSourceWithBackend` → `BackendSrv` (request id prefix **`SQR`**) |
 | Method | Runtime observation only (Chrome DevTools network capture + debug server logs + Prometheus scrape + `curl` header supplement). **No source code modified.** |
-| Repeated-execution verdict | **Sequential:** second execution is re-run end-to-end, identical request bytes, *different* response body, no cache. **Concurrent (overlapping):** behaviour depends on the UI affordance — the toolbar Refresh button **cancels** the in-flight request in the browser (issuing no new query), while the `d r` shortcut fires an **additional** concurrent query; either way the backend runs every dispatched query independently to `200` (no server-side cancel/dedup/cache). Server-side query caching (`X-Cache: HIT`) is Enterprise/Cloud-only and **absent** here. |
+| Repeated-execution verdict | **Sequential:** second execution is re-run end-to-end, identical request bytes, *different* response body, no cache. **Concurrent (overlapping):** re-firing while the first is still in flight **client-aborts** the in-flight request either way (`net::ERR_ABORTED`) — the toolbar Refresh button cancels it and issues **no** new query, while the `d r` shortcut aborts it **and** starts a new one; the backend still runs every *dispatched* query independently to `200` (a client abort never stops server execution — the aborted request's response write simply fails with a `broken pipe`; no server-side cancel/dedup/cache). Server-side query caching (`X-Cache: HIT`) is Enterprise/Cloud-only and **absent** here. |
 
 ---
 
@@ -47,11 +47,13 @@
     no dedup, no `304`.
   - **Concurrently (second fired while the first is still in flight):** it depends on **how**
     the query is re-fired, and either way the difference is **on the client, not the server.**
-    Using the toolbar **Refresh button** while a query runs **cancels** the in-flight request
-    in the browser (the button is literally labelled "Cancel") and issues **no** new query;
-    using the **`d r` keyboard shortcut** fires an **additional** concurrent query. In both
-    cases the backend runs every dispatched query independently to `status=200` — no
-    server-side cancel, dedup, or cache (§5.3).
+    **Both** affordances client-abort the in-flight request (observed as `net::ERR_ABORTED`
+    in DevTools): the toolbar **Refresh button** while a query runs **cancels** it
+    (the button is literally labelled "Cancel") and issues **no** new query, whereas the
+    **`d r` keyboard shortcut** aborts it **and** immediately starts a new query (a *replace*).
+    In both cases the backend still runs every *dispatched* query independently to
+    `status=200` — a client abort never stops server execution; the aborted request's
+    response write just fails with a `broken pipe`. No server-side cancel, dedup, or cache (§5.3).
   - Differential *server-side* treatment (a cache `HIT` with a TTL) exists only in Grafana
     Enterprise/Cloud — **[INFERRED]**, and confirmed absent on this OSS build (no `X-Cache`).
 
@@ -780,8 +782,10 @@ Binding failures (malformed/empty body) short-circuit earlier in the handler and
 
 ### 4.2 Response headers (observed — complete set)
 
-The complete, unedited response-header set on the `SQR101` success (DevTools `reqid=195`),
-identical to the raw bytes returned by the labelled `curl` supplement:
+The complete, unedited response-header set on the `SQR101` success (DevTools `reqid=195`). The
+labelled `curl` supplement returns the identical header *set* (same names, same values) — the
+sole per-response field is `Date`, which for any given response equals that response's own
+completion instant (an invariant verified across repeated captures; see the note below):
 
 ```text
 HTTP/1.1 200 OK
@@ -790,11 +794,15 @@ Content-Type: application/json
 X-Content-Type-Options: nosniff
 X-Frame-Options: deny
 X-Xss-Protection: 1; mode=block
-Date: Wed, 15 Jul 2026 12:40:37 GMT
+Date: Wed, 15 Jul 2026 12:35:54 GMT
 Transfer-Encoding: chunked
 ```
 
-Every header above was present on the response; there are **no others**. `Cache-Control:
+Every header above was present on the response; there are **no others**. The `Date` value
+(`12:35:54 GMT`) is the second at which this response completed — it matches the `SQR101`
+backend access-log completion `t=2026-07-15T12:35:54.601Z` recorded in §3.4 exactly (Grafana
+sets `Date` at write time, so its second equals the request's completion second; verified as a
+stable invariant across repeated browser and `curl` captures). `Cache-Control:
 no-store` means the browser does not transparently cache the result either, and the
 **absence of any `X-Cache` header** (and of any `traceparent`/trace-correlation header) is
 the first direct signal that no server-side query cache is in play (developed fully in §5).
@@ -984,16 +992,24 @@ The "twice in quick succession" question has a second, concurrent form: re-fire 
 *while the first is still in flight*. Doing this through the real UI surfaced a distinction
 the earlier draft got wrong: **the toolbar Refresh button and the `d r` keyboard shortcut do
 not do the same thing** when a query is already running. Both were exercised on the live
-dashboard, each reproduced at least twice.
+dashboard, each reproduced at least twice. Because a visible overlap requires a long-running
+query, this concurrent scenario used a dedicated single-panel TestData dashboard (`qadroverlap`,
+datasource `TestDataQA`, uid `afs75lk7lhaf4e`) whose panel runs the `slow_query` scenario —
+which is why the request ids, datasource uid, and timestamps captured below differ from the
+fast `random_walk` captures in §5.2 (the sequential case does not need a delay). The behaviour
+under study — client abort vs. server completion — is independent of these labels.
 
-**How the overlap was widened (canonical, published-safe).** TestData exposes no server-side
-delay knob usable from a plain panel query (`grep`-verified: the only slow path is the
-`slow_query` *scenario kind* at `pkg/tsdb/grafana-testdata-datasource/scenarios.go:76`, not a
-per-panel switch). So instead the panel was set to a large **100-series `random_walk`** whose
-~4.6 MB response takes tens of seconds to stream under browser network throttling
-(Chrome DevTools "Fast 4G"/"Slow 3G"). Payload size + throttling widens the in-flight window
-using only supported user actions — no private module registry was probed and no `window.__…`
-internal handle was injected.
+**How the overlap was widened (canonical, published-safe).** The in-flight window was widened
+using the built-in TestData **`slow_query` scenario**, which is a genuine *per-panel*
+server-side delay knob: it is registered at
+`pkg/tsdb/grafana-testdata-datasource/scenarios.go:76-79` (scenario id `slow_query`, default
+`stringInput` `"5s"`) and its handler `handleRandomWalkSlowScenario` (`:405-423`) performs a
+real `time.Sleep(parsedInterval)` before building the frame. The panel's query was set to the
+**Slow Query** scenario with `stringInput=25s` — verified server-side (a 5 s setting returns
+in `total_time≈5.015 s`; the 25 s setting shows backend `duration≈25.0 s` in the access log).
+This holds each request open for ~25 s using only a supported panel-editor selection — no
+network-throttling trick, no private module registry probe, and no injected `window.__…`
+internal handle were needed.
 
 **The two client code paths (source-grounded).** The difference is fully explained by which
 handler the affordance routes through:
@@ -1018,71 +1034,130 @@ keybindings.addBinding({
   key: 'd r',                                                    // :131
   onTrigger: () => sceneGraph.getTimeRange(scene).onRefresh(),   // :132  calls refresh DIRECTLY,
 });                                                              //       bypassing the isRunning guard
+
+// (C) what onRefresh() then drives — @grafana/scenes SceneQueryRunner (SceneQueryRunner.js)
+//   :244-245  the runner is subscribed to the time range; onRefresh() fires runWithTimeRange()
+//   :273      async runWithTimeRange(timeRange) {
+//   :281        this._querySub?.unsubscribe();   // <- ABORTS the prior in-flight fetch => net::ERR_ABORTED
+//   :313        this._querySub = stream.subscribe(this.onDataReceived);  // <- starts the NEW query
 ```
 
-So the toolbar button is *cancel-when-running*, while `d r` unconditionally fires another
-refresh — the mechanism behind the two observed behaviours below.
+So the toolbar button is *cancel-when-running* (guard at `:53` → `cancelAll()` → **no** new
+query), whereas `d r` bypasses that guard and drives `runWithTimeRange`, which **first
+unsubscribes the previous query — aborting the in-flight request — and then subscribes a new
+one**. Both paths therefore **abort the in-flight request on the client**; they differ only in
+whether a *new* query is issued afterwards (toolbar: no; `d r`: yes). This is the mechanism
+behind the two observed behaviours below.
 
-#### 5.3.A Toolbar Refresh while running = **cancel, not a second query**
+#### 5.3.A Toolbar Refresh while running = **cancel (abort), not a second query**
 
-With the 100-series query in flight (button showing **"Cancel"**), clicking the toolbar
-control a second time returned the button to **"Refresh"** and issued **no** new request.
-The DevTools network list showed the single in-flight `SQR101` and **no `SQR102`**. The
-backend logged exactly **one** completion for it:
+With the `slow_query` (25 s) query in flight (the toolbar button showing **"Cancel"**, tooltip
+"Cancel all queries" — `SceneRefreshPicker.js:165-168`; panel loading bar visible), clicking
+the toolbar control returned the button to **"Refresh"** and the in-flight request was
+**aborted on the client**. The DevTools network list showed the single request
+`requestId=SQR105` marked **`net::ERR_ABORTED`**, and **no new `SQR106`** — the click issued no
+query. The backend nonetheless finished the one query it had already dispatched, logging
+exactly **one** `query_data` dispatch and **one** completion for it (the final response write
+then failed because the client had already gone):
 
 ```text
-logger=context userId=1 orgId=1 uname=admin t=2026-07-15T12:17:00.819846239Z level=info msg="Request Completed" method=POST path=/api/ds/query status=200 remote_addr=127.0.0.1 time_ms=42177 duration=42.177370855s size=4668144 referer="http://localhost:3000/d/blitzyqadash01/blitzy-qa-testdata-dashboard?from=2026-07-15T00%3A00%3A00.000Z&orgId=1&timezone=utc&to=2026-07-15T06%3A00%3A00.000Z" handler=/api/ds/query status_source=server   # SQR101 (the ONLY toolbar query)
+logger=datasources t=2026-07-15T16:24:03.805746938Z level=debug msg="Querying for data source via SQL store" uid=afs75lk7lhaf4e orgId=1
+logger=query_data t=2026-07-15T16:24:03.859642699Z level=debug msg="Processed metrics query" ref_id=A from=1784111043799 to=1784132643799 interval=15000 max_data_points=1573 query="{\"datasource\":{\"type\":\"grafana-testdata-datasource\",\"uid\":\"afs75lk7lhaf4e\"},\"datasourceId\":1,\"intervalMs\":15000,\"maxDataPoints\":1573,\"refId\":\"A\",\"scenarioId\":\"slow_query\",\"stringInput\":\"25s\"}"
+logger=tsdb.testdata endpoint=queryData pluginId=grafana-testdata-datasource dsName=TestDataQA dsUID=afs75lk7lhaf4e uname=admin t=2026-07-15T16:24:03.860063025Z level=debug msg=queryData scenario=slow_query
+logger=context userId=1 orgId=1 uname=admin t=2026-07-15T16:24:28.861874454Z level=error msg="Error writing to response" err="write tcp 127.0.0.1:3000->127.0.0.1:52258: write: broken pipe"
+logger=context userId=1 orgId=1 uname=admin t=2026-07-15T16:24:28.861965762Z level=info msg="Request Completed" method=POST path=/api/ds/query status=200 remote_addr=127.0.0.1 time_ms=25058 duration=25.058483251s size=3853 referer="http://localhost:3000/d/qadroverlap/qa-dr-overlap?from=now-6h&orgId=1&timezone=utc&to=now" handler=/api/ds/query status_source=server   # SQR105 (the ONLY toolbar query; client-aborted)
 ```
 
-The toolbar button had already flipped `Cancel → Refresh` **~20 s before** this server-side
-stream finished at `12:17:00.819Z`, which is the direct signal that the second click invoked
-`queryController.cancelAll()` (path A `:54`) rather than waiting for natural completion.
+Two signals confirm the click invoked `queryController.cancelAll()` (path A `:54`) rather than
+waiting for natural completion: the request itself is `net::ERR_ABORTED`, and the button
+flipped `Cancel → Refresh` at click time — ~25 s **before** the server-side stream finished at
+`16:24:28.861Z`. Note the aborted request still logs `status=200` with a **truncated
+`size=3853`** and an `Error writing to response … broken pipe`: the server had already
+dispatched the query, so it ran the full 25 s and only failed at the final response write
+because the client had disconnected.
 
-#### 5.3.B `d r` while running = **an additional, concurrent query**
+#### 5.3.B `d r` while running = **abort the in-flight request, then start a new one**
 
-Delivering the `d r` shortcut once started `SQR102` (button → "Cancel", query in flight);
-delivering `d r` **again while it was still running** started `SQR103`. The DevTools network
-list showed **both** `SQR102` and `SQR103` in flight together, and the backend completed
-**both** with `status=200`, their execution windows overlapping by ~60 s:
+Delivering the `d r` shortcut once started `SQR101` (button → "Cancel", query in flight);
+delivering `d r` **again while it was still running** **aborted `SQR101` on the client** and
+started `SQR102`. The DevTools network list showed `SQR101` marked **`net::ERR_ABORTED`** with
+`SQR102` in flight — **not** two live requests. `SQR101`'s request body was byte-for-byte the
+"same query" as `SQR102` (`scenarioId=slow_query`, `stringInput=25s`, `refId=A`) — exactly the
+"same query twice in quick succession" the prompt asks about. The backend, however, had
+already *dispatched* `SQR101` before the abort arrived, so it ran that query to completion too:
+its final response write then failed with a `broken pipe` (the client had disconnected), while
+`SQR102` streamed its full body normally. Both logged `status=200`:
 
 ```text
-logger=context userId=1 orgId=1 uname=admin t=2026-07-15T12:20:25.210046758Z level=info msg="Request Completed" method=POST path=/api/ds/query status=200 remote_addr=127.0.0.1 time_ms=71169 duration=1m11.169585198s size=4668654 referer="http://localhost:3000/d/blitzyqadash01/blitzy-qa-testdata-dashboard?from=2026-07-15T00%3A00%3A00.000Z&orgId=1&timezone=utc&to=2026-07-15T06%3A00%3A00.000Z" handler=/api/ds/query status_source=server   # SQR102
-logger=context userId=1 orgId=1 uname=admin t=2026-07-15T12:20:37.100218384Z level=info msg="Request Completed" method=POST path=/api/ds/query status=200 remote_addr=127.0.0.1 time_ms=71790 duration=1m11.790610134s size=4668418 referer="http://localhost:3000/d/blitzyqadash01/blitzy-qa-testdata-dashboard?from=2026-07-15T00%3A00%3A00.000Z&orgId=1&timezone=utc&to=2026-07-15T06%3A00%3A00.000Z" handler=/api/ds/query status_source=server   # SQR103
+logger=query_data t=2026-07-15T16:17:05.681453864Z level=debug msg="Processed metrics query" ref_id=A from=1784110625621 to=1784132225621 interval=15000 max_data_points=1573 query="{\"datasource\":{\"type\":\"grafana-testdata-datasource\",\"uid\":\"afs75lk7lhaf4e\"},\"datasourceId\":1,\"intervalMs\":15000,\"maxDataPoints\":1573,\"refId\":\"A\",\"scenarioId\":\"slow_query\",\"stringInput\":\"25s\"}"   # SQR101 dispatched
+logger=query_data t=2026-07-15T16:17:15.606039153Z level=debug msg="Processed metrics query" ref_id=A from=1784110635598 to=1784132235598 interval=15000 max_data_points=1573 query="{\"datasource\":{\"type\":\"grafana-testdata-datasource\",\"uid\":\"afs75lk7lhaf4e\"},\"datasourceId\":1,\"intervalMs\":15000,\"maxDataPoints\":1573,\"refId\":\"A\",\"scenarioId\":\"slow_query\",\"stringInput\":\"25s\"}"   # SQR102 dispatched (~10 s later)
+logger=context userId=1 orgId=1 uname=admin t=2026-07-15T16:17:30.683631074Z level=error msg="Error writing to response" err="write tcp 127.0.0.1:3000->127.0.0.1:52238: write: broken pipe"   # SQR101 write fails: the client aborted it
+logger=context userId=1 orgId=1 uname=admin t=2026-07-15T16:17:30.683701843Z level=info msg="Request Completed" method=POST path=/api/ds/query status=200 remote_addr=127.0.0.1 time_ms=25056 duration=25.056761024s size=3853 referer="http://localhost:3000/d/qadroverlap/qa-dr-overlap?from=now-6h&orgId=1&timezone=utc&to=now" handler=/api/ds/query status_source=server   # SQR101 (aborted; truncated size)
+logger=context userId=1 orgId=1 uname=admin t=2026-07-15T16:17:40.608044979Z level=info msg="Request Completed" method=POST path=/api/ds/query status=200 remote_addr=127.0.0.1 time_ms=25003 duration=25.003569035s size=46638 referer="http://localhost:3000/d/qadroverlap/qa-dr-overlap?from=now-6h&orgId=1&timezone=utc&to=now" handler=/api/ds/query status_source=server   # SQR102 (survivor; full body)
 ```
 
-The in-flight/"Cancel" state during the overlap is captured in
-`blitzy/screenshots/qafix_dr_overlap_inflight_cancel_state.png` (panel spinner + toolbar
-"Cancel" while the second `d r` query runs).
+Reproduced a second time with identical structure: `SQR103` **`net::ERR_ABORTED`** + `SQR104`
+(the survivor); `SQR103`'s write again failed `broken pipe` (`status=200`, truncated
+`size=3853`) while `SQR104` returned in full (`status=200`, `size=47196`). The truncated
+`size=3853` on every aborted request versus the full `size≈46–47 KB` on every survivor is the
+stable signature of the client abort, seen on both trials.
 
-> **Faithful framing — `d r` does NOT abort the in-flight query.** Unlike the toolbar button,
-> the `d r` path does not call `cancelAll()`; it issues an **additional** concurrent query.
-> Both `SQR102` and `SQR103` were **observed** to complete server-side with `status=200`, so
-> there is **no** client abort and **no** server cancellation of the first run during the
-> `d r` overlap — the frontend simply keeps the latest result. (In the earlier draft this
-> case was mis-described as the second trigger *cancelling* the first; that is only true for
-> the toolbar button, §5.3.A.)
+The in-flight/"Cancel" state during the overlap — `SQR101` aborted while `SQR102` runs — is
+captured in `blitzy/screenshots/qafix_dr_overlap_sqr101_aborted_sqr102_inflight.png` (the panel
+retains the previous frame while the toolbar shows **"Cancel"** with the loading spinner during
+the new `d r` query).
 
-**Combined backend count (the decisive number).** Across the whole 12:16–12:21 window the
-debug log contains **exactly three** `/api/ds/query` completions and **exactly three**
-`query_data` "Processed metrics query" lines:
+> **Faithful framing — `d r` DOES abort the in-flight request (client-side), then starts a new
+> one.** Unlike the toolbar button, the `d r` path does not call `cancelAll()`; instead it
+> drives `SceneQueryRunner.runWithTimeRange`, which unconditionally `unsubscribe()`s the prior
+> query subscription (`SceneQueryRunner.js:281`) — **aborting the in-flight fetch, observed as
+> `net::ERR_ABORTED`** — before subscribing the new query (`:313`). So the first run **is**
+> aborted on the client; what is *not* present is any **server-side** cancellation — the
+> backend still runs each already-dispatched query to `status=200` (the aborted one's response
+> write just fails with a `broken pipe`, hence the truncated `size=3853`). The only difference
+> from the toolbar is whether a **new** query follows the abort: the toolbar issues none
+> (§5.3.A), `d r` issues one. (An earlier draft over-corrected a separate finding into the
+> false claim that `d r` produced two fully concurrent requests with *no* client abort; the
+> `net::ERR_ABORTED` captured above — reproduced twice — refutes that.)
+
+**The decisive counts (per scenario).** Each scenario's backend dispatch/completion counts
+were read straight from the debug log and match the DevTools network view exactly:
 
 ```text
-$ grep 'path=/api/ds/query' grafana.log | grep 'Request Completed' | grep -E 't=2026-07-15T12:(1[6-9]|20|21)' | wc -l
-3
-$ grep 'Processed metrics query' grafana.log | grep -E 't=2026-07-15T12:(1[6-9]|20|21)' | wc -l
-3
+# Toolbar cancel (SQR105 window, 16:24): exactly ONE dispatch and ONE completion — no SQR106
+$ grep 'Processed metrics query' grafana.log | grep -E 't=2026-07-15T16:24:' | wc -l
+1
+$ grep 'path=/api/ds/query' grafana.log | grep 'Request Completed' | grep -E 't=2026-07-15T16:24:' | wc -l
+1
+
+# d r overlap, trial 1 (SQR101→aborted, SQR102→survivor; 16:17): TWO dispatches and TWO completions
+$ grep 'Processed metrics query' grafana.log | grep -E 't=2026-07-15T16:17:' | wc -l
+2
+$ grep 'path=/api/ds/query' grafana.log | grep 'Request Completed' | grep -E 't=2026-07-15T16:17:' | wc -l
+2
 ```
 
-That is **1** (toolbar `SQR101`) **+ 2** (`d r` `SQR102`,`SQR103`). If the toolbar's second
-click had issued a query, the count would be four — it is three, confirming that click was a
-pure cancel.
+So the toolbar's cancel issues **no** new query (one dispatch, one completion, `SQR105`
+`net::ERR_ABORTED`), whereas each `d r` press while running issues **one** new query *in
+addition to* aborting the previous one (two dispatches, two completions per trial;
+reproduced identically in trial 2 with `SQR103`/`SQR104`). Crucially, the two `d r` dispatches
+are **not** simultaneous survivors — the first (`SQR101`) is client-aborted (`net::ERR_ABORTED`,
+`broken pipe`, truncated `size=3853`) while only the second (`SQR102`) returns a full body. In
+neither scenario is any request server-side de-duplicated, replaced, or short-circuited: every
+*dispatched* query runs independently to `status=200`. (Across all three trials the log holds
+**exactly three** `Error writing to response … broken pipe` lines — one per client-aborted
+request: `SQR101`, `SQR103`, and the toolbar `SQR105`.)
 
 **Why the backend still finishes (both affordances).** In every case above the server logged
-`status=200`, including the toolbar `SQR101` that the client had already cancelled ~20 s
-earlier. **Observed:** a client-side cancel does not retroactively stop a query the server has
-already dispatched — the response is generated and streamed to completion regardless. Each of
-the three distinct `SQR` ids produced its own independent backend execution; **no** request
-was server-side de-duplicated, replaced, or short-circuited.
+`status=200` for **every** dispatched query — including the three that the client had already
+aborted (`SQR105` from the toolbar test, and `SQR101`/`SQR103` from the two `d r` trials).
+**Observed:** a client-side abort does not retroactively stop a query the server has already
+dispatched — the response is generated and streamed to completion regardless. The only visible
+trace of the abort is server-side: the aborted request's response *write* fails with a
+`broken pipe` and its logged `size=3853` is truncated, whereas the surviving requests
+(`SQR102`, `SQR104`) stream their full ~46 KB bodies. Each distinct `SQR` id produced its own
+independent backend execution; **no** request was server-side de-duplicated, replaced, or
+short-circuited.
 
 **Where the toolbar cancel happens (client side).** The toolbar's `queryController.cancelAll()`
 (path A `:54`) drives `BackendSrv`'s cancellation machinery
@@ -1091,24 +1166,34 @@ which each request id is published on subscribe (`:147`); `cancelAllInFlightRequ
 (`:176-177`) publishes the sentinel `CANCEL_ALL_REQUESTS_REQUEST_ID` (`:39`); every request
 observable is gated by `takeUntil(...)` (`:419-420`) with a **same-`requestId`** branch
 (`:424`) and a `CANCEL_ALL_REQUESTS` branch (`:431`); on teardown the `'Request was aborted'`
-path (`:446`) runs. **[INFERRED]** from source: the toolbar second click resolves to the
+path (`:446`) runs. **[INFERRED]** from source: the toolbar's Cancel click resolves to the
 `CANCEL_ALL_REQUESTS` branch (`:431`) — what is *observed* is the button flipping
 `Cancel → Refresh`, the absence of any new request, and the backend still completing the one
 in-flight query.
 
-> **Faithful note on the same-`requestId` branch.** The `:424` branch would let a *new*
-> request cancel a *prior in-flight one that shares its id*. It was **not** exercised here:
-> on the Scenes panel path each run gets a **fresh** `SQR` id, so `d r` produced two distinct
-> ids (`SQR102`, `SQR103`) that ran concurrently to completion (§5.3.B) rather than the second
-> cancelling the first. This branch is therefore **[INFERRED]** from source, not observed.
+> **Faithful note — where the `d r` abort actually happens.** The abort of the in-flight
+> request on a `d r` re-fire is **observed** (`SQR101` → `net::ERR_ABORTED` in §5.3.B), but it
+> is **not** driven by `backend_srv.ts`'s same-`requestId` branch (`:424`). That branch would
+> only fire if a *new* request reused the *same* id as a prior in-flight one; on the Scenes
+> panel path each run gets a **fresh** `SQR` id (`SQR101` then `SQR102`), so `:424` is never
+> matched and remains **[INFERRED]** from source. The abort instead originates one layer up, in
+> the panel's query runner: `SceneQueryRunner.runWithTimeRange` (`SceneQueryRunner.js:273`)
+> **unsubscribes the previous query subscription first** — `this._querySub?.unsubscribe()`
+> (`:281`) — which tears down the in-flight RxJS request and causes `BackendSrv` to abort the
+> underlying fetch (surfaced as `net::ERR_ABORTED`), and only **then** subscribes to a fresh
+> stream — `this._querySub = stream.subscribe(...)` (`:313`) — issuing the new query. So `d r`
+> is a **replace** (abort-then-reissue), not a pair of concurrent survivors.
 
-**Verdict (observed).** Concurrently, the *client* behaviour depends on **which affordance**
-re-triggers the query: the **toolbar Refresh button cancels the in-flight run and issues no
-new query** (§5.3.A), whereas the **`d r` shortcut issues an additional concurrent query and
-keeps the latest result** (§5.3.B). In **both** cases the **backend treats every execution
-identically** — it runs each dispatched query independently to `status=200`, with no
-server-side cancellation, de-duplication, or caching. The concurrency difference is purely a
-client-side transport/UX concern, **not** server-side differential treatment.
+**Verdict (observed).** Concurrently, **both** affordances client-abort the in-flight request
+(observed as `net::ERR_ABORTED`); they differ only in what happens *next*: the **toolbar
+Refresh button cancels the in-flight run and issues no new query** (§5.3.A), whereas the
+**`d r` shortcut aborts the in-flight run and immediately reissues it as a fresh query** — a
+*replace*, not a concurrent pair (§5.3.B). In **both** cases the **backend treats every
+*dispatched* execution identically** — it runs each one independently to `status=200`, with no
+server-side cancellation, de-duplication, or caching (a client abort only truncates the
+response *write*, logged as a `broken pipe` with `size=3853`; it never stops the server's
+work). The concurrency difference is therefore purely a client-side transport/UX concern,
+**not** server-side differential treatment.
 
 ### 5.4 The mechanism behind the sequential verdict — the OSS caching seam is a no-op
 
@@ -1285,7 +1370,7 @@ fields that were **volatile**. The stability pattern is itself the evidence: ide
 | Scenario | Trials (ids) | STABLE across runs | VOLATILE across runs | Verdict |
 |----------|--------------|--------------------|----------------------|---------|
 | **Sequential** (§5.2) | `SQR100`,`SQR101`,`SQR102`,`SQR103` (one ~730 ms burst) | request body **bytes** (sha256 `95310b6d…` for all 4); URL; `X-*` headers; HTTP `200`; `Cache-Control: no-store`; **no `X-Cache`** | response body values (first A, rounded; full precision §5.2 = 43.60 / 1.08 / 7.70 / 38.52); `size` (523 / 527 / 522 / 524); backend execution timestamp; latency | 2nd exec **re-run identically**, fresh body — **not** cached |
-| **Concurrent** (§5.3) | toolbar `SQR101`; `d r` `SQR102`,`SQR103` | backend runs each dispatched query to `status=200` (no dedup/cancel/cache); large 100-series body under network throttling | **client** behaviour by affordance: toolbar 2nd click = **cancel-only** (no new query); `d r` 2nd press = **additional concurrent query** | backend **never differentiates**; toolbar **cancels** in-flight, `d r` **overlaps** and keeps latest |
+| **Concurrent** (§5.3) | toolbar `SQR105`; `d r` trial 1 `SQR101`→aborted / `SQR102`→survivor; trial 2 `SQR103`/`SQR104` | every *dispatched* query completes `status=200` (no dedup/cancel/cache); the client-aborted request's response **write** fails (`broken pipe`, truncated `size=3853`) while survivors stream full ~46 KB bodies; **no `X-Cache`** | **client** behaviour by affordance: toolbar Refresh (while running) = **abort-only** (`net::ERR_ABORTED`, no new query); `d r` = **abort-and-reissue** (aborts the in-flight request, then starts one new query — a *replace*) | backend **never differentiates**; **both** affordances client-abort the in-flight request — toolbar issues **no** new query, `d r` reissues it |
 | **Expression** (§5.5) | ≥2 (`SQR100` shown) | `x-grafana-from-expr: true`; `__expr__` datasource; `B − A = +100` exactly; A/B `status=200` | underlying `random_walk` A-values (hence B = A+100 values) | server-side math confirmed |
 | **400 — malformed** (§5.6a) | ≥2 | HTTP `400`; body `{"message":"bad request data"}`; `status_source=server` | — (deterministic) | binding failure before any query |
 | **400 — empty queries** (§5.6b) | ≥2 | HTTP `400`; `messageId=query.noQueries`; `status_source=server` | — (deterministic) | validation failure before any query |
@@ -1313,10 +1398,13 @@ the single-datasource batch through `handleQuerySingleDatasource` into the **Tes
 backend, which generates a `random_walk` frame. The handler streams a `QueryDataResponse`
 (200; `Cache-Control: no-store`; no `X-Cache`) whose body is a fresh random walk. Repeating
 the query **sequentially** re-runs everything and returns a *different* body (no cache).
-Repeating it **concurrently** differs by UI affordance: the toolbar Refresh button *cancels*
-the in-flight request in the browser (issuing no new query), whereas the `d r` shortcut
-issues an *additional* concurrent query — but in **both** cases the backend runs every
-dispatched query independently to completion, with no server-side cancel, dedup, or cache.
+Repeating it **concurrently** differs by UI affordance, but **both** affordances client-abort
+the in-flight request (observed as `net::ERR_ABORTED`): the toolbar Refresh button *cancels*
+the in-flight request in the browser and issues **no** new query, whereas the `d r` shortcut
+*aborts* the in-flight request and immediately *reissues* it (a replace) — yet in **both**
+cases the backend runs every dispatched query independently to completion, with no server-side
+cancel, dedup, or cache (a client abort only truncates the response write, logged as a
+`broken pipe`).
 
 ### 6.2 Why the "second execution" answer is what it is (cause → effect)
 
@@ -1331,9 +1419,12 @@ dispatched query independently to completion, with no server-side cancel, dedup,
   `queryController.cancelAll()` (`SceneRefreshPicker.js:53-54`) → `BackendSrv` tears down the
   in-flight fetch (`backend_srv.ts` `takeUntil` `:419-420`, `CANCEL_ALL_REQUESTS` `:431`, abort
   `:446`) and issues **no** new query. The `d r` shortcut instead calls `timeRange.onRefresh()`
-  directly (`keyboardShortcuts.ts:131-132`), bypassing the running-guard, so it fires an
-  **additional** concurrent query. In **both** cases every query the server actually received
-  ran to `status=200` — the backend performed **no** cancel, dedup, or cache (§5.3).
+  directly (`keyboardShortcuts.ts:131-132`), which drives `SceneQueryRunner.runWithTimeRange`
+  (`SceneQueryRunner.js:273`) to **unsubscribe the in-flight query first**
+  (`:281 this._querySub?.unsubscribe()`, aborting the previous fetch → `net::ERR_ABORTED`) and
+  **then** subscribe to a fresh stream (`:313`) — i.e. it *aborts and reissues* (a replace),
+  not a concurrent addition. In **both** cases every query the server actually received ran to
+  `status=200` — the backend performed **no** cancel, dedup, or cache (§5.3).
 - **Differential server-side treatment (a cache HIT governed by a configurable TTL)** is a
   **Grafana Enterprise/Cloud** capability layered on the same `DataSourceWithBackend`
   seam. **[INFERRED]** from the in-tree no-op seam (which declares the `X-Cache` header and
@@ -1347,7 +1438,7 @@ dispatched query independently to completion, with no server-side cancel, dedup,
 | Artifact | What it revealed | Evidence |
 |----------|------------------|----------|
 | **Logs** | Six-layer correlation (datasources → query_data → secrets → tsdb.testdata → access log) proves the full server-side path and `status_source`. | §3.4, §5.2, §5.6 |
-| **Network requests** | Canonical `POST /api/ds/query?...&requestId=SQR…`; identical request bytes on sequential repeats (sha256 `95310b6d…`); on concurrent re-trigger the toolbar Refresh **cancels** the in-flight request client-side while `d r` issues an **additional concurrent** query (both complete `200`). | §2.2, §5.2, §5.3 |
+| **Network requests** | Canonical `POST /api/ds/query?...&requestId=SQR…`; identical request bytes on sequential repeats (sha256 `95310b6d…`); on concurrent re-trigger **both** affordances client-abort the in-flight request (`net::ERR_ABORTED`) — the toolbar Refresh issues **no** new query while `d r` reissues it (a *replace*); every *dispatched* query still completes `200`. | §2.2, §5.2, §5.3 |
 | **Headers** | Request `X-Datasource-Uid/-Plugin-Id/-Dashboard-Uid/-Panel-Id`, `x-grafana-from-expr`; response `Cache-Control: no-store` and the **absence of `X-Cache`**. | §2.3, §4.2, §5.5 |
 | **Metadata** | SLO group `high-slow`, `status_source=server` vs `downstream`, org/user context, and the `referer` tying the request to dashboard `blitzyqadash01`. | §3.1, §3.4, §5.6 |
 
@@ -1360,7 +1451,7 @@ dispatched query independently to completion, with no server-side cancel, dedup,
 | **R3** | Observe browser issuance | **PASS** — captured `POST /api/ds/query?...&requestId=SQR…`, payload, and `X-*` headers via DevTools; origin traced to Scenes `SceneQueryRunner`. | §2 |
 | **R4** | Observe backend handling | **PASS** — route/authz/SLO/middleware, `MetricRequest` bind, single-DS routing, TestData execution, all correlated via **debug logs** (tracing middleware is present in code but **inert by default in OSS** — no exporter, no spans, no trace headers; §3.1). | §3 |
 | **R5** | Observe the response | **PASS** — status semantics, headers (`no-store`, no `X-Cache`), and `QueryDataResponse` body shape. | §4 |
-| **R6** | Compare a repeated execution | **PASS** — sequential (no differential treatment) and concurrent (toolbar Refresh cancels the in-flight request client-side; `d r` fires an additional concurrent query; backend completes every dispatched query to `200` with no server-side differential treatment), each ≥2 trials. | §5.2, §5.3 |
+| **R6** | Compare a repeated execution | **PASS** — sequential (no differential treatment) and concurrent (both affordances client-abort the in-flight request; the toolbar Refresh issues no new query while `d r` aborts-and-reissues; backend completes every dispatched query to `200` with no server-side differential treatment), each ≥2 trials. | §5.2, §5.3 |
 | **R7** | Surface processing insights | **PASS** — logs, network requests, headers, metadata each answered with evidence. | §3.4, §6.3 |
 | — | Enterprise server-side cache HIT | **[INFERRED] / not observed** — Enterprise/Cloud only; absent on OSS. | §5.4, §6.2 |
 
