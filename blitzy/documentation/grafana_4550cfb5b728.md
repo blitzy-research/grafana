@@ -58,9 +58,10 @@ wire: github.com/grafana/grafana/pkg/server: wrote /…/pkg/server/wire_gen.go
 real	0m32.179s
 ```
 
-The canonical backend build (bounded with an explicit timeout, output captured in full):
+The canonical backend build (bounded with an explicit timeout, output captured in full). The scratch directory `/tmp/gfinv` — used here for the build log and later for every server-run log — is created first so all `>`/`tee` redirects below succeed in a fresh shell (it lives under `/tmp`, off the git tree):
 
 ```bash
+$ mkdir -p /tmp/gfinv                                # scratch dir for build/run logs (off the git tree; created before first use)
 $ timeout 900 make build-backend 2>&1 | tee /tmp/gfinv/build.log
 build backend
 go run build.go    build-backend
@@ -111,6 +112,7 @@ set -o pipefail                              # (a) fail-fast in pipelines
 run_observe() {                              # name port level seconds
   name=$1 port=$2 lvl=$3 secs=$4
   dir=$(mktemp -d)                           # (b) unpredictable, private temp dir
+  mkdir -p /tmp/gfinv                        # (b') ensure the scratch log dir exists (idempotent)
   timeout "${secs}s" ./bin/linux-amd64/grafana server \
       --homepath . --config conf/defaults.ini \
       cfg:server.http_addr=127.0.0.1 \       # (c) loopback ONLY — never 0.0.0.0/[::]
@@ -132,7 +134,7 @@ run_observe() {                              # name port level seconds
 #   kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 ```
 
-Notes on the guarantees: the explicit `timeout` upper-bounds every run even if a `kill` is missed; `http_addr=127.0.0.1` keeps the instance off all public interfaces; redirecting `paths.{data,logs,plugins}` into a `mktemp -d` directory prevents the server from writing `data/` into the repository; readiness is derived from the server's own `"HTTP Server Listen"` log line rather than a blind `sleep`; and the stop path targets **only** the captured `$pid` (never a broad `pkill`). All curls in Q3 likewise target `127.0.0.1`.
+Notes on the guarantees: the Q1 observation helpers (`run_observe`/`launch`) wrap the server in an explicit `timeout`, so those runs are **self-terminating** and cannot leak even if a `kill` is missed or the shell is interrupted; the Q2/Q3 boots below are **not** `timeout`-wrapped (one instance must stay up across Q2→Q3), so they instead capture each server's PID, register an `EXIT`/`INT`/`TERM` cleanup `trap`, and stop it with `kill`/`wait` once its evidence is captured — the `trap` guarantees no server is leaked even on interrupt. In all cases `http_addr=127.0.0.1` keeps the instance off all public interfaces; redirecting `paths.{data,logs,plugins}` into a `mktemp -d` directory prevents the server from writing `data/` into the repository; readiness is derived from the server's own `"HTTP Server Listen"` log line (or a `/api/health` poll) rather than a blind `sleep`; and every stop targets **only** the captured PID(s) (never a broad `pkill`). All curls in Q3 likewise target `127.0.0.1`.
 
 ---
 
@@ -149,6 +151,7 @@ Four canonical background runs were launched simultaneously (loopback-only, time
 launch() {                       # name port level seconds
   name=$1 port=$2 lvl=$3 secs=$4
   dir=$(mktemp -d)
+  mkdir -p /tmp/gfinv            # ensure the scratch log dir exists (idempotent)
   timeout ${secs}s ./bin/linux-amd64/grafana server \
     --homepath . --config conf/defaults.ini \
     cfg:server.http_addr=127.0.0.1 cfg:server.http_port=$port \
@@ -387,19 +390,24 @@ The following interval-driven services are registered but, given their long peri
 
 ### First boot (fresh SQLite database) — migrations are performed
 
-Every observation instance is bound to loopback, given writable `paths.*` under a private `mktemp -d` directory, launched in the background with its PID captured, polled for readiness on `/api/health`, and stopped with `kill`/`wait` — so nothing hangs and nothing listens beyond `127.0.0.1`.
+Every observation instance is bound to loopback, given writable `paths.*` under a private `mktemp -d` directory, launched in the background with its PID captured (and registered with a single `EXIT`/`INT`/`TERM` cleanup `trap` — installed once at the first boot below — so an interrupt or early exit leaks no server), and polled for readiness on `/api/health`. Each instance is stopped with `kill`/`wait` as soon as its evidence is captured; the **one** exception is the port-3000 first-boot instance, which is intentionally kept running so Q3 can query the same live server, and is then stopped explicitly at the end of Q3. Because every server is torn down, the whole Q2→Q3 procedure is **idempotent** — it can be re-run from the top without hitting a stale `bind: address already in use`. Nothing hangs and nothing listens beyond `127.0.0.1`.
 
 ```bash
 $ REPO="$(pwd)"; BIN="$REPO/bin/linux-amd64/grafana"
+$ PIDS=()                                            # accumulate every background server PID for guaranteed teardown
+$ cleanup() { for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null; done; wait 2>/dev/null; }
+$ trap cleanup EXIT INT TERM                         # safety net: an interrupt or early exit leaks no server (F5/F6)
 $ d="$(mktemp -d)"                                   # private writable paths; tracked tree untouched
 $ "$BIN" server --homepath "$REPO" \
       cfg:server.http_addr=127.0.0.1 cfg:server.http_port=3000 \
       cfg:paths.data="$d/data" cfg:paths.logs="$d/logs" cfg:paths.plugins="$d/plugins" \
       > /tmp/run1.log 2>&1 &
-$ PID=$!
+$ PID=$!; PIDS+=("$PID")                             # port-3000 instance — kept up for Q3, stopped at the end of Q3
 $ for i in $(seq 1 120); do curl -sf -m3 http://127.0.0.1:3000/api/health >/dev/null && break; sleep 1; done
 $ grep -nE 'msg="Starting DB migrations"|msg="migrations completed"' /tmp/run1.log
 ```
+
+> This port-3000 instance is intentionally **left running** — Q3 queries this same live server. It is stopped explicitly at the end of Q3 ("Stop the shared instances," below); until then the `trap` above guarantees it is reaped even if the shell is interrupted.
 
 Complete, unedited result (timestamps are the container wall clock; nothing else is altered):
 
@@ -415,15 +423,16 @@ On a fresh database the two migrators perform **626** (`migrator`) and **18** (`
 ### Second boot (same database) — schema already up to date, `performed=0`
 
 ```bash
+$ rm -rf /tmp/db2 /tmp/logs2 /tmp/plugins2           # idempotent: clear any prior copy so cp -a does not nest /tmp/db2/data
 $ cp -a "$d/data" /tmp/db2                            # snapshot the now-migrated DB (server idle -> quiescent)
 $ "$BIN" server --homepath "$REPO" \
       cfg:server.http_addr=127.0.0.1 cfg:server.http_port=3005 \
       cfg:paths.data=/tmp/db2 cfg:paths.logs=/tmp/logs2 cfg:paths.plugins=/tmp/plugins2 \
       > /tmp/run2.log 2>&1 &
-$ PID2=$!
+$ PID2=$!; PIDS+=("$PID2")
 $ for i in $(seq 1 60); do curl -sf -m3 http://127.0.0.1:3005/api/health >/dev/null && break; sleep 1; done
 $ grep -nE 'msg="Starting DB migrations"|msg="migrations completed"' /tmp/run2.log
-$ kill "$PID2"; wait "$PID2" 2>/dev/null
+$ kill "$PID2"; wait "$PID2" 2>/dev/null              # stop the port-3005 instance now its evidence is captured
 ```
 
 ```text
@@ -444,7 +453,7 @@ $ "$BIN" server --homepath "$REPO" \
       cfg:server.http_addr=127.0.0.1 cfg:server.http_port=3006 cfg:log.level=debug \
       cfg:paths.data=/tmp/db2 cfg:paths.logs=/tmp/logs2 cfg:paths.plugins=/tmp/plugins2 \
       > /tmp/run2_debug.log 2>&1 &
-$ PID3=$!
+$ PID3=$!; PIDS+=("$PID3")
 $ for i in $(seq 1 60); do curl -sf -m3 http://127.0.0.1:3006/api/health >/dev/null && break; sleep 1; done
 $ echo "migrator=$(grep 'logger=migrator '          /tmp/run2_debug.log | grep -c 'Skipping migration: Already executed')"
 $ echo "resource=$(grep 'logger=resource-migrator ' /tmp/run2_debug.log | grep -c 'Skipping migration: Already executed')"
@@ -502,11 +511,12 @@ $ curl -s http://127.0.0.1:3000/api/health
 
 ### `GET /api/frontend/settings` → `buildInfo`
 
-`/api/frontend/settings` requires authentication (anonymous access is disabled by default). To avoid embedding a credential in the command line, shell history, or the process table, the default admin password is placed in an ephemeral `netrc` file (its value is never printed) and the file is shredded immediately after:
+`/api/frontend/settings` requires authentication (anonymous access is disabled by default). The default admin credentials on a fresh boot are `admin`/`admin` (`conf/defaults.ini:328` `admin_user = admin`, `:331` `admin_password = admin`); `ADMIN_PW` is set to that documented default. To keep the credential out of the process table and shell history, it is placed in an ephemeral `netrc` file (rather than inline in the `curl` command) and the file is shredded immediately after:
 
 ```bash
+$ export ADMIN_PW=admin                        # default admin password (conf/defaults.ini:331 admin_password = admin)
 $ NETRC="$(mktemp)"
-$ printf 'machine 127.0.0.1 login admin password %s\n' "$ADMIN_PW" > "$NETRC"  # $ADMIN_PW held in the shell env; value not printed
+$ printf 'machine 127.0.0.1 login admin password %s\n' "$ADMIN_PW" > "$NETRC"  # written to the netrc file, not the process table
 $ curl -s --netrc-file "$NETRC" http://127.0.0.1:3000/api/frontend/settings \
     | python3 -c 'import sys,json;print(json.dumps(json.load(sys.stdin)["buildInfo"],indent=2))'
 $ shred -u "$NETRC"
@@ -550,6 +560,8 @@ X-Xss-Protection: 1; mode=block
 $ "$BIN" server --homepath "$REPO" cfg:server.http_addr=127.0.0.1 cfg:server.http_port=3007 \
       cfg:auth.anonymous.enabled=true cfg:auth.anonymous.hide_version=true \
       cfg:paths.data="$d/data" cfg:paths.logs="$d/logs" cfg:paths.plugins="$d/plugins" > /tmp/run_hide.log 2>&1 &
+$ PID4=$!; PIDS+=("$PID4")                           # hide_version instance — registered for teardown; stopped at end of Q3
+$ for i in $(seq 1 60); do curl -sf -m3 http://127.0.0.1:3007/api/health >/dev/null && break; sleep 1; done  # readiness
 $ curl -s http://127.0.0.1:3007/api/health          # hide_version=true
 {
   "database": "ok"
@@ -591,6 +603,18 @@ grafana version 9.2.0
 $ ./bin/linux-amd64/grafana-server --version
 Deprecation warning: The standalone 'grafana-server' program is deprecated and will be removed in the future. Please update all uses of 'grafana-server' to 'grafana server'
 Version 11.5.0-pre (commit: b23f15d49d, branch: blitzy-bd7c52bb-ddb1-4334-9ff1-3439b97e50cf)
+```
+
+### Stop the shared instances (end of Q3)
+
+All Q3 queries are complete, so the two instances still running from earlier — the port-3000 first-boot server started in Q2 and the port-3007 hide_version server — are stopped explicitly now. After this, no observation server is left running and the entire Q2→Q3 sequence can be re-run from the top without a stale `bind: address already in use`:
+
+```bash
+$ kill "$PID4" 2>/dev/null; wait "$PID4" 2>/dev/null   # stop the hide_version instance (port 3007)
+$ kill "$PID"  2>/dev/null; wait "$PID"  2>/dev/null   # stop the shared first-boot instance (port 3000)
+$ trap - EXIT INT TERM                                 # every server is stopped — disarm the cleanup trap
+$ ss -ltn 2>/dev/null | grep -E ':3000|:3005|:3006|:3007' || echo "no Q2/Q3 listeners remain"
+no Q2/Q3 listeners remain
 ```
 
 ### Responsible code
