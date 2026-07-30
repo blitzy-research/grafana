@@ -44,4 +44,5 @@ export enum DataTransformerID {
   regression = 'regression',
   smoothing = 'smoothing',
   groupToNestedTable = 'groupToNestedTable',
+  deduplicateRows = 'deduplicateRows',
 }
