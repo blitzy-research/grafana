@@ -5,7 +5,6 @@ import { DataTransformerInfo } from '../../types/transformations';
 
 import { DataTransformerID } from './ids';
 
-/** Which occurrence of a duplicated row key survives deduplication. */
 export type DeduplicateRowsKeep = 'first' | 'last';
 
 export interface DeduplicateRowsTransformerOptions {
@@ -44,11 +43,10 @@ interface DeduplicateKeyNode {
 // collides with `'1'`, `null` collides with `undefined`, and delimiter-bearing values cross-collide
 // (`['a,b','c']` would be judged equal to `['a','b,c']`).
 //
-// Documented deviation from `===`: `Map` keys compare with SameValueZero, so `NaN` equals `NaN` and
-// `+0` equals `-0`. Such rows collapse, which is pragmatic for deduplication rather than a defect.
+// `Map` keys compare with SameValueZero: as with `===`, `+0` equals `-0`; unlike `===`, `NaN` equals
+// `NaN`. Rows keyed on `NaN` therefore collapse, which is pragmatic for deduplication, not a defect.
 type DeduplicateKeyLevel = Map<unknown, DeduplicateKeyLevel | DeduplicateKeyNode>;
 
-/** Gets (or creates) the nested level under `value`; only used for non-terminal key fields. */
 function descendKeyLevel(level: DeduplicateKeyLevel, value: unknown): DeduplicateKeyLevel {
   const existing = level.get(value);
 
@@ -62,7 +60,6 @@ function descendKeyLevel(level: DeduplicateKeyLevel, value: unknown): Deduplicat
   return created;
 }
 
-/** Gets (or creates) the terminal node under `value`; only used for the last key field. */
 function resolveKeyNode(level: DeduplicateKeyLevel, value: unknown): DeduplicateKeyNode {
   const existing = level.get(value);
 
@@ -81,12 +78,11 @@ function resolveKeyNode(level: DeduplicateKeyLevel, value: unknown): Deduplicate
  * is returned whenever nothing can be, or needs to be, removed.
  */
 function deduplicateFrame(frame: DataFrame, options: DeduplicateRowsTransformerOptions): DataFrame {
-  // Without rows, or without fields, there is no key material to compare.
   if (frame.length === 0 || frame.fields.length === 0) {
     return frame;
   }
 
-  // A missing, empty, or interpolated-to-empty field name keys on the whole row.
+  // An unset, empty, or interpolated-to-empty field option keys on the whole row.
   let keyFields: Field[] = frame.fields;
 
   if (options.field) {
@@ -100,8 +96,8 @@ function deduplicateFrame(frame: DataFrame, options: DeduplicateRowsTransformerO
   }
 
   // Normalise `keep` here as well as through `defaultOptions`: callers may invoke the operator
-  // directly and bypass that merge, and every string option is variable-interpolated first, so
-  // any value other than 'last' resolves to the documented first-wins default.
+  // directly and bypass that merge, and pipeline interpolation can substitute an arbitrary string,
+  // so only the exact value 'last' opts into last-wins; anything else is the first-wins default.
   const keepLast = options.keep === 'last';
 
   // Pass one: elect the row that owns each distinct key.
@@ -126,7 +122,6 @@ function deduplicateFrame(frame: DataFrame, options: DeduplicateRowsTransformerO
     }
   }
 
-  // Nothing was removed when every row produced a distinct key.
   const distinct = owners.length;
 
   if (distinct === frame.length) {
@@ -145,7 +140,7 @@ function deduplicateFrame(frame: DataFrame, options: DeduplicateRowsTransformerO
     }
   }
 
-  // Rebuild through shallow spreads so no input frame, field, or array is mutated; only rows change.
+  // Rebuild through shallow spreads to keep inputs immutable while filtering the row-aligned data.
   return {
     ...frame,
     fields: frame.fields.map((field) => {
