@@ -48,6 +48,90 @@ describe('Deduplicate rows transformer', () => {
       expect(result[0].fields).toEqual(expected);
       expect(result[0].length).toBe(2);
     });
+
+    // Inspecting only the returned frame leaves two further obligations of this very same keep-first path
+    // unobserved: the caller's frame must survive untouched, and the row-aligned `nanos` companion must be
+    // re-selected by the retained indices rather than sliced or handed back at full length. Fields built by
+    // `toDataFrame` carry neither `nanos` nor `state`, so the richer frame below supplies both alongside
+    // `labels` and a populated `config`.
+    const metaSeries = toDataFrame({
+      name: 'A',
+      fields: [
+        {
+          name: 'time',
+          type: FieldType.time,
+          values: [100, 100, 200, 200],
+          nanos: [11, 22, 33, 44],
+          config: { unit: 'ns' },
+          labels: { host: 'a' },
+        },
+        { name: 'value', type: FieldType.number, values: [1, 2, 3, 4], config: { decimals: 2 } },
+      ],
+    });
+
+    // `createDataFrame` strips `state` from the fields it builds, so the cached calcs that this
+    // transformation has to invalidate are attached to the fixture here.
+    metaSeries.fields[0].state = { displayName: 'time', calcs: { sum: 600 } };
+    metaSeries.fields[1].state = { calcs: { sum: 10 } };
+
+    const originalTimeField = metaSeries.fields[0];
+    const originalValues = originalTimeField.values;
+    const originalNanos = originalTimeField.nanos;
+    const originalState = originalTimeField.state;
+
+    const metaCfg: DataTransformerConfig<DeduplicateRowsTransformerOptions> = {
+      id: DataTransformerID.deduplicateRows,
+      options: {
+        field: 'time',
+        keep: 'first',
+      },
+    };
+
+    await expect(transformDataFrame([metaCfg], [metaSeries])).toEmitValuesWith((received) => {
+      const result = received[0];
+      const timeField = result[0].fields[0];
+      // Rows 0 and 2 are retained, so `nanos` must read [11, 33]: slicing would yield [11, 22] and leaving
+      // the array unfiltered would yield all four. `value` carries no `nanos` and must not acquire one.
+      const expected: Field[] = [
+        {
+          name: 'time',
+          type: FieldType.time,
+          state: { displayName: 'time', calcs: undefined },
+          values: [100, 200],
+          nanos: [11, 33],
+          config: { unit: 'ns' },
+          labels: { host: 'a' },
+        },
+        {
+          name: 'value',
+          type: FieldType.number,
+          state: { calcs: undefined },
+          values: [1, 3],
+          config: { decimals: 2 },
+        },
+      ];
+
+      expect(result[0].fields).toEqual(expected);
+      expect(result[0].length).toBe(2);
+      expect(timeField.nanos?.length).toBe(timeField.values.length);
+
+      // Every row-aligned container is a fresh object, so nothing this transformation writes is written
+      // through to a structure the caller still holds.
+      expect(result[0]).not.toBe(metaSeries);
+      expect(timeField).not.toBe(originalTimeField);
+      expect(timeField.values).not.toBe(originalValues);
+      expect(timeField.nanos).not.toBe(originalNanos);
+      expect(timeField.state).not.toBe(originalState);
+
+      // ...and the caller's frame still reads exactly as it did before the transformation ran, cached
+      // calcs included.
+      expect(metaSeries.length).toBe(4);
+      expect(metaSeries.fields[0].values).toEqual([100, 100, 200, 200]);
+      expect(metaSeries.fields[0].nanos).toEqual([11, 22, 33, 44]);
+      expect(metaSeries.fields[0].state).toEqual({ displayName: 'time', calcs: { sum: 600 } });
+      expect(metaSeries.fields[1].values).toEqual([1, 2, 3, 4]);
+      expect(metaSeries.fields[1].state).toEqual({ calcs: { sum: 10 } });
+    });
   });
 
   // Retains the highest original index per key, yet still emits ascending: rows 3 and 4, not 4 and 3.
