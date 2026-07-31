@@ -162,7 +162,10 @@ describe('Deduplicate rows transformer', () => {
   // Running with `options: {}` is the behavioural oracle for full-row keying, but it cannot on its own
   // guard the descriptor's documented default: the transformer independently normalises every `keep`
   // other than 'last' to first-wins, so deleting `defaultOptions` would leave the oracle green. Pinning
-  // `defaultOptions` exactly is what holds that half of the contract.
+  // `defaultOptions` exactly is what holds that half of the contract. The serialised identifier needs the
+  // same treatment for the same reason: every case in this suite builds its config from the enum member,
+  // so that member's value could be edited without reddening a single oracle — while a saved dashboard,
+  // which names the transformation by its literal id, would stop resolving to this descriptor.
   it('should use every field value as the key when no field is configured', async () => {
     const testSeries = toDataFrame({
       name: 'A',
@@ -177,6 +180,7 @@ describe('Deduplicate rows transformer', () => {
       options: {},
     };
 
+    expect(DataTransformerID.deduplicateRows).toBe('deduplicateRows');
     expect(deduplicateRowsTransformer.defaultOptions).toEqual({ keep: 'first' });
 
     await expect(transformDataFrame([cfg], [testSeries])).toEmitValuesWith((received) => {
