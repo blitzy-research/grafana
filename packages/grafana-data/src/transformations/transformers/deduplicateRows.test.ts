@@ -75,7 +75,10 @@ describe('Deduplicate rows transformer', () => {
     });
   });
 
-  // Empty options also prove `defaultOptions` participates: the merged `keep` must resolve to 'first'.
+  // Running with `options: {}` is the behavioural oracle for full-row keying, but it cannot on its own
+  // guard the descriptor's documented default: the transformer independently normalises every `keep`
+  // other than 'last' to first-wins, so deleting `defaultOptions` would leave the oracle green. Pinning
+  // `defaultOptions` exactly is what holds that half of the contract.
   it('should use every field value as the key when no field is configured', async () => {
     const testSeries = toDataFrame({
       name: 'A',
@@ -90,6 +93,8 @@ describe('Deduplicate rows transformer', () => {
       options: {},
     };
 
+    expect(deduplicateRowsTransformer.defaultOptions).toEqual({ keep: 'first' });
+
     await expect(transformDataFrame([cfg], [testSeries])).toEmitValuesWith((received) => {
       const result = received[0];
       const expected: Field[] = [
@@ -102,8 +107,9 @@ describe('Deduplicate rows transformer', () => {
     });
   });
 
-  // The expectations below deliberately omit `state`, which fields built by `toDataFrame` never carry.
-  // Only returning the original frame reference satisfies that, so this asserts passthrough identity.
+  // The expectations below deliberately omit `state`, which fields built by `toDataFrame` never carry, so
+  // any rebuild would fail them. That is necessary but not sufficient for the passthrough contract: a clone
+  // whose fields happened to stay state-free would still satisfy it, so identity is also asserted directly.
   it('should return the frame unchanged when the configured field does not exist', async () => {
     const testSeries = getTestSeries();
 
@@ -122,6 +128,7 @@ describe('Deduplicate rows transformer', () => {
         { name: 'value', type: FieldType.number, values: [10, 10, 20, 10, 20], config: {} },
       ];
 
+      expect(result[0]).toBe(testSeries);
       expect(result[0].fields).toEqual(expected);
       expect(result[0].length).toBe(5);
     });
@@ -203,7 +210,9 @@ describe('Deduplicate rows transformer', () => {
     });
   });
 
-  // Both frames travel through one call, so this also proves keys never span frames.
+  // Both no-op short-circuits are proved by reference identity. Neither reaches the keying structure though,
+  // so the overlapping-key pair that follows is what makes cross-frame leakage observable: shared key state
+  // would judge the second frame's rows against the first frame's and emit ['b','b'] / [500, 500] instead.
   it('should return duplicate-free frames and empty frames unchanged', async () => {
     const uniqueSeries = toDataFrame({
       name: 'A',
@@ -227,6 +236,41 @@ describe('Deduplicate rows transformer', () => {
       expect(result[0].length).toBe(3);
       expect(result[1]).toBe(emptySeries);
       expect(result[1].length).toBe(0);
+    });
+
+    // Both row keys, (a, 200) and (b, 500), occur in both frames, and each frame retains them at a
+    // different index, so only per-frame key state can produce both expectations below.
+    const firstSeries = toDataFrame({
+      name: 'C',
+      fields: [
+        { name: 'host', type: FieldType.string, values: ['a', 'a', 'b'] },
+        { name: 'code', type: FieldType.number, values: [200, 200, 500] },
+      ],
+    });
+
+    const secondSeries = toDataFrame({
+      name: 'D',
+      fields: [
+        { name: 'host', type: FieldType.string, values: ['b', 'a', 'b'] },
+        { name: 'code', type: FieldType.number, values: [500, 200, 500] },
+      ],
+    });
+
+    await expect(transformDataFrame([cfg], [firstSeries, secondSeries])).toEmitValuesWith((received) => {
+      const result = received[0];
+      const expectedFirst: Field[] = [
+        { name: 'host', type: FieldType.string, state: { calcs: undefined }, values: ['a', 'b'], config: {} },
+        { name: 'code', type: FieldType.number, state: { calcs: undefined }, values: [200, 500], config: {} },
+      ];
+      const expectedSecond: Field[] = [
+        { name: 'host', type: FieldType.string, state: { calcs: undefined }, values: ['b', 'a'], config: {} },
+        { name: 'code', type: FieldType.number, state: { calcs: undefined }, values: [500, 200], config: {} },
+      ];
+
+      expect(result[0].fields).toEqual(expectedFirst);
+      expect(result[0].length).toBe(2);
+      expect(result[1].fields).toEqual(expectedSecond);
+      expect(result[1].length).toBe(2);
     });
   });
 });
