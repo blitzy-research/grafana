@@ -49,11 +49,8 @@ describe('Deduplicate rows transformer', () => {
       expect(result[0].length).toBe(2);
     });
 
-    // Inspecting only the returned frame leaves two further obligations of this very same keep-first path
-    // unobserved: the caller's frame must survive untouched, and the row-aligned `nanos` companion must be
-    // re-selected by the retained indices rather than sliced or handed back at full length. Fields built by
-    // `toDataFrame` carry neither `nanos` nor `state`, so the richer frame below supplies both alongside
-    // `labels` and a populated `config`.
+    // This richer fixture exercises the rest of the keep-first contract: non-contiguous `nanos` selection,
+    // metadata preservation, cached-calculation invalidation, and input immutability.
     const metaSeries = toDataFrame({
       name: 'A',
       fields: [
@@ -123,8 +120,7 @@ describe('Deduplicate rows transformer', () => {
       expect(timeField.nanos).not.toBe(originalNanos);
       expect(timeField.state).not.toBe(originalState);
 
-      // ...and the caller's frame still reads exactly as it did before the transformation ran, cached
-      // calcs included.
+      // The caller-owned frame remains unchanged, including its cached calculations.
       expect(metaSeries.length).toBe(4);
       expect(metaSeries.fields[0].values).toEqual([100, 100, 200, 200]);
       expect(metaSeries.fields[0].nanos).toEqual([11, 22, 33, 44]);
@@ -134,7 +130,6 @@ describe('Deduplicate rows transformer', () => {
     });
   });
 
-  // Retains the highest original index per key, yet still emits ascending: rows 3 and 4, not 4 and 3.
   it('should keep the last occurrence when deduplicating by field', async () => {
     const testSeries = getTestSeries();
 
@@ -159,13 +154,10 @@ describe('Deduplicate rows transformer', () => {
     });
   });
 
-  // Running with `options: {}` is the behavioural oracle for full-row keying, but it cannot on its own
-  // guard the descriptor's documented default: the transformer independently normalises every `keep`
-  // other than 'last' to first-wins, so deleting `defaultOptions` would leave the oracle green. Pinning
-  // `defaultOptions` exactly is what holds that half of the contract. The serialised identifier needs the
-  // same treatment for the same reason: every case in this suite builds its config from the enum member,
-  // so that member's value could be edited without reddening a single oracle — while a saved dashboard,
-  // which names the transformation by its literal id, would stop resolving to this descriptor.
+  // Two descriptor contracts need independent assertions here. The transformer normalises every `keep`
+  // other than 'last' to first-wins internally, so the emitted rows alone cannot verify `defaultOptions`.
+  // Every config in this suite is built from the enum member, so the literal serialised id — the form a
+  // saved dashboard uses — is likewise only pinned by asserting it directly.
   it('should use every field value as the key when no field is configured', async () => {
     const testSeries = toDataFrame({
       name: 'A',
@@ -195,9 +187,9 @@ describe('Deduplicate rows transformer', () => {
     });
   });
 
-  // The expectations below deliberately omit `state`, which fields built by `toDataFrame` never carry, so
-  // any rebuild would fail them. That is necessary but not sufficient for the passthrough contract: a clone
-  // whose fields happened to stay state-free would still satisfy it, so identity is also asserted directly.
+  // Two independent protections cover the passthrough contract. The expectations omit `state`, which fields
+  // built by `toDataFrame` never carry, so the reconstruction path — which always adds `state` — fails them.
+  // The identity assertion then rejects the remaining hole: a clone whose fields stayed state-free.
   it('should return the frame unchanged when the configured field does not exist', async () => {
     const testSeries = getTestSeries();
 
@@ -222,8 +214,9 @@ describe('Deduplicate rows transformer', () => {
     });
   });
 
-  // Regression guard the `keep: 'last'` oracle above cannot provide: here the elected owners are rows
-  // 3 then 2 in key-first-appearance order, so emitting them unsorted would yield ['a','b'] / [4, 3].
+  // In this fixture the elected owners are rows 3 then 2 in key-first-appearance order, so emitting them
+  // in that order would yield ['a','b'] / [4, 3]. The expectation below is rows 2 then 3, which is what
+  // proves emission is restored to ascending original-index order.
   it('should emit kept rows in ascending original order when keeping the last occurrence', async () => {
     const testSeries = toDataFrame({
       name: 'A',
@@ -253,7 +246,6 @@ describe('Deduplicate rows transformer', () => {
     });
   });
 
-  // Keys compare raw values, so `1` never collides with `'1'` the way a joined string key would.
   it('should treat values of different types as distinct row keys', async () => {
     const testSeries = toDataFrame({
       name: 'A',
@@ -298,9 +290,6 @@ describe('Deduplicate rows transformer', () => {
     });
   });
 
-  // Both no-op short-circuits are proved by reference identity. Neither reaches the keying structure though,
-  // so the overlapping-key pair that follows is what makes cross-frame leakage observable: shared key state
-  // would judge the second frame's rows against the first frame's and emit ['b','b'] / [500, 500] instead.
   it('should return duplicate-free frames and empty frames unchanged', async () => {
     const uniqueSeries = toDataFrame({
       name: 'A',
